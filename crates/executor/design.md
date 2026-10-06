@@ -348,6 +348,26 @@ let pool = scheduler.buffer_pool(
 forward(&scheduler, &source, &destination, &pool, &cancellation).await?;
 ```
 
+### Example: prepared accept followed by receive
+
+```rust
+let accept = scheduler.prepare_socket_accept(&listener);
+
+let read = scheduler.prepare_socket_recv(
+    accept.socket(),
+    vec![0; 4096],
+    RecvFlags::empty(),
+);
+
+let outcomes = scheduler
+    .submit(accept.link(read), &cancellation)
+    .await;
+```
+
+`accept.socket()` is proposed syntax for an owned, typed reference to the socket that accept will produce. It is not an already-accepted socket or a borrow that would prevent moving the prepared accept into the chain. The receive starts only after accept succeeds; a failed accept skips it. Outcomes must preserve the accepted socket even if the receive fails or is skipped, and return the receive buffer with its partial byte count or error.
+
+Unlike forwarding a selected receive buffer, this dependency has a native io\_uring implementation target: direct accept into a reserved, known descriptor slot, followed by a linked receive using that slot. The Rust output-reference API and its type/lifetime rules are still proposed and unimplemented. They must prevent a consumer from running before its producing accept, or without that dependency. See the direct-descriptor linking section below.
+
 ### Example: prepared write followed by synchronization
 
 ```rust
@@ -405,6 +425,20 @@ Linking supplies ordering without transactional rollback. Kernel links do not au
 io\_uring's `IOSQE_IO_LINK` starts a successor after its predecessor completes, and breaks the chain on errors or unexpected results, including short reads. Unstarted successors then complete with `-ECANCELED`. `IOSQE_IO_HARDLINK` permits continuation despite completion errors, although submission failures can still break the chain. These dependency policies are distinct from task shutdown. See [kernel link semantics](https://man7.org/linux/man-pages/man2/io_uring_enter.2.html).
 
 Use native linking only when its behaviour matches the defined chain contract. A fallback must apply the same outcome and continuation rules; submitting independent, unlinked operations concurrently would lose the ordering guarantee.
+
+### Direct-descriptor linking for accept and receive
+
+io\_uring supports a native accept-to-receive chain when the accepted socket is installed into a known slot in the ring's registered file table. This uses [io\_uring\_prep\_accept\_direct](https://man7.org/linux/man-pages/man3/io_uring_prep_accept_direct.3.html), rather than expecting an ordinary accept's returned OS descriptor to be substituted into the next SQE.
+
+The backend can reserve an unused slot before submission, prepare accept with that explicit `file_index` and `IOSQE_IO_LINK`, then prepare receive with its `fd` set to the same slot and `IOSQE_FIXED_FILE` set. Both requests are submitted as one chain. The receive resolves its socket after accept succeeds, allowing execution without userspace processing the accept completion first.
+
+This requires `IORING_FEAT_LINKED_FILE`, available since Linux 5.17, which defers descriptor lookup for dependent requests until they execute. The backend must also establish direct-accept support and initialize a suitable registered file table. See [dependent descriptor lookup](https://man7.org/linux/man-pages/man2/io_uring_setup.2.html).
+
+Use an explicitly reserved slot for this native mapping. `IORING_FILE_INDEX_ALLOC` chooses an index dynamically and reports it in the accept completion, so it does not provide the known index needed by a prebuilt successor. An explicit slot must be empty and exclusively reserved: direct accept can replace an existing entry. Direct descriptors are private to their ring, not ordinary OS descriptor numbers.
+
+The prepared chain must retain the slot through all dependent access and safely release it when the chain is abandoned. If accept succeeds but receive fails or is cancelled, ownership of the accepted socket must still be resolved; skipping the receive does not undo accept. A portable fallback can keep the accepted resource in chain state and pass it to the receive after completion.
+
+This is a specific resource dependency with a known native target, not general substitution of arbitrary completion results into later SQEs. It does not implement the hypothetical `with_previous_buffer` handoff of a selected buffer and actual received length.
 
 ### Backend implementations
 

@@ -8,6 +8,9 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 
 /// Portable socket operations, selected through the concrete implementation.
 ///
+/// This trait is implemented by schedulers. Its associated [`Socket::Socket`]
+/// and [`Socket::Listener`] types represent their registered resources.
+///
 /// Registrations belong to their creating implementation. Keep a socket's
 /// registration across operations and worker migration. Implementations must
 /// return an error when a resource belongs to an incompatible runtime instance.
@@ -17,7 +20,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 /// bytes, and a cancelled write can transmit bytes. Implementations retain any
 /// kernel-accessible memory until the operation finishes. Await completion when
 /// the amount transferred matters. No asynchronous cleanup is promised by Drop.
-pub trait Network: Send + Sync {
+pub trait Socket: Send + Sync {
     type Socket: Send + Sync;
     type Listener: Send + Sync;
 

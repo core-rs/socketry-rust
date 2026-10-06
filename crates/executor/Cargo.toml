@@ -6,7 +6,7 @@ description = "Owned asynchronous tasks and a work-stealing future scheduler"
 license.workspace = true
 repository.workspace = true
 readme = "readme.md"
-include = ["Cargo.toml", "license.md", "readme.md", "src/**", "examples/**"]
+include = ["Cargo.toml", "license.md", "readme.md", "design.md", "src/**", "examples/**"]
 
 [lib]
 name = "socketry_executor"

@@ -11,7 +11,7 @@ fn queued_request_returns_its_buffer_if_the_selector_exits() {
     let request = Request {
         identifier: 0,
         resource: Resource::File(
-            Arc::new(File::open(std::env::current_exe().unwrap()).unwrap()),
+            Arc::new(StdFile::open(std::env::current_exe().unwrap()).unwrap()),
             0,
         ),
         buffer,

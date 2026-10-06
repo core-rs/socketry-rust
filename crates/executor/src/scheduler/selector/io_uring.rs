@@ -15,13 +15,13 @@
 //! channel per operation. It does not yet pool operation records or register
 //! buffers with the kernel.
 use super::readiness::{self, Listener, Socket};
-use crate::scheduler::{BufferResult, Clock, FileIo, Interest, Network};
+use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
 use event_listener::{Event as CompletionEvent, Listener as _};
 use futures_channel::oneshot;
 use io_uring::{IoUring, opcode, squeue, types};
 use polling::{Event, Events, Poller};
 use std::collections::{HashMap, VecDeque};
-use std::fs::File;
+use std::fs::File as StdFile;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
@@ -105,7 +105,7 @@ where
 
 enum Resource {
     Socket(Socket),
-    File(Arc<File>, u64),
+    File(Arc<StdFile>, u64),
 }
 
 struct Request {
@@ -430,7 +430,7 @@ impl Selector {
     }
 }
 
-impl Network for Selector {
+impl SocketOperations for Selector {
     type Socket = Socket;
     type Listener = Listener;
 
@@ -472,12 +472,17 @@ impl Network for Selector {
     }
 }
 
-impl FileIo for Selector {
-    async fn file_read_at(&self, file: Arc<File>, buffer: Vec<u8>, offset: u64) -> BufferResult {
+impl File for Selector {
+    async fn file_read_at(&self, file: Arc<StdFile>, buffer: Vec<u8>, offset: u64) -> BufferResult {
         self.operation(Resource::File(file, offset), buffer, false)
             .await
     }
-    async fn file_write_at(&self, file: Arc<File>, buffer: Vec<u8>, offset: u64) -> BufferResult {
+    async fn file_write_at(
+        &self,
+        file: Arc<StdFile>,
+        buffer: Vec<u8>,
+        offset: u64,
+    ) -> BufferResult {
         self.operation(Resource::File(file, offset), buffer, true)
             .await
     }

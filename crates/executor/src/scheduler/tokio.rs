@@ -7,7 +7,7 @@
 //! runtime. Dropping it closes admission and requests cancellation. Await
 //! shutdown to join task destruction. Socketry's Task::current and
 //! Scheduler::current describe Socketry execution, not Tokio tasks.
-use super::{BufferResult, Clock, FileIo, Interest, Network};
+use super::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
 use crate::owner::Owner;
 use crate::{Spawn, SpawnError, TaskError};
 use ::tokio::runtime::Handle;
@@ -15,7 +15,7 @@ use ::tokio::task::{AbortHandle, JoinHandle};
 use pin_project_lite::pin_project;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::File as StdFile;
 use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -619,7 +619,7 @@ impl<FutureType: Future> Future for InRuntime<FutureType> {
     }
 }
 
-impl Network for SchedulerHandle {
+impl SocketOperations for SchedulerHandle {
     type Socket = Socket;
     type Listener = Listener;
 
@@ -706,12 +706,17 @@ impl Network for SchedulerHandle {
     }
 }
 
-impl FileIo for SchedulerHandle {
-    async fn file_read_at(&self, file: Arc<File>, buffer: Vec<u8>, offset: u64) -> BufferResult {
+impl File for SchedulerHandle {
+    async fn file_read_at(&self, file: Arc<StdFile>, buffer: Vec<u8>, offset: u64) -> BufferResult {
         self.file_operation(file, buffer, offset, false).await
     }
 
-    async fn file_write_at(&self, file: Arc<File>, buffer: Vec<u8>, offset: u64) -> BufferResult {
+    async fn file_write_at(
+        &self,
+        file: Arc<StdFile>,
+        buffer: Vec<u8>,
+        offset: u64,
+    ) -> BufferResult {
         self.file_operation(file, buffer, offset, true).await
     }
 }
@@ -719,7 +724,7 @@ impl FileIo for SchedulerHandle {
 impl SchedulerHandle {
     async fn file_operation(
         &self,
-        file: Arc<File>,
+        file: Arc<StdFile>,
         buffer: Vec<u8>,
         offset: u64,
         write: bool,
@@ -737,9 +742,9 @@ impl SchedulerHandle {
             .spawn_blocking(move || {
                 with_file_buffer(&operation_buffer, |buffer| {
                     if write {
-                        super::file::write_at(&file, buffer, offset)
+                        super::positioned_file::write_at(&file, buffer, offset)
                     } else {
-                        super::file::read_at(&file, buffer, offset)
+                        super::positioned_file::read_at(&file, buffer, offset)
                     }
                 })
             })
@@ -811,7 +816,7 @@ impl Spawn for Barrier {
     }
 }
 
-impl Network for Scheduler {
+impl SocketOperations for Scheduler {
     type Socket = Socket;
     type Listener = Listener;
     fn register_socket(&self, socket: TcpStream) -> io::Result<Socket> {
@@ -836,11 +841,16 @@ impl Network for Scheduler {
         self.handle.io_wait(socket, interest).await
     }
 }
-impl FileIo for Scheduler {
-    async fn file_read_at(&self, file: Arc<File>, buffer: Vec<u8>, offset: u64) -> BufferResult {
+impl File for Scheduler {
+    async fn file_read_at(&self, file: Arc<StdFile>, buffer: Vec<u8>, offset: u64) -> BufferResult {
         self.handle.file_read_at(file, buffer, offset).await
     }
-    async fn file_write_at(&self, file: Arc<File>, buffer: Vec<u8>, offset: u64) -> BufferResult {
+    async fn file_write_at(
+        &self,
+        file: Arc<StdFile>,
+        buffer: Vec<u8>,
+        offset: u64,
+    ) -> BufferResult {
         self.handle.file_write_at(file, buffer, offset).await
     }
 }

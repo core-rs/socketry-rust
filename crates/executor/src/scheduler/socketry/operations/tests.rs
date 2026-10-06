@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::{DefaultSelector, Scheduler, check_initialized_open, check_open};
-use crate::scheduler::{Clock, FileIo, Interest, Network};
+use crate::scheduler::{Clock, File, Interest, Socket};
 use std::fs::OpenOptions;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};

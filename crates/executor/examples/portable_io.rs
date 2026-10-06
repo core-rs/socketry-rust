@@ -3,14 +3,14 @@
 
 //! The same TCP exchange, compiled against Socketry or Tokio.
 #[cfg(any(feature = "native", feature = "tokio"))]
-use socketry_executor::{Network, Spawn};
+use socketry_executor::{Socket, Spawn};
 #[cfg(any(feature = "native", feature = "tokio"))]
 use std::{io, net::TcpListener};
 
 #[cfg(any(feature = "native", feature = "tokio"))]
 async fn exchange<SchedulerType>(scheduler: SchedulerType) -> io::Result<u8>
 where
-    SchedulerType: Network + Spawn + Clone + 'static,
+    SchedulerType: Socket + Spawn + Clone + 'static,
 {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;

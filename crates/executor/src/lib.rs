@@ -9,12 +9,18 @@
 #![doc = include_str!("../readme.md")]
 
 mod barrier;
+mod cancellation;
+mod cancelled;
+mod defer_cancel;
 mod owner;
 pub mod scheduler;
 mod task;
 mod worker;
 
 pub use barrier::Barrier;
+pub use cancellation::Cancellation;
+pub use cancelled::Cancelled;
+pub use defer_cancel::defer_cancel;
 pub use owner::{Spawn, SpawnError};
-pub use scheduler::{BufferResult, Clock, FileIo, Interest, Network, Scheduler, SchedulerHandle};
+pub use scheduler::{BufferResult, Clock, File, Interest, Scheduler, SchedulerHandle, Socket};
 pub use task::{Task, TaskError, TaskHandle, yield_now};

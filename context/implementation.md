@@ -26,9 +26,20 @@ This guide describes the current implementation and its boundaries. Read [the de
 - Parents must explicitly await barriers for joined cleanup. Automatic waiting for descendants after parent destruction is not implemented.
 - Scheduler Drop cancels all tasks, joining threads outside a worker. On a worker it requests shutdown without joining. Surviving handles reject spawn.
 
+## Cooperative cancellation
+
+- `cancellation.rs`, `cancelled.rs`, and `defer_cancel.rs` implement runtime-independent primitives, exported by both `socketry-executor` and the `socketry` facade.
+- Cancellation clones share state. Children receive ancestor cancellation, retain ancestors after intermediate handles are dropped, and never cancel parents or siblings. Dropping signals does not cancel work. `Cancellation::never()` allocates nothing; its children are independent cancellable signals.
+- Each family serializes child registration and cancellation with one mutex. Atomic flags support cheap checks. Nodes hold weak child registrations; child destruction unregisters them. Cancellation and exclusively owned ancestor destruction are iterative, avoiding stack exhaustion on deep chains.
+- Register event listeners before checking cancellation to avoid lost notifications. Dropping a wait unregisters its listener. Release all signal locks before invoking wakers so wakeups can reenter cancellation and child registration.
+- defer\_cancel pins the work and its signal wait. Observed cancellation consumes the synchronous callback once, before polling the work again, and the wrapper preserves the work's normal output. Callback panics propagate; dropping the wrapper destroys its future. It does not mask operation signals or intercept task destruction.
+- For graceful shutdown, request cancellation and await task handles or barriers before releasing the owner or shutting down runtime services. Signals express intent rather than completion. There is no forced abort or escalation in this cooperative contract; a supervisor can enforce SIGTERM followed by SIGKILL.
+- Existing Task cancellation, Barrier stopping, and scheduler shutdown retain their destruction semantics. Signal handlers, cooperative runtime shutdown and cancellation inputs on I/O methods are not yet integrated.
+
 ## I/O and runtime boundaries
 
-- `scheduler.rs` re-exports Network, FileIo, Interest and Clock from `scheduler/network.rs`, `file_io.rs`, `interest.rs` and `clock.rs`. Operations return concrete Send futures; portable consumers receive the required capabilities.
+- `scheduler.rs` re-exports Socket, File, Interest and Clock from `scheduler/socket.rs`, `file.rs`, `interest.rs` and `clock.rs`. Operations return concrete Send futures; portable consumers receive the required capabilities.
+- `File` names the scheduler capability, while `std::fs::File` remains the resource type. Use the `StdFile` alias where both names are imported. Blocking positioned file helpers live in `scheduler/positioned_file.rs`.
 - `scheduler/socketry.rs` owns the executor; `socketry/operations.rs` forwards capabilities to its lazily initialized, compile-time selected selector.
 - `scheduler/selector/` contains readiness, epoll, kqueue, iocp and io\_uring. Platform readiness modules share async-io's persistent registrations and process-wide reactor. Registered sockets remain usable as tasks migrate.
 - Default feature `native` provides TCP, positioned files and sleep. Feature `io-uring` selects Linux completion reads/writes; other supported platforms retain readiness. Feature `tokio` enables the separate runtime adapter. No default features builds the executor and contracts without native I/O.

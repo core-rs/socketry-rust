@@ -5,8 +5,8 @@
 
 mod support;
 
-use socketry_executor::{Clock, FileIo, Interest, Network, Spawn};
-use std::fs::{File, OpenOptions};
+use socketry_executor::{Clock, File, Interest, Socket, Spawn};
+use std::fs::{File as StdFile, OpenOptions};
 use std::future::{Future, poll_fn};
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -57,7 +57,7 @@ fn error_kind<ResultType>(result: io::Result<ResultType>) -> io::ErrorKind {
 
 async fn round_trip<SchedulerType>(scheduler: SchedulerType)
 where
-    SchedulerType: Network + Spawn + Clock + Clone + 'static,
+    SchedulerType: Socket + Spawn + Clock + Clone + 'static,
 {
     let (listener, address) = listening_socket();
     let listener = scheduler.register_listener(listener).unwrap();
@@ -106,7 +106,7 @@ where
 
 async fn cancel_pending_read<SchedulerType>(scheduler: &SchedulerType)
 where
-    SchedulerType: Network + Clock,
+    SchedulerType: Socket + Clock,
 {
     let (client, server) = socket_pair();
     let socket = scheduler.register_socket(client).unwrap();
@@ -128,7 +128,7 @@ where
 
 async fn concurrent_reads<SchedulerType>(scheduler: SchedulerType)
 where
-    SchedulerType: Network + Spawn + Clone + 'static,
+    SchedulerType: Socket + Spawn + Clone + 'static,
 {
     let (client, mut server) = socket_pair();
     let socket = Arc::new(scheduler.register_socket(client).unwrap());
@@ -167,7 +167,7 @@ impl Drop for TemporaryFile {
     }
 }
 
-async fn positioned_files<SchedulerType: FileIo>(scheduler: &SchedulerType) {
+async fn positioned_files<SchedulerType: File>(scheduler: &SchedulerType) {
     static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
         "socketry-io-{}-{}",
@@ -199,7 +199,7 @@ async fn positioned_files<SchedulerType: FileIo>(scheduler: &SchedulerType) {
         .await;
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
     assert_eq!(buffer.as_ptr(), allocation);
-    let read_only = Arc::new(File::open(&path).unwrap());
+    let read_only = Arc::new(StdFile::open(&path).unwrap());
     let (result, returned) = scheduler.file_write_at(read_only, buffer, 0).await;
     assert!(result.is_err());
     assert_eq!(returned.as_ptr(), allocation);
@@ -346,7 +346,7 @@ mod native {
         let socket = handle.register_socket(client).unwrap();
         let (raw_listener, address) = listening_socket();
         let registered_listener = handle.register_listener(raw_listener).unwrap();
-        let file = Arc::new(File::open(std::env::current_exe().unwrap()).unwrap());
+        let file = Arc::new(StdFile::open(std::env::current_exe().unwrap()).unwrap());
         scheduler.shutdown();
 
         let (client, _peer) = socket_pair();
@@ -637,7 +637,7 @@ mod tokio_adapter {
         let socket = handle.register_socket(client).unwrap();
         let (listener, address) = listening_socket();
         let listener = handle.register_listener(listener).unwrap();
-        let file = Arc::new(File::open(std::env::current_exe().unwrap()).unwrap());
+        let file = Arc::new(StdFile::open(std::env::current_exe().unwrap()).unwrap());
         runtime.block_on(scheduler.shutdown());
 
         let (new_socket, _) = socket_pair();

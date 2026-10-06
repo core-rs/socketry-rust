@@ -8,7 +8,7 @@ pub mod selector;
 pub mod socketry;
 
 #[cfg(any(feature = "native", feature = "tokio"))]
-mod file;
+mod positioned_file;
 
 #[cfg(feature = "tokio")]
 pub mod tokio;
@@ -26,11 +26,11 @@ pub type BufferResult = (io::Result<usize>, Vec<u8>);
 mod interest;
 pub use interest::Interest;
 
-mod network;
-pub use network::Network;
+mod socket;
+pub use socket::Socket;
 
-mod file_io;
-pub use file_io::FileIo;
+mod file;
+pub use file::File;
 
 mod clock;
 pub use clock::Clock;

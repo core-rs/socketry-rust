@@ -62,6 +62,18 @@ Distinguish cooperative cancellation, dropping a future, and waiting for termina
 
 Contextual APIs such as `Scheduler::current()` can remain conveniences. Set and restore their context around every poll, including when polling panics; do not assume a future always runs on the thread where it was created.
 
+### Cooperative cancellation
+
+The shutdown direction is cooperative: request graceful termination and let the application continue polling until its work completes. There is no default forced abort, second-request escalation, or grace-period deadline. If a process refuses to stop, its supervisor can follow SIGTERM with SIGKILL.
+
+`Cancellation` is implemented in `socketry-executor` and re-exported by `socketry`. It works independently of the executor. Clones share a persistent signal; child signals receive ancestor cancellation without propagating it to parents or siblings. This explicit cancellation tree expresses service boundaries without imposing an implicit task hierarchy. Dropping a signal does not cancel it. Rust destructors release retained resources, but asynchronous draining still requires live futures and explicit completion tracking through task handles or barriers.
+
+`cancel()` signals intent; `check()` returns `Cancelled` at cooperative cancellation points; `cancelled().await` suspends using wakers. `never()` represents work without cooperative cancellation. Passing signals explicitly to future I/O operations remains planned; current Socket, File, and Clock signatures are unchanged.
+
+`defer_cancel(&signal, future, on_cancel)` observes the signal, invokes a synchronous shutdown callback once, and keeps awaiting the future's normal output. The callback tells the protected work to stop accepting new work or begin draining. Async cleanup belongs in that future, with cancellation inputs that allow it to finish. The wrapper uses standard future polling, handles pinned futures, and neither busy-waits nor prevents its own destruction.
+
+The intended application sequence is to request application or service cancellation, await task/group completion while runtime services remain available, then release the owner and scheduler. Process signal installation and cooperative scheduler shutdown are future integration work. Existing Task cancellation, Barrier stopping and scheduler shutdown still destroy futures and bypass deferred async cleanup; they are distinct from cooperative cancellation.
+
 ### Current executor
 
 The implementation currently lives in socketry-executor. async-task owns pinned future storage and its runnable/waker state. Socketry supplies thread management, ownership, cancellation flags, task identity and queue selection. Each worker has a FIFO Crossbeam queue plus an incoming injector for remote wakeups. External submissions enter a global injector; worker submissions go to that worker's queue. Wakeups target the last worker. Only workers without their own work steal from other local queues or incoming queues.
@@ -84,7 +96,7 @@ Tokio and futures-io expose different AsyncRead and AsyncWrite traits. `tokio-ut
 
 Entering a Tokio runtime context provides access to its services; entering alone does not drive the runtime. Some mixed execution is possible when the required services are running, but must be established for the concrete APIs being used. Do not advertise universal Tokio compatibility from a Waker or stream adapter alone.
 
-The optional `scheduler::tokio` adapter implements Network, FileIo, Clock and Spawn against an existing runtime. It preserves direct-child barrier ownership and joins owned task destruction on asynchronous shutdown. The same generic TCP program runs on Socketry and Tokio. The adapter scopes runtime context to individual polls when registering resources; its futures can also be polled by Socketry workers while Tokio drives the underlying services. Socketry contextual lookups still identify Socketry execution; portable code passes handles explicitly.
+The optional `scheduler::tokio` adapter implements Socket, File, Clock and Spawn against an existing runtime. It preserves direct-child barrier ownership and joins owned task destruction on asynchronous shutdown. The same generic TCP program runs on Socketry and Tokio. The adapter scopes runtime context to individual polls when registering resources; its futures can also be polled by Socketry workers while Tokio drives the underlying services. Socketry contextual lookups still identify Socketry execution; portable code passes handles explicitly.
 
 For existing libraries tied to Tokio, either keep their work on Tokio and bridge owned messages/results, or provide the particular trait adapter they consume. Avoid a broad imitation of Tokio's API.
 
@@ -157,8 +169,8 @@ The algorithm's existing Ruby performance motivates the port. Rust performance c
 
 1. Record boundaries and reusable Rust conventions (implemented).
 2. Replace stackful execution with async-task and Crossbeam worker queues (implemented). Keep the coroutine prototype in its saved branch.
-3. Implement explicit owners, barriers, cancellation and shutdown (implemented for direct children). Automatic descendant draining remains future work.
-4. Establish minimal clock and I/O contracts with concrete consumers (implemented with Network, FileIo, Clock and a portable TCP example).
+3. Implement explicit owners, barriers, cancellation and shutdown (implemented for direct children). Runtime-independent cooperative signals and deferred cancellation are implemented; cooperative scheduler shutdown, cancellation-aware I/O, and automatic descendant draining remain future work.
+4. Establish minimal clock and I/O contracts with concrete consumers (implemented with Socket, File, Clock and a portable TCP example).
 5. Implement native readiness and the Tokio adapter, running the same consumers with both (implemented). Native sleep uses async-io until the timer port.
 6. Implement io\_uring's owned-buffer lifecycle, socket/file operations, cancellation and runtime probing (implemented). Improve operation reuse, buffer registration and submission backpressure in subsequent work.
 7. Port the timer queue with upstream attribution and deterministic verification (implemented in `socketry-timers`). Integrate a driven sleep future with the scheduler in subsequent work; see the [timer package](../crates/timers/readme.md) and [benchmarks](../crates/timers/context/benchmarks.md).

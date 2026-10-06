@@ -4,8 +4,8 @@
 //! Native selector operations exposed by Socketry schedulers and handles.
 use super::{Scheduler, SchedulerHandle};
 use crate::scheduler::selector::DefaultSelector;
-use crate::scheduler::{BufferResult, Clock, FileIo, Interest, Network};
-use std::fs::File;
+use crate::scheduler::{BufferResult, Clock, File, Interest, Socket};
+use std::fs::File as StdFile;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -75,9 +75,9 @@ impl SchedulerHandle {
     }
 }
 
-impl Network for SchedulerHandle {
-    type Socket = <DefaultSelector as Network>::Socket;
-    type Listener = <DefaultSelector as Network>::Listener;
+impl Socket for SchedulerHandle {
+    type Socket = <DefaultSelector as Socket>::Socket;
+    type Listener = <DefaultSelector as Socket>::Listener;
 
     fn register_socket(&self, socket: TcpStream) -> io::Result<Self::Socket> {
         self.selector()?.register_socket(socket)
@@ -114,15 +114,20 @@ impl Network for SchedulerHandle {
     }
 }
 
-impl FileIo for SchedulerHandle {
-    async fn file_read_at(&self, file: Arc<File>, buffer: Vec<u8>, offset: u64) -> BufferResult {
+impl File for SchedulerHandle {
+    async fn file_read_at(&self, file: Arc<StdFile>, buffer: Vec<u8>, offset: u64) -> BufferResult {
         match self.selector() {
             Ok(selector) => selector.file_read_at(file, buffer, offset).await,
             Err(error) => (Err(error), buffer),
         }
     }
 
-    async fn file_write_at(&self, file: Arc<File>, buffer: Vec<u8>, offset: u64) -> BufferResult {
+    async fn file_write_at(
+        &self,
+        file: Arc<StdFile>,
+        buffer: Vec<u8>,
+        offset: u64,
+    ) -> BufferResult {
         match self.selector() {
             Ok(selector) => selector.file_write_at(file, buffer, offset).await,
             Err(error) => (Err(error), buffer),
@@ -137,9 +142,9 @@ impl Clock for SchedulerHandle {
     }
 }
 
-impl Network for Scheduler {
-    type Socket = <SchedulerHandle as Network>::Socket;
-    type Listener = <SchedulerHandle as Network>::Listener;
+impl Socket for Scheduler {
+    type Socket = <SchedulerHandle as Socket>::Socket;
+    type Listener = <SchedulerHandle as Socket>::Listener;
 
     fn register_socket(&self, socket: TcpStream) -> io::Result<Self::Socket> {
         self.handle.register_socket(socket)
@@ -170,12 +175,17 @@ impl Network for Scheduler {
     }
 }
 
-impl FileIo for Scheduler {
-    async fn file_read_at(&self, file: Arc<File>, buffer: Vec<u8>, offset: u64) -> BufferResult {
+impl File for Scheduler {
+    async fn file_read_at(&self, file: Arc<StdFile>, buffer: Vec<u8>, offset: u64) -> BufferResult {
         self.handle.file_read_at(file, buffer, offset).await
     }
 
-    async fn file_write_at(&self, file: Arc<File>, buffer: Vec<u8>, offset: u64) -> BufferResult {
+    async fn file_write_at(
+        &self,
+        file: Arc<StdFile>,
+        buffer: Vec<u8>,
+        offset: u64,
+    ) -> BufferResult {
         self.handle.file_write_at(file, buffer, offset).await
     }
 }

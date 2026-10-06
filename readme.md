@@ -38,9 +38,56 @@ See the [executor package](crates/executor/readme.md) for scheduling, ownership,
 cargo run --package socketry-executor --example work_stealing
 ```
 
+## Cooperative cancellation
+
+`Cancellation` signals a shutdown request without destroying futures. Clones share the request; `child()` creates a boundary that receives parent cancellation without cancelling its parent or siblings. Use one root for application shutdown and children for independently stoppable services. Dropping a signal does not cancel it.
+
+Work can await `signal.cancelled()` or use `signal.check()` at explicit cancellation points, returning `Cancelled`. Waiting uses wakers and does not busy-wait. `Cancellation::never()` supplies an allocation-free input for work that cannot be cancelled through its signal.
+
+`defer_cancel(&signal, future, on_cancel)` calls the synchronous callback once when cancellation is observed and continues awaiting the future's normal output. The callback requests graceful shutdown; the future performs asynchronous draining. These primitives work with standard futures on Socketry or Tokio, without a runtime dependency.
+
+```rust
+use socketry::{Cancellation, Scheduler, defer_cancel, yield_now};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let scheduler = Scheduler::with_workers(2)?;
+    let shutdown = Cancellation::new();
+    let server_shutdown = shutdown.child();
+    let server = scheduler.spawn(async move {
+        let drain = Cancellation::new();
+        defer_cancel(&server_shutdown, async {
+            drain.cancelled().await;
+            // Finish accepted work while the scheduler remains available.
+            yield_now().await;
+            42
+        }, || { drain.cancel(); }).await
+    })?;
+
+    shutdown.cancel(); // Request shutdown after receiving a process signal.
+    assert_eq!(scheduler.block_on(server)?, 42);
+    scheduler.shutdown();
+    Ok(())
+}
+```
+
+Cancellation expresses intent; task handles and barriers confirm completion. Keep the scheduler, I/O services, and owners alive while draining. Existing task cancellation, barrier stopping, and scheduler shutdown still destroy futures; `defer_cancel` cannot protect a future from destruction. Signal handling and cancellation inputs on I/O operations are not yet integrated. There is no signal escalation policy: an external supervisor can enforce SIGTERM followed by SIGKILL.
+
 ## Portable I/O and runtime selection
 
-Generic code can accept `Network`, `FileIo`, `Clock`, and `Spawn` capabilities. Socketry and the optional Tokio adapter implement these contracts with concrete future and resource types. Import the traits to call their methods.
+Generic code can accept `Socket`, `File`, `Clock`, and `Spawn` capabilities. Socketry and the optional Tokio adapter implement these contracts with concrete future and resource types. Import the traits to call their methods.
+
+`File` is the scheduler capability trait; `std::fs::File` is the file resource. Alias the resource when using both names:
+
+```rust
+use socketry::File;
+use std::{fs::File as StdFile, io, sync::Arc};
+
+async fn read_prefix<S: File>(scheduler: &S, file: Arc<StdFile>) -> io::Result<Vec<u8>> {
+    let (result, mut buffer) = scheduler.file_read_at(file, vec![0; 4096], 0).await;
+    buffer.truncate(result?);
+    Ok(buffer)
+}
+```
 
 | Cargo configuration | Implementation |
 | --- | --- |

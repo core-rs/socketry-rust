@@ -7,10 +7,10 @@
 //! It remains available while registered resources are alive; Socketry task
 //! shutdown does not shut down that shared reactor. Futures contain no private
 //! coroutine stacks and may be polled on different workers.
-use crate::scheduler::file::{read_at, write_at};
-use crate::scheduler::{BufferResult, Clock, FileIo, Interest, Network};
+use crate::scheduler::positioned_file::{read_at, write_at};
+use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
 use async_io::Async;
-use std::fs::File;
+use std::fs::File as StdFile;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -64,7 +64,7 @@ fn wrap_accepted(
     accepted.map(|(socket, address)| (Socket(Arc::new(socket)), address))
 }
 
-impl Network for Selector {
+impl SocketOperations for Selector {
     type Socket = Socket;
     type Listener = Listener;
 
@@ -108,10 +108,10 @@ impl Network for Selector {
     }
 }
 
-impl FileIo for Selector {
+impl File for Selector {
     async fn file_read_at(
         &self,
-        file: Arc<File>,
+        file: Arc<StdFile>,
         mut buffer: Vec<u8>,
         offset: u64,
     ) -> BufferResult {
@@ -122,7 +122,12 @@ impl FileIo for Selector {
         .await
     }
 
-    async fn file_write_at(&self, file: Arc<File>, buffer: Vec<u8>, offset: u64) -> BufferResult {
+    async fn file_write_at(
+        &self,
+        file: Arc<StdFile>,
+        buffer: Vec<u8>,
+        offset: u64,
+    ) -> BufferResult {
         blocking::unblock(move || {
             let result = write_at(&file, &buffer, offset);
             (result, buffer)

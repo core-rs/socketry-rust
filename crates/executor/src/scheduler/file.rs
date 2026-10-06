@@ -1,62 +1,36 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Blocking positioned file operations shared by selector adapters.
-use std::fs::File;
-use std::io;
+use super::BufferResult;
+use std::fs::File as StdFile;
+use std::future::Future;
+use std::sync::Arc;
 
-pub(crate) fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
-    if offset > i64::MAX as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "file offset exceeds i64::MAX",
-        ));
-    }
-    let operation = || {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            file.read_at(buffer, offset)
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::FileExt;
-            file.seek_read(buffer, offset)
-        }
-    };
-    retry_interrupted(operation)
+/// A scheduler's positioned file operations.
+///
+/// This trait is implemented by schedulers. File resources are [`std::fs::File`];
+/// alias that type as `StdFile` when importing both names.
+///
+/// A regular file does not support a universal
+/// readiness fallback, so implementations use native completion or a blocking
+/// pool. Use ordinary files opened without append mode, not pipes. Offsets
+/// must fit in i64. The Unix implementation leaves the shared cursor unchanged;
+/// the Windows blocking fallback updates it, as std's seek_read/seek_write do.
+///
+/// Buffers and the file remain owned by an in-flight operation even if the
+/// waiting future is dropped. A write can still complete after cancellation.
+pub trait File: Send + Sync {
+    fn file_read_at(
+        &self,
+        file: Arc<StdFile>,
+        buffer: Vec<u8>,
+        offset: u64,
+    ) -> impl Future<Output = BufferResult> + Send;
+
+    fn file_write_at(
+        &self,
+        file: Arc<StdFile>,
+        buffer: Vec<u8>,
+        offset: u64,
+    ) -> impl Future<Output = BufferResult> + Send;
 }
-
-pub(crate) fn write_at(file: &File, buffer: &[u8], offset: u64) -> io::Result<usize> {
-    if offset > i64::MAX as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "file offset exceeds i64::MAX",
-        ));
-    }
-    let operation = || {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            file.write_at(buffer, offset)
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::FileExt;
-            file.seek_write(buffer, offset)
-        }
-    };
-    retry_interrupted(operation)
-}
-
-fn retry_interrupted(mut operation: impl FnMut() -> io::Result<usize>) -> io::Result<usize> {
-    loop {
-        match operation() {
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            result => return result,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests;

@@ -2,6 +2,14 @@
 
 This document records the agreed direction for `socketry-executor`: an explicit scheduler and I/O interface inspired by [Zig 0.16's I/O model](https://ziglang.org/download/0.16.0/release-notes.html#I-O-as-an-Interface), expressed through ordinary Rust futures, capability traits, and cooperative cancellation. It includes proposed interfaces; the implementation status below distinguishes them from APIs that exist today.
 
+## Primary goal
+
+Expose an abstract scheduler and I/O interface with one or more concrete implementations. Generic concurrency primitives and libraries receive an explicit scheduler implementation and build on its primitive operations. Their code should work with native, runtime-adapter, or simulated implementations without depending on concrete runtime types or operating-system resource creation.
+
+Capability traits describe parts of this common interface on the same scheduler type. They let a consumer state the operations it needs while retaining compile-time checking and static dispatch. They must share compatible resource, cancellation, completion, and ownership contracts so higher-level code can compose them through one scheduler dependency.
+
+Task groups, barriers, channels, and protocol helpers belong above the primitive boundary. A group can use dispatch, cooperative cancellation, and task handles; a channel can suspend and wake futures through Rust's standard future/waker contract. Primitives that need deadlines or I/O additionally require the corresponding scheduler capabilities. Higher-level code should not select a runtime or create OS resources directly.
+
 ## Execution model
 
 Use Rust's existing `Future`, `Context`, and `Waker` contracts. A separate computation trait is unnecessary for the current design. Operations construct futures; awaiting them allows the executor to poll them and suspend until a wakeup permits progress. Polling does not mean busy waiting. Selected request operations distinguish waiting for admission from waiting for execution to complete, as described below; constructing their futures does not submit work.
@@ -21,6 +29,16 @@ Keep core traits small and dependable. Implementing a core trait requires workin
 Additional capabilities belong in extension traits where their semantics or platform availability differ. A consumer requiring an extension declares that requirement through its trait bounds. An incompatible scheduler then fails at compile time. For example, `S: File + FileAllocate` illustrates how a consumer might require allocation; `FileAllocate` is a proposed name, not an existing trait or a settled trait boundary.
 
 Do not create one trait per syscall automatically. Group operations around capabilities that real consumers need, and keep inherently platform-specific types and flags in platform extensions.
+
+### Common scheduler dependency and resource creation
+
+Generic code takes a scheduler such as `&S`, with bounds describing the portion of the interface it uses. A task group may require `S: Spawn`; a timed primitive may additionally require `Clock`; an HTTP server may require `Spawn + Socket`. These bounds describe the same chosen scheduler implementation. A named aggregate trait can make a standard bundle convenient once its required capabilities are settled; it should not force a task-only primitive to require file or socket support. The current public `Scheduler` is the concrete native implementation, not an aggregate scheduler trait.
+
+Resource creation belongs inside the corresponding capability. `File` declares an associated file type, and file creation returns that type. `Socket` declares associated socket and listener types, with scheduler-level creation, binding, and listening hooks. Generic consumers use those associated types rather than creating a `std::fs::File` or `std::net::TcpListener` themselves. Exact socket-creation signatures remain to be specified.
+
+The interface does not require `Arc` around every resource. Concrete implementations choose their resource representation and how to retain it during in-flight work. They may use OS handles, registered-resource tables, shared ownership, or simulated resource identifiers. Taking a resource by reference does not remove the backend's obligation to retain everything still accessible by a submitted operation after its waiting future is dropped.
+
+These are agreed interface requirements, not implemented changes. The current `File` capability still accepts `Arc<std::fs::File>`, and socket registration still accepts `std::net` resources. Resource creation and representation must enter the abstraction before generic consumers can run entirely against a simulated scheduler.
 
 ## Platform support and fallbacks
 
@@ -620,7 +638,7 @@ Registration does not itself guarantee zero-copy transport. Zero-copy sends can 
 | Executor | Future workers, work stealing, scheduler-owned tasks and primitive `Spawn` dispatch implemented. Higher-level task groups are deferred. |
 | Cancellation | `Cancellation`, `Cancelled`, and `defer_cancel` implemented and re-exported. |
 | Graceful runtime shutdown | Signal installation, cooperative scheduler draining, and cancellation-aware I/O remain pending; existing shutdown destroys task futures. |
-| Capabilities | `File`, `Socket`, `Clock`, and `Spawn` implemented; broader hooks and optional extension boundaries remain proposed. |
+| Capabilities | `File`, `Socket`, `Clock`, and `Spawn` implemented; a common scheduler contract, associated file resources, scheduler-level resource creation, broader hooks and optional extension boundaries remain design work. |
 | Linked operations | Prepared chains and a portable `Linked` capability remain proposed; native SQE linking, whole-chain blocking jobs, and readiness sequencing are not implemented. |
 | File operations | Owned-buffer positioned read/write implemented; stateful I/O, lifecycle, allocation and metadata hooks pending. |
 | Submission and completion | Close, socket shutdown, and file advice pairs remain proposed; shared asynchronous admission, exceptional `_submit` futures, and safe CQE suppression are not implemented. |

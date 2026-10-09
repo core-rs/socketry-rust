@@ -5,9 +5,15 @@
 - Document the complete timer lifecycle comparison with Tokio across cancellation rates in the timer crate readme.
 
 - Add the independent `socketry-timers` crate and expose it as `socketry::timers`. Include reusable batched queues, optional worker assistance and lazy sleep futures, plus the experimental inbox driver and Tokio lifecycle benchmarks.
+
+- Remove `Barrier`, scheduler barrier factories, and `SpawnError::OwnerClosed` from `socketry-executor` and the facade. Use primitive `spawn(future)` dispatch and await task handles; higher-level task groups are deferred.
+
 - Rename the portable socket operations trait from `Network` to `Socket` in `socketry`, `socketry-executor`, and their public `scheduler` module. Update imports and trait bounds.
+
 - Rename the portable file operations trait from `FileIo` to `File` in `socketry`, `socketry-executor`, and their public `scheduler` module. Update imports and trait bounds; alias `std::fs::File` when both names are used.
+
 - Add runtime-independent `Cancellation`, `Cancelled`, and `defer_cancel` for cooperative service shutdown and asynchronous draining. Export them through `socketry-executor` and `socketry`.
+
 - Let Cargo select the dependency version in the installation example.
 
 ## v0.2.0

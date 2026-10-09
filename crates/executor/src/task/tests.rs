@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::{Completion, Task, TaskError, TaskState, UNASSIGNED_WORKER};
-use crate::owner::Owner;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -12,7 +11,6 @@ fn task_state(cancelled: bool) -> Arc<TaskState> {
     Arc::new(TaskState {
         identifier: 1,
         scheduler: Weak::new(),
-        owner: Arc::new(Owner::new()),
         cancelled: AtomicBool::new(cancelled),
         finished: AtomicBool::new(false),
         worker: AtomicUsize::new(UNASSIGNED_WORKER),

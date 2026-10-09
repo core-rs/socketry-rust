@@ -5,10 +5,9 @@
 #[cfg(feature = "native")]
 mod operations;
 
-use crate::owner::Owner;
 use crate::task::{Completion, Runnable, TaskFuture, TaskState, UNASSIGNED_WORKER};
 use crate::worker::{self, WorkerState};
-use crate::{Barrier, Spawn, SpawnError, Task, TaskHandle};
+use crate::{Spawn, SpawnError, Task, TaskHandle};
 use crossbeam_deque::{Injector, Worker};
 use event_listener::{Event, Listener};
 use std::cell::RefCell;
@@ -40,7 +39,6 @@ pub(crate) struct Shared {
     #[cfg(feature = "native")]
     selector: std::sync::OnceLock<io::Result<super::selector::DefaultSelector>>,
     registry: Mutex<Registry>,
-    root: Arc<Owner>,
     pub(crate) ready: Injector<Runnable>,
     pub(crate) workers: Vec<WorkerState>,
     pub(crate) closed: AtomicBool,
@@ -50,12 +48,9 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    fn reserve_identifier(registry: &mut Registry, owner: &Owner) -> Result<u64, SpawnError> {
+    fn reserve_identifier(registry: &mut Registry) -> Result<u64, SpawnError> {
         if registry.closed {
             return Err(SpawnError::SchedulerClosed);
-        }
-        if owner.closed.load(Ordering::Acquire) {
-            return Err(SpawnError::OwnerClosed);
         }
         let identifier = registry.next_identifier;
         registry.next_identifier = identifier
@@ -66,7 +61,6 @@ impl Shared {
 
     pub(crate) fn spawn<FutureType>(
         self: &Arc<Self>,
-        owner: &Arc<Owner>,
         future: FutureType,
     ) -> Result<TaskHandle<FutureType::Output>, SpawnError>
     where
@@ -77,11 +71,10 @@ impl Shared {
             .registry
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let identifier = Self::reserve_identifier(&mut registry, owner)?;
+        let identifier = Self::reserve_identifier(&mut registry)?;
         let state = Arc::new(TaskState {
             identifier,
             scheduler: Arc::downgrade(self),
-            owner: Arc::clone(owner),
             cancelled: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             worker: AtomicUsize::new(UNASSIGNED_WORKER),
@@ -108,7 +101,6 @@ impl Shared {
                 waker: runnable.waker(),
             },
         );
-        owner.remaining.fetch_add(1, Ordering::Release);
         self.remaining.fetch_add(1, Ordering::Release);
         // Publish ownership before execution, and never invoke scheduling under this lock.
         drop(registry);
@@ -128,9 +120,6 @@ impl Shared {
             .remove(&state.identifier);
         // Drop the retained waker outside the registry lock.
         drop(registration);
-        if state.owner.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
-            state.owner.completion.notify(usize::MAX);
-        }
         if self.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.completion.notify(usize::MAX);
             if self.closed.load(Ordering::Acquire) {
@@ -148,29 +137,6 @@ impl Shared {
             .get(&identifier)
             .map(|task| task.waker.clone());
         if let Some(waker) = waker {
-            waker.wake();
-        }
-    }
-
-    pub(crate) fn close_owner(&self, owner: &Arc<Owner>, cancel: bool) {
-        let registry = self
-            .registry
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        owner.closed.store(true, Ordering::Release);
-        let wakers = if cancel {
-            registry
-                .tasks
-                .values()
-                .filter(|task| Arc::ptr_eq(&task.state.owner, owner))
-                .filter(|task| !task.state.cancelled.swap(true, Ordering::AcqRel))
-                .map(|task| task.waker.clone())
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        drop(registry);
-        for waker in wakers {
             waker.wake();
         }
     }
@@ -260,11 +226,6 @@ impl SchedulerHandle {
         Spawn::spawn(self, future)
     }
 
-    /// Create an explicit owner for child tasks.
-    pub fn barrier(&self) -> Barrier {
-        Barrier::new(self.clone())
-    }
-
     /// Number of worker threads configured for this scheduler.
     pub fn worker_count(&self) -> usize {
         self.shared.workers.len()
@@ -285,7 +246,7 @@ impl Spawn for SchedulerHandle {
         FutureType: Future + Send + 'static,
         FutureType::Output: Send + 'static,
     {
-        self.shared.spawn(&self.shared.root, future)
+        self.shared.spawn(future)
     }
 }
 
@@ -357,7 +318,6 @@ impl Scheduler {
                 next_identifier: 0,
                 tasks: HashMap::new(),
             }),
-            root: Arc::new(Owner::new()),
             ready: Injector::new(),
             workers: queues
                 .iter()
@@ -409,11 +369,6 @@ impl Scheduler {
         self.handle.spawn(future)
     }
 
-    /// Create an explicit owner for child tasks.
-    pub fn barrier(&self) -> Barrier {
-        self.handle.barrier()
-    }
-
     /// Block the caller until all currently owned tasks finish.
     /// External submissions may extend this wait. The scheduler remains open.
     /// Task failures are retrieved separately through their join handles.
@@ -433,7 +388,7 @@ impl Scheduler {
 
     /// Poll a root future on the calling thread while workers execute tasks.
     /// The root may borrow local data and need not be Send. It is not an owned
-    /// task: `Task::current()` is None, and child ownership must be explicit.
+    /// task: `Task::current()` is None. Spawned tasks belong to the scheduler.
     /// Returning does not cancel other scheduler tasks.
     ///
     /// # Panics

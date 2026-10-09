@@ -2,7 +2,7 @@
 
 Foundational concurrency APIs for Rust projects in the Socketry ecosystem.
 
-The `socketry` package re-exports `socketry-executor`: owned asynchronous tasks, explicit child barriers, and a futures executor with multiple workers and work stealing. Tasks use ordinary future polling and have no private coroutine stacks.
+The `socketry` package re-exports `socketry-executor`: owned asynchronous tasks and a futures executor with multiple workers and work stealing. Tasks use ordinary future polling and have no private coroutine stacks.
 
 ## Usage
 
@@ -26,9 +26,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Workers start when the scheduler is constructed. `spawn` accepts `Send + 'static` futures and returns an awaitable result handle. Dropping that handle leaves the task owned by its scheduler or barrier. Dropping the scheduler requests cancellation and joins workers when called outside a worker.
+Workers start when the scheduler is constructed. `spawn` accepts `Send + 'static` futures and returns an awaitable result handle. Dropping that handle leaves the task owned by its scheduler. Dropping the scheduler requests cancellation and joins workers when called outside a worker.
 
-Use `scheduler.barrier()` to own children explicitly. Both schedulers and barriers implement `Spawn`. `barrier.wait().await` waits for completion; `barrier.stop().await` closes the barrier, cancels children, and waits for their synchronous destructors. Dropping a barrier requests cancellation without waiting. Observe individual results and panics through task handles.
+Schedulers and their handles implement the primitive `Spawn` contract. Await individual task handles to observe completion, results, and panics. Task groups can be built above dispatch; the executor does not provide a group abstraction.
 
 `Scheduler::current()` and `Task::current()` provide contextual lookup while tasks run. Use `.await` to suspend; synchronous blocking calls occupy a worker.
 
@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Cancellation expresses intent; task handles and barriers confirm completion. Keep the scheduler, I/O services, and owners alive while draining. Existing task cancellation, barrier stopping, and scheduler shutdown still destroy futures; `defer_cancel` cannot protect a future from destruction. Signal handling and cancellation inputs on I/O operations are not yet integrated. There is no signal escalation policy: an external supervisor can enforce SIGTERM followed by SIGKILL.
+Cancellation expresses intent; task handles confirm completion. Keep the scheduler and I/O services alive while draining. Existing task cancellation and scheduler shutdown still destroy futures; `defer_cancel` cannot protect a future from destruction. Signal handling and cancellation inputs on I/O operations are not yet integrated. There is no signal escalation policy: an external supervisor can enforce SIGTERM followed by SIGKILL.
 
 ## Portable I/O and runtime selection
 
@@ -108,7 +108,7 @@ cargo run -p socketry-executor --example portable_io --no-default-features --fea
 cargo run -p socketry-executor --example portable_io --features io-uring
 ```
 
-The Tokio adapter needs a live runtime with I/O and time enabled. It preserves explicit task/barrier ownership, and its asynchronous `shutdown().await` joins task destruction. Passing its handle explicitly selects Tokio; Socketry's `Scheduler::current()` continues to identify Socketry execution.
+The Tokio adapter needs a live runtime with I/O and time enabled. It preserves scheduler task ownership, and its asynchronous `shutdown().await` joins task destruction. Passing its handle explicitly selects Tokio; Socketry's `Scheduler::current()` continues to identify Socketry execution.
 
 ## Current scope
 

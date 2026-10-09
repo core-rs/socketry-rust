@@ -6,9 +6,8 @@
 
 pub use socketry_executor as executor;
 pub use socketry_executor::{
-    Barrier, BufferResult, Cancellation, Cancelled, Clock, File, Interest, Scheduler,
-    SchedulerHandle, Socket, Spawn, SpawnError, Task, TaskError, TaskHandle, defer_cancel,
-    yield_now,
+    BufferResult, Cancellation, Cancelled, Clock, File, Interest, Scheduler, SchedulerHandle,
+    Socket, Spawn, SpawnError, Task, TaskError, TaskHandle, defer_cancel, yield_now,
 };
 
 pub use socketry_timers as timers;

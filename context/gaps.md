@@ -1,20 +1,20 @@
 # Scheduler Gaps
 
-Socketry has a working future executor, explicit task ownership, portable I/O capabilities, and a Tokio adapter. These four gaps describe the remaining architectural work toward a scheduler inspired by [Zig's `std.Io` model](https://ziglang.org/download/0.16.0/release-notes.html#I-O-as-an-Interface), while retaining ordinary Rust futures and `.await`.
+Socketry has a working future executor, scheduler-owned tasks, portable I/O capabilities, and a Tokio adapter. These four gaps describe the remaining architectural work toward a scheduler inspired by [Zig's `std.Io` model](https://ziglang.org/download/0.16.0/release-notes.html#I-O-as-an-Interface), while retaining ordinary Rust futures and `.await`.
 
 ## 1. Graceful cancellation needs runtime integration
 
 Task cancellation currently drops the future before its next poll. An active poll must return first. Synchronous destructors run, but the remainder of the async body, including asynchronous cleanup, does not execute.
 
-`Cancellation` and `defer_cancel` now provide runtime-independent cooperative requests and deferred cleanup. Signals can be shared or linked through child signals to shut down the application or an individual service. They signal intent; task handles and barriers still confirm completion.
+`Cancellation` and `defer_cancel` now provide runtime-independent cooperative requests and deferred cleanup. Signals can be shared or linked through child signals to shut down the application or an individual service. They signal intent; task handles still confirm completion.
 
-Integrating these primitives into scheduler shutdown and cancellation-aware I/O remains pending. Graceful shutdown must keep workers, I/O services, and task owners available until draining completes. The intended model has no default forced abort or internal escalation; a process supervisor handles SIGTERM followed by SIGKILL. Existing task cancellation and scheduler shutdown still destroy futures, so callers must request cooperative cancellation and await work first.
+Integrating these primitives into scheduler shutdown and cancellation-aware I/O remains pending. Graceful shutdown must keep workers, I/O services, and the scheduler available until draining completes. The intended model has no default forced abort or internal escalation; a process supervisor handles SIGTERM followed by SIGKILL. Existing task cancellation and scheduler shutdown still destroy futures, so callers must request cooperative cancellation and await work first.
 
-## 2. Ownership currently joins direct children
+## 2. Higher-level task grouping is deferred
 
-Barriers own and join their direct children. Cancelling a parent can drop its barriers and request child cancellation, but parent completion does not automatically wait for descendants to finish. Callers must explicitly await their barriers when joined child cleanup is required.
+`Spawn::spawn(future)` is primitive dispatch shared by schedulers and their handles. It registers a scheduler-owned task and returns a handle. Completing or cancelling the spawning task does not cancel independently spawned work; callers await individual handles when completion matters.
 
-`Spawn` makes task submission portable, while creating and controlling barriers still uses runtime-specific APIs. A generic library can spawn children, but cannot express the full group lifecycle through a shared contract. Define portable group creation, admission closure, waiting, and stopping, and decide whether parent completion should include descendant draining.
+The executor does not expose a Barrier or require a group/owner argument. Libraries can eventually provide groups above this primitive, coordinating cooperative cancellation and completion without adding an implicit hierarchy to dispatch. A portable higher-level group lifecycle remains unspecified and is outside the executor for now.
 
 ## 3. The I/O boundary is still narrow
 

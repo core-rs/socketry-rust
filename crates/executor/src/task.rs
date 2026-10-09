@@ -1,7 +1,6 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use crate::owner::Owner;
 use crate::scheduler::{SchedulerHandle, Shared};
 use pin_project_lite::pin_project;
 use std::any::Any;
@@ -20,7 +19,6 @@ pub(crate) type Runnable = async_task::Runnable<Arc<TaskState>>;
 pub(crate) struct TaskState {
     pub(crate) identifier: u64,
     pub(crate) scheduler: Weak<Shared>,
-    pub(crate) owner: Arc<Owner>,
     pub(crate) cancelled: AtomicBool,
     pub(crate) finished: AtomicBool,
     pub(crate) worker: AtomicUsize,
@@ -108,7 +106,7 @@ impl std::error::Error for TaskError {}
 
 /// An awaitable result of an owned task.
 ///
-/// Dropping this handle abandons the result; the scheduler or barrier continues
+/// Dropping this handle abandons the result; the scheduler continues
 /// owning the task. Use `cancel().await` to request and wait for cancellation.
 #[must_use = "await the task to observe its result, or explicitly drop the handle"]
 pub struct TaskHandle<Output> {

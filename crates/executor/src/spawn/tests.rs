@@ -10,10 +10,6 @@ fn spawn_errors_have_descriptive_messages() {
         "the scheduler is closed"
     );
     assert_eq!(
-        SpawnError::OwnerClosed.to_string(),
-        "the task owner is closed"
-    );
-    assert_eq!(
         SpawnError::IdentifiersExhausted.to_string(),
         "task identifiers are exhausted"
     );

@@ -17,13 +17,12 @@ This guide describes the current implementation and its boundaries. Read [the de
 
 ## Ownership
 
-- Scheduler and Barrier implement Spawn, with a runtime-specific associated handle type. Adapters need to preserve its ownership and result contract.
+- Scheduler and SchedulerHandle implement Spawn, with a runtime-specific associated handle type. Adapters need to preserve its ownership and result contract.
 - Register ownership before publishing a runnable task.
-- Dropping TaskHandle abandons the result without cancelling the owner's task.
+- Dropping TaskHandle abandons the result without cancelling the scheduler-owned task.
 - Task cancellation sets a flag and wakes it. The future is destroyed after an in-progress poll returns. TaskHandle::cancel awaits that destruction.
-- Barrier::close prevents admission; wait awaits direct children; stop closes, cancels and waits. Drop requests cancellation without waiting.
-- Awaited task results report cancellation or the original panic payload. Barrier waits and Scheduler::run do not aggregate child errors.
-- Parents must explicitly await barriers for joined cleanup. Automatic waiting for descendants after parent destruction is not implemented.
+- Awaited task results report cancellation or the original panic payload. Scheduler::run does not aggregate task errors.
+- Dispatch takes a future and returns a handle without a group or owner argument. Independently spawned work has no implicit parent-child lifecycle. Higher-level groups belong above Spawn and are outside the executor for now.
 - Scheduler Drop cancels all tasks, joining threads outside a worker. On a worker it requests shutdown without joining. Surviving handles reject spawn.
 
 ## Cooperative cancellation
@@ -33,8 +32,8 @@ This guide describes the current implementation and its boundaries. Read [the de
 - Each family serializes child registration and cancellation with one mutex. Atomic flags support cheap checks. Nodes hold weak child registrations; child destruction unregisters them. Cancellation and exclusively owned ancestor destruction are iterative, avoiding stack exhaustion on deep chains.
 - Register event listeners before checking cancellation to avoid lost notifications. Dropping a wait unregisters its listener. Release all signal locks before invoking wakers so wakeups can reenter cancellation and child registration.
 - defer\_cancel pins the work and its signal wait. Observed cancellation consumes the synchronous callback once, before polling the work again, and the wrapper preserves the work's normal output. Callback panics propagate; dropping the wrapper destroys its future. It does not mask operation signals or intercept task destruction.
-- For graceful shutdown, request cancellation and await task handles or barriers before releasing the owner or shutting down runtime services. Signals express intent rather than completion. There is no forced abort or escalation in this cooperative contract; a supervisor can enforce SIGTERM followed by SIGKILL.
-- Existing Task cancellation, Barrier stopping, and scheduler shutdown retain their destruction semantics. Signal handlers, cooperative runtime shutdown and cancellation inputs on I/O methods are not yet integrated.
+- For graceful shutdown, request cancellation and await task handles before releasing the scheduler or shutting down runtime services. Signals express intent rather than completion. There is no forced abort or escalation in this cooperative contract; a supervisor can enforce SIGTERM followed by SIGKILL.
+- Existing Task cancellation and scheduler shutdown retain their destruction semantics. Signal handlers, cooperative runtime shutdown and cancellation inputs on I/O methods are not yet integrated.
 
 ## I/O and runtime boundaries
 
@@ -47,7 +46,7 @@ This guide describes the current implementation and its boundaries. Read [the de
 - io\_uring's dedicated selector thread owns buffers and descriptors until the original terminal completion, never merely a cancellation completion. Numeric identifiers are not reused. Pending, unsubmitted requests can return buffers immediately. Unexpected failure retains kernel-accessible resources and panics waiting operations; do not free buffers with unknown completion.
 - Ring shutdown closes admission, cancels and drains completions. Scheduler Drop outside a worker waits for this drain; Drop on a worker only requests it. Shutdown racing lazy initialization must still close the new selector.
 - Regular files use blocking pools except with io\_uring. An already-started blocking operation can outlive its waiting task. Use non-append regular files and explicit offsets; the Windows fallback also changes the shared cursor.
-- `scheduler/tokio.rs` adapts an existing runtime with I/O and time enabled. It preserves Spawn/barrier ownership, but does not own or drive that runtime. Its shutdown joins owned task destruction, not the runtime's blocking pool.
+- `scheduler/tokio.rs` adapts an existing runtime with I/O and time enabled. It preserves scheduler task ownership through Spawn, but does not own or drive that runtime. Its shutdown joins owned task destruction, not the runtime's blocking pool.
 - Register Tokio task ownership before spawn, but release the registry mutex before calling into Tokio: a stopped runtime may synchronously drop a future. Future destruction precedes ownership completion. Never hold an EnterGuard across await; enter per poll for operations that register resources.
 - Tokio resources carry runtime identity. Explicit handles select that runtime; Socketry's Task::current and Scheduler::current remain Socketry-specific.
 

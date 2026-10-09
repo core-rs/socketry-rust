@@ -78,8 +78,6 @@ fn scheduler_remains_usable_after_its_registry_mutex_is_poisoned() {
         Err(TaskError::Cancelled)
     ));
 
-    let barrier = scheduler.barrier();
-    barrier.close();
     drop(scheduler);
     assert!(shared.closed.load(std::sync::atomic::Ordering::Acquire));
 }

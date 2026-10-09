@@ -8,11 +8,11 @@ Use Rust's existing `Future`, `Context`, and `Waker` contracts. A separate compu
 
 The scheduler executes pinned futures on ordinary worker stacks. Independently spawned tasks are `Send + 'static` and can migrate between workers, while their pinned storage remains stationary. Only one worker polls a task at a time. Blocking system calls must run outside the workers that poll futures.
 
-Pass the implementation into libraries explicitly. A library should require the capabilities it actually uses rather than implicitly selecting a global runtime. Spawning additionally requires an explicit task owner. Existing resources can be passed directly to code that does not need to create them.
+Pass the implementation into libraries explicitly. A library should require the capabilities it actually uses rather than implicitly selecting a global runtime. Task dispatch takes a future and returns a task handle; it does not require a group or owner argument. Existing resources can be passed directly to code that does not need to create them.
 
 ## Capability traits and static dispatch
 
-`File`, `Socket`, and `Clock` name scheduler capabilities. `Spawn` expresses task submission and ownership separately. `File` is the capability trait; `std::fs::File` is currently the resource type, conventionally imported as `StdFile` when both names are needed. `Socket` replaces the earlier capability name `Network`.
+`File`, `Socket`, and `Clock` name scheduler capabilities. `Spawn` provides primitive task dispatch; the scheduler retains spawned tasks independently of their result handles. `File` is the capability trait; `std::fs::File` is currently the resource type, conventionally imported as `StdFile` when both names are needed. `Socket` replaces the earlier capability name `Network`.
 
 Prefer generic trait bounds, concrete resource types, and concrete future types. These allow compile-time capability checking, monomorphization, and inlining without requiring a boxed future for each operation. The compiler decides which calls to inline; the interface should make that optimization possible.
 
@@ -45,9 +45,9 @@ An application explicitly selecting a specialized backend may receive an initial
 
 ## Cancellation and task ownership
 
-Cancellation signals intent. Task handles and barriers establish completion. Resource ownership determines what remains alive. Keep these responsibilities distinct.
+Cancellation signals intent. Task handles establish completion. Resource ownership determines what remains alive. Keep these responsibilities distinct.
 
-Rust's destruction semantics help release owned resources and make an implicit cancellation hierarchy unnecessary. They do not replace task ownership or asynchronous cleanup: ordinary `Drop` cannot await, and dropping a future does not execute the rest of its async body. Independently spawned tasks still need owners and explicit completion tracking.
+Rust's destruction semantics help release owned resources and make an implicit cancellation hierarchy unnecessary. They do not replace task ownership or asynchronous cleanup: ordinary `Drop` cannot await, and dropping a future does not execute the rest of its async body. The scheduler retains independently spawned tasks, and callers explicitly track completion through their handles.
 
 Use explicit cancellation scopes to describe shutdown relationships. A process can have a root signal and each service can have a child signal. This cancellation tree need not mirror the task ownership graph. A task tree is not imposed on every future.
 
@@ -77,10 +77,10 @@ Graceful shutdown proceeds as follows:
 1. Request cancellation for the application or service scope.
 2. Stop accepting new work into that scope.
 3. Keep polling existing work so it can drain and perform asynchronous cleanup.
-4. Await task handles or barriers to confirm completion.
+4. Await task handles to confirm completion.
 5. Release resources and shut down runtime services after draining finishes.
 
-Workers, selectors, timers, blocking-operation services, and task owners must remain available throughout draining. A process-level cancellation request must not immediately disable the services that cleanup needs.
+Workers, selectors, timers, blocking-operation services, and the scheduler must remain available throughout draining. A process-level cancellation request must not immediately disable the services that cleanup needs.
 
 There is no default forced abort, grace-period deadline, or escalation on a second request. Work may choose to ignore cancellation. A process supervisor can enforce termination by following SIGTERM with SIGKILL. An application can also abandon futures and destroy its runtime, giving up asynchronous cleanup; this does not remove the runtime's obligation to retain memory still accessible by the kernel.
 
@@ -100,9 +100,9 @@ The wrapper does not mask cancellation inputs passed to operations inside the fu
 
 ### Transitional runtime behaviour
 
-The cooperative primitives are implemented, but existing `Task::cancel`, `Barrier::stop`, scheduler shutdown, and scheduler destruction still request destruction of task futures. They can bypass deferred asynchronous cleanup. Callers must currently request cooperative cancellation and await draining before invoking those lifecycle operations.
+The cooperative primitives are implemented, but existing `Task::cancel`, scheduler shutdown, and scheduler destruction still request destruction of task futures. They can bypass deferred asynchronous cleanup. Callers must currently request cooperative cancellation and await draining before invoking those lifecycle operations.
 
-Barriers own and join their direct children. Parent completion does not automatically await all descendants; owners must explicitly await the groups whose completion matters. Signal integration, cooperative scheduler shutdown, and a portable group lifecycle remain future work.
+The executor has no implicit task hierarchy or task-group primitive. Completing or cancelling a task does not cancel independently spawned work. Await individual task handles when their completion matters. Higher-level groups can be implemented above `Spawn`; they are outside the executor for now. Signal integration and cooperative scheduler shutdown remain future work.
 
 ## Scheduler operation interface
 
@@ -250,7 +250,7 @@ Additional capability shapes follow the same convention:
 | Message receive | `socket_recvmsg(socket, owned_message, flags, cancellation)` | Receive result including address/control/status, together with the owned message |
 | Address resolution | `address_resolve(name, options, cancellation)` | `OperationResult<ResolvedAddresses>` |
 
-These rows identify extension capabilities; they do not require every scheduler to implement every operation. Synchronization wait/wake remains a separate interface to specify, including lost-wakeup protection. `Spawn` continues to require an explicit task owner.
+These rows identify extension capabilities; they do not require every scheduler to implement every operation. Synchronization wait/wake remains a separate interface to specify, including lost-wakeup protection. `Spawn::spawn(future)` is primitive dispatch with no group or owner argument. It returns an awaitable task handle; dispatch failures are reported before execution. Grouping and group lifecycle belong above this interface.
 
 ### Completion and explicit submission
 
@@ -291,7 +291,7 @@ Not waiting at the application level does not automatically allow the backend to
 
 Close errors can still be useful diagnostics, including delayed write failures. The ordinary form exposes them; the `_submit` form leaves execution error handling to the backend's diagnostics policy. Do not blindly retry close after an error: Linux normally releases the descriptor before reporting such failures. See [close errors](https://man7.org/linux/man-pages/man2/close.2.html).
 
-Keep `_submit` exceptional rather than adding a submission-only variant to every operation. Reads, opens, accepts, and address resolution produce outputs that callers need. Writes and sends expose partial counts and require buffer lifetime tracking. Allocation and file synchronization have meaningful completion/error guarantees, so retain their ordinary future/result contracts. Cancellation already separates the request (`cancel()`) from task completion through handles or barriers.
+Keep `_submit` exceptional rather than adding a submission-only variant to every operation. Reads, opens, accepts, and address resolution produce outputs that callers need. Writes and sends expose partial counts and require buffer lifetime tracking. Allocation and file synchronization have meaningful completion/error guarantees, so retain their ordinary future/result contracts. Cancellation already separates the request (`cancel()`) from task completion through handles.
 
 ### Pool receive capability
 
@@ -617,7 +617,7 @@ Registration does not itself guarantee zero-copy transport. Zero-copy sends can 
 
 | Area | Current status |
 | --- | --- |
-| Executor | Future workers, work stealing, explicit owners, task handles and direct-child barriers implemented. |
+| Executor | Future workers, work stealing, scheduler-owned tasks and primitive `Spawn` dispatch implemented. Higher-level task groups are deferred. |
 | Cancellation | `Cancellation`, `Cancelled`, and `defer_cancel` implemented and re-exported. |
 | Graceful runtime shutdown | Signal installation, cooperative scheduler draining, and cancellation-aware I/O remain pending; existing shutdown destroys task futures. |
 | Capabilities | `File`, `Socket`, `Clock`, and `Spawn` implemented; broader hooks and optional extension boundaries remain proposed. |

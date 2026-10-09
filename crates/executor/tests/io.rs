@@ -495,17 +495,6 @@ mod tokio_adapter {
         let runtime = runtime();
         let scheduler = Scheduler::new(runtime.handle().clone());
         runtime.block_on(async {
-            let barrier = scheduler.barrier();
-            let completed = barrier.spawn(async { 42 }).unwrap();
-            assert_eq!(completed.await.unwrap(), 42);
-            let cancelled = barrier.spawn(std::future::pending::<()>()).unwrap();
-            barrier.stop().await;
-            assert!(matches!(cancelled.await, Err(TaskError::Cancelled)));
-            assert!(barrier.is_empty());
-            assert!(matches!(
-                barrier.spawn(async {}),
-                Err(SpawnError::OwnerClosed)
-            ));
             let panicked = scheduler.spawn(async { panic!("task panic") }).unwrap();
             assert!(matches!(panicked.await, Err(TaskError::Panicked(_))));
 
@@ -593,16 +582,6 @@ mod tokio_adapter {
 
             let ordinary_task = Spawn::spawn(&*scheduler, async { 9 }).unwrap();
             assert_eq!(ordinary_task.await.unwrap(), 9);
-
-            let barrier = scheduler.barrier();
-            let child = Spawn::spawn(&barrier, async { 7 }).unwrap();
-            barrier.close();
-            assert!(matches!(
-                barrier.spawn(async {}),
-                Err(SpawnError::OwnerClosed)
-            ));
-            assert_eq!(child.await.unwrap(), 7);
-            barrier.wait().await;
         });
 
         runtime.block_on(server).unwrap();
@@ -684,36 +663,23 @@ mod tokio_adapter {
     }
 
     #[test]
-    fn dropping_result_does_not_cancel_owner_task() {
+    fn dropping_result_does_not_cancel_scheduler_task() {
         let runtime = runtime();
         let scheduler = Scheduler::new(runtime.handle().clone());
-        let barrier = scheduler.barrier();
+        let finished = Arc::new(event_listener::Event::new());
+        let completion = finished.listen();
         let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let task_completed = Arc::clone(&completed);
         drop(
-            barrier
+            scheduler
                 .spawn(async move {
                     task_completed.store(true, Ordering::Release);
+                    finished.notify(usize::MAX);
                 })
                 .unwrap(),
         );
-        runtime.block_on(barrier.wait());
+        runtime.block_on(completion);
         assert!(completed.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn barrier_rejects_a_child_joining_itself() {
-        let runtime = runtime();
-        let scheduler = Scheduler::new(runtime.handle().clone());
-        let barrier = Arc::new(scheduler.barrier());
-        let child_barrier = Arc::clone(&barrier);
-        let child = barrier
-            .spawn(async move { child_barrier.wait().await })
-            .unwrap();
-        assert!(matches!(
-            runtime.block_on(child),
-            Err(TaskError::Panicked(_))
-        ));
     }
 
     #[test]

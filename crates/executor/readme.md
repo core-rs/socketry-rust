@@ -19,16 +19,13 @@ use socketry_executor::{Scheduler, yield_now};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scheduler = Scheduler::with_workers(4)?;
-    let children = scheduler.barrier();
-    let task = children.spawn(async {
+    let task = scheduler.spawn(async {
         yield_now().await;
         42
     })?;
 
-    children.close();
     scheduler.block_on(async {
         assert_eq!(task.await?, 42);
-        children.wait().await;
         Ok::<(), socketry_executor::TaskError>(())
     })?;
     Ok(())
@@ -51,22 +48,18 @@ Workers publish their sleeping state and recheck work before parking. Enqueuers 
 
 ## Ownership and cancellation
 
-Schedulers own top-level tasks. A `Barrier` explicitly owns its direct children while the same scheduler executes them. Both implement `Spawn`; its associated handle type leaves room for adapters using different runtimes.
+Schedulers own all tasks submitted through themselves or their handles. Both implement the primitive `Spawn` contract; its associated handle type leaves room for adapters using different runtimes. Dispatch takes a future and returns a task handle, without requiring a group or owner argument.
 
 - Dropping a join handle abandons its result; it does not cancel the owned task.
 - `task.task().cancel()` requests cancellation without waiting.
 - `task.cancel().await` requests cancellation and awaits future destruction.
-- `barrier.close()` prevents new children while existing children continue.
-- `barrier.wait().await` waits until there are no direct children. Close first when the set of children must remain closed.
-- `barrier.stop().await` closes, cancels and waits.
-- Dropping a barrier closes it and requests cancellation without waiting.
 - A scheduler's surviving handles reject submissions after shutdown begins.
 
 Cancellation is observed before the next poll. A running poll may return a successful result before cancellation is observed. Destruction waits until that poll returns. Dropping the future runs ordinary destructors, not the remainder of its async body. A task that never returns from poll prevents joined shutdown.
 
-Future panics become `TaskError::Panicked` containing the original payload. Await join handles to observe errors. Barrier waits and scheduler.run do not aggregate task results or propagate unobserved failures.
+Future panics become `TaskError::Panicked` containing the original payload. Await join handles to observe errors. Scheduler::run do not aggregate task results or propagate unobserved failures.
 
-Parent tasks must explicitly await their barriers for joined child cleanup. Dropping a parent can drop its barriers and request cancellation, but parent completion does not automatically wait for descendants. Owned tasks must be `'static`; ownership does not permit borrowing a parent's local variables.
+Independently spawned tasks have no implicit parent-child lifecycle. Completing or cancelling the spawning task does not cancel them. Await their handles when their completion matters. Higher-level task groups can be built above dispatch and are outside the executor for now. Owned tasks must be `'static`; ownership does not permit borrowing a parent's local variables.
 
 Dropping a scheduler outside a worker cancels tasks and joins workers. Dropping one on a Socketry worker requests cancellation and lets workers finish without joining synchronously, avoiding a worker waiting for itself.
 
@@ -94,15 +87,15 @@ assert_eq!(output, 42);
 # Ok::<(), std::io::Error>(())
 ```
 
-Use a root signal for process shutdown and child signals for individual services. Keep task owners and the runtime alive until task handles or barriers confirm draining is complete. The protected work must use cancellation inputs that allow cleanup to continue; the wrapper does not mask signals passed into its operations. Callback panics propagate, and dropping the wrapper still drops its work.
+Use a root signal for process shutdown and child signals for individual services. Keep the scheduler and runtime alive until task handles confirm draining is complete. The protected work must use cancellation inputs that allow cleanup to continue; the wrapper does not mask signals passed into its operations. Callback panics propagate, and dropping the wrapper still drops its work.
 
-These primitives do not change `Task::cancel`, `Barrier::stop`, or scheduler shutdown, which still destroy futures. Signal handlers and cancellation-aware I/O signatures remain separate integration work. Cooperative requests have no forced abort or deadline escalation; a process supervisor can enforce SIGTERM followed by SIGKILL.
+These primitives do not change `Task::cancel` or scheduler shutdown, which still destroy futures. Signal handlers and cancellation-aware I/O signatures remain separate integration work. Cooperative requests have no forced abort or deadline escalation; a process supervisor can enforce SIGTERM followed by SIGKILL.
 
 ## Implementation costs
 
-`async-task` supplies pinned task storage, wakers, runnable state and join handles. Socketry adds a separately allocated, reference-counted task record for identity, cancellation, ownership and affinity. Each barrier also has a shared owner record. The task registry retains a waker while the task is alive.
+`async-task` supplies pinned task storage, wakers, runnable state and join handles. Socketry adds a separately allocated, reference-counted task record for identity, cancellation, ownership and affinity. The task registry retains a waker while the task is alive.
 
-Spawning and completion take the ownership registry mutex. Cancellation and owner closure also use it. Ordinary polling, wakeups and ready-queue operations do not take that mutex. Polling establishes task context with an Arc clone; explicit current-task/current-scheduler lookups clone shared references.
+Spawning and completion take the ownership registry mutex. Cancellation and scheduler closure also use it. Ordinary polling, wakeups and ready-queue operations do not take that mutex. Polling establishes task context with an Arc clone; explicit current-task/current-scheduler lookups clone shared references.
 
 Each cancellable signal allocates a reference-counted node. A signal family shares a mutex for child registration and cancellation propagation; parent nodes hold weak child registrations, and children retain ancestors. Cancellation walks descendants iteratively and releases locks before waking listeners. Waiting uses the existing event-listener dependency. Dropped children remove their registrations, and deep ancestor chains are released iteratively. Ordinary signal checks use an atomic flag; `never()` needs no node or listener.
 

@@ -39,24 +39,23 @@ fn shared(runtime: &::tokio::runtime::Runtime) -> Arc<Shared> {
             next_identifier: 0,
             tasks: HashMap::new(),
         }),
-        root: Arc::new(Owner::new()),
+        remaining: AtomicUsize::new(0),
+        completion: Event::new(),
     })
 }
 
-fn task_state(owner: Arc<Owner>, cancelled: bool) -> Arc<TaskState> {
+fn task_state(cancelled: bool) -> Arc<TaskState> {
     Arc::new(TaskState {
-        owner,
         cancelled: AtomicBool::new(cancelled),
     })
 }
 
 #[test]
-fn completion_removes_registration_and_notifies_owner() {
+fn completion_removes_registration_and_notifies_scheduler() {
     let runtime = runtime();
     let shared = shared(&runtime);
-    let owner = Arc::new(Owner::new());
-    owner.remaining.store(1, Ordering::Release);
-    let state = task_state(Arc::clone(&owner), false);
+    shared.remaining.store(1, Ordering::Release);
+    let state = task_state(false);
     shared.registry.lock().unwrap().tasks.insert(
         7,
         Registration {
@@ -72,39 +71,37 @@ fn completion_removes_registration_and_notifies_owner() {
     });
 
     assert!(shared.registry.lock().unwrap().tasks.is_empty());
-    assert!(owner.is_empty());
+    assert_eq!(shared.remaining.load(Ordering::Acquire), 0);
 }
 
 #[test]
-fn completion_notifies_owner_after_scheduler_is_gone() {
+fn completion_is_safe_after_scheduler_is_gone() {
     let runtime = runtime();
     let shared = shared(&runtime);
-    let owner = Arc::new(Owner::new());
-    owner.remaining.store(1, Ordering::Release);
+    shared.remaining.store(1, Ordering::Release);
     let completion = Completion {
         scheduler: Arc::downgrade(&shared),
         identifier: 7,
-        state: task_state(Arc::clone(&owner), false),
+        state: task_state(false),
     };
     drop(shared);
 
     drop(completion);
-
-    assert!(owner.is_empty());
 }
 
 #[test]
 fn tracked_future_does_not_poll_after_cancellation() {
-    let owner = Arc::new(Owner::new());
-    owner.remaining.store(1, Ordering::Release);
-    let state = task_state(Arc::clone(&owner), true);
+    let runtime = runtime();
+    let shared = shared(&runtime);
+    shared.remaining.store(1, Ordering::Release);
+    let state = task_state(true);
     let mut context = Context::from_waker(Waker::noop());
 
     {
         let mut future = Box::pin(TrackedFuture {
             future: ready(42),
             completion: Completion {
-                scheduler: Weak::new(),
+                scheduler: Arc::downgrade(&shared),
                 identifier: 0,
                 state,
             },
@@ -114,7 +111,7 @@ fn tracked_future_does_not_poll_after_cancellation() {
             Poll::Ready(Err(TaskError::Cancelled))
         ));
     }
-    assert!(owner.is_empty());
+    assert_eq!(shared.remaining.load(Ordering::Acquire), 0);
 }
 
 #[test]
@@ -125,18 +122,6 @@ fn delayed_abort_respects_an_earlier_cancellation_request() {
     abort_if_cancelled(true, || task.abort());
 
     assert!(runtime.block_on(task).is_err());
-}
-
-#[test]
-fn close_without_cancellation_only_closes_admission() {
-    let runtime = runtime();
-    let shared = shared(&runtime);
-    let owner = Arc::new(Owner::new());
-
-    shared.close(Some(&owner), false);
-
-    assert!(owner.closed.load(Ordering::Acquire));
-    assert!(!shared.closed.load(Ordering::Acquire));
 }
 
 #[test]
@@ -200,15 +185,13 @@ fn shutdown_cancels_a_task_registered_before_tokio_spawn() {
     let runtime = runtime();
     let scheduler = Scheduler::new(runtime.handle().clone());
     let shared = Arc::clone(&scheduler.handle.shared);
-    let owner = Arc::new(Owner::new());
     let (registered, wait_for_registration) = mpsc::sync_channel(0);
     let (resume, wait_to_resume) = mpsc::sync_channel(0);
 
     let spawning = {
         let shared = Arc::clone(&shared);
-        let owner = Arc::clone(&owner);
         thread::spawn(move || {
-            shared.spawn_with_registration_hook(&owner, std::future::pending::<()>(), || {
+            shared.spawn_with_registration_hook(std::future::pending::<()>(), || {
                 registered.send(()).unwrap();
                 wait_to_resume.recv().unwrap();
             })
@@ -220,10 +203,12 @@ fn shutdown_cancels_a_task_registered_before_tokio_spawn() {
         let registry = shared.registry.lock().unwrap();
         let registration = registry.tasks.values().next().unwrap();
         assert!(registration.abort.is_none());
-        assert!(!owner.is_empty());
+        assert_eq!(shared.remaining.load(Ordering::Acquire), 1);
     }
 
-    shared.close(None, true);
+    let mut shutdown = Box::pin(scheduler.shutdown());
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(shutdown.as_mut().poll(&mut context).is_pending());
 
     assert!(shared.closed.load(Ordering::Acquire));
     assert!(
@@ -246,8 +231,9 @@ fn shutdown_cancels_a_task_registered_before_tokio_spawn() {
         Err(error) => panic!("task registration failed: {error}"),
     };
 
+    runtime.block_on(shutdown);
     assert!(matches!(runtime.block_on(task), Err(TaskError::Cancelled)));
-    assert!(owner.is_empty());
+    assert_eq!(shared.remaining.load(Ordering::Acquire), 0);
 }
 
 #[test]
@@ -535,4 +521,72 @@ fn file_operation_results_preserve_errors_and_resume_panics() {
         }))
         .is_err()
     );
+}
+
+#[test]
+fn polling_restores_the_previous_scheduler_context() {
+    let runtime = runtime();
+    let previous = shared(&runtime);
+    let current = shared(&runtime);
+    current.remaining.store(1, Ordering::Release);
+    let _scope =
+        SchedulerScope(CURRENT_SCHEDULER.with(|value| value.replace(Arc::downgrade(&previous))));
+    let mut future = Box::pin(TrackedFuture {
+        future: std::future::poll_fn(|_| {
+            assert!(
+                CURRENT_SCHEDULER
+                    .with(|value| Weak::ptr_eq(&value.borrow(), &Arc::downgrade(&current)))
+            );
+            Poll::Ready(42)
+        }),
+        completion: Completion {
+            scheduler: Arc::downgrade(&current),
+            identifier: 0,
+            state: task_state(false),
+        },
+    });
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(matches!(
+        future.as_mut().poll(&mut context),
+        Poll::Ready(Ok(42))
+    ));
+    assert!(
+        CURRENT_SCHEDULER.with(|value| Weak::ptr_eq(&value.borrow(), &Arc::downgrade(&previous)))
+    );
+}
+
+#[test]
+fn shutdown_waits_for_all_task_destructors_even_without_result_handles() {
+    struct CountDrop(Arc<AtomicUsize>);
+    impl Drop for CountDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Release);
+        }
+    }
+    let runtime = runtime();
+    let scheduler = Scheduler::new(runtime.handle().clone());
+    let dropped = Arc::new(AtomicUsize::new(0));
+    for _ in 0..100 {
+        let guard = CountDrop(Arc::clone(&dropped));
+        drop(
+            scheduler
+                .spawn(async move {
+                    let _guard = guard;
+                    std::future::pending::<()>().await;
+                })
+                .unwrap(),
+        );
+    }
+    runtime.block_on(scheduler.shutdown());
+    assert_eq!(dropped.load(Ordering::Acquire), 100);
+}
+
+#[test]
+fn a_task_can_shut_down_another_scheduler_on_the_same_runtime() {
+    let runtime = runtime();
+    let first = Scheduler::new(runtime.handle().clone());
+    let second = Scheduler::new(runtime.handle().clone());
+    let task = first.spawn(async move { second.shutdown().await }).unwrap();
+    runtime.block_on(task).unwrap();
+    runtime.block_on(first.shutdown());
 }

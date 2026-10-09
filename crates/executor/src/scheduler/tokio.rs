@@ -8,10 +8,10 @@
 //! shutdown to join task destruction. Socketry's Task::current and
 //! Scheduler::current describe Socketry execution, not Tokio tasks.
 use super::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
-use crate::owner::Owner;
 use crate::{Spawn, SpawnError, TaskError};
 use ::tokio::runtime::Handle;
 use ::tokio::task::{AbortHandle, JoinHandle};
+use event_listener::Event;
 use pin_project_lite::pin_project;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -20,24 +20,23 @@ use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 thread_local! {
-    static CURRENT_OWNER: RefCell<Option<Arc<Owner>>> = const { RefCell::new(None) };
+    static CURRENT_SCHEDULER: RefCell<Weak<Shared>> = const { RefCell::new(Weak::new()) };
 }
 
-struct OwnerScope(Option<Arc<Owner>>);
-impl Drop for OwnerScope {
+struct SchedulerScope(Weak<Shared>);
+impl Drop for SchedulerScope {
     fn drop(&mut self) {
-        CURRENT_OWNER.with(|current| current.replace(self.0.take()));
+        CURRENT_SCHEDULER.with(|current| current.replace(std::mem::take(&mut self.0)));
     }
 }
 
 struct TaskState {
-    owner: Arc<Owner>,
     cancelled: AtomicBool,
 }
 
@@ -56,25 +55,24 @@ struct Shared {
     runtime: Handle,
     closed: AtomicBool,
     registry: Mutex<Registry>,
-    root: Arc<Owner>,
+    remaining: AtomicUsize,
+    completion: Event,
 }
 
 impl Shared {
     fn spawn<FutureType>(
         self: &Arc<Self>,
-        owner: &Arc<Owner>,
         future: FutureType,
     ) -> Result<TaskHandle<FutureType::Output>, SpawnError>
     where
         FutureType: Future + Send + 'static,
         FutureType::Output: Send + 'static,
     {
-        self.spawn_with_registration_hook(owner, future, || {})
+        self.spawn_with_registration_hook(future, || {})
     }
 
     fn spawn_with_registration_hook<FutureType>(
         self: &Arc<Self>,
-        owner: &Arc<Owner>,
         future: FutureType,
         after_registration: impl FnOnce(),
     ) -> Result<TaskHandle<FutureType::Output>, SpawnError>
@@ -89,15 +87,11 @@ impl Shared {
         if registry.closed {
             return Err(SpawnError::SchedulerClosed);
         }
-        if owner.closed.load(Ordering::Acquire) {
-            return Err(SpawnError::OwnerClosed);
-        }
         let identifier = registry.next_identifier;
         registry.next_identifier = identifier
             .checked_add(1)
             .ok_or(SpawnError::IdentifiersExhausted)?;
         let state = Arc::new(TaskState {
-            owner: Arc::clone(owner),
             cancelled: AtomicBool::new(false),
         });
         registry.tasks.insert(
@@ -107,7 +101,7 @@ impl Shared {
                 abort: None,
             },
         );
-        owner.remaining.fetch_add(1, Ordering::Release);
+        self.remaining.fetch_add(1, Ordering::Release);
         drop(registry);
         after_registration();
         // Publish ownership before spawn, but do not hold the registry lock:
@@ -135,33 +129,34 @@ impl Shared {
         Ok(TaskHandle { inner })
     }
 
-    fn close(&self, owner: Option<&Arc<Owner>>, cancel: bool) {
+    fn close(&self) {
         let mut registry = self
             .registry
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(owner) = owner {
-            owner.closed.store(true, Ordering::Release);
-        } else {
-            registry.closed = true;
-            self.closed.store(true, Ordering::Release);
-        }
-        let aborts: Vec<_> = if cancel {
-            registry
-                .tasks
-                .values()
-                .filter(|task| owner.is_none_or(|owner| Arc::ptr_eq(owner, &task.state.owner)))
-                .filter_map(|task| {
-                    task.state.cancelled.store(true, Ordering::Release);
-                    task.abort.clone()
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        registry.closed = true;
+        self.closed.store(true, Ordering::Release);
+        let aborts: Vec<_> = registry
+            .tasks
+            .values()
+            .filter_map(|task| {
+                task.state.cancelled.store(true, Ordering::Release);
+                task.abort.clone()
+            })
+            .collect();
         drop(registry);
         for abort in aborts {
             abort.abort();
+        }
+    }
+
+    async fn wait(&self) {
+        loop {
+            let listener = self.completion.listen();
+            if self.remaining.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            listener.await;
         }
     }
 
@@ -254,9 +249,9 @@ impl Drop for Completion {
                 .tasks
                 .remove(&self.identifier);
             drop(registration);
-        }
-        if self.state.owner.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.state.owner.completion.notify(usize::MAX);
+            if shared.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+                shared.completion.notify(usize::MAX);
+            }
         }
     }
 }
@@ -277,9 +272,8 @@ impl<FutureType: Future> Future for TrackedFuture<FutureType> {
         if this.completion.state.cancelled.load(Ordering::Acquire) {
             return Poll::Ready(Err(TaskError::Cancelled));
         }
-        let _scope = OwnerScope(
-            CURRENT_OWNER
-                .with(|current| current.replace(Some(Arc::clone(&this.completion.state.owner)))),
+        let _scope = SchedulerScope(
+            CURRENT_SCHEDULER.with(|current| current.replace(this.completion.scheduler.clone())),
         );
         this.future.poll(context).map(Ok)
     }
@@ -360,7 +354,7 @@ fn take_file_buffer(buffer: &Mutex<Vec<u8>>) -> Vec<u8> {
 }
 
 /// An awaitable Tokio task result. Drop abandons the result without cancelling
-/// the task; its scheduler or barrier remains the owner.
+/// the task; its scheduler remains the owner.
 #[must_use = "await the task to observe its result, or explicitly drop the handle"]
 pub struct TaskHandle<Output> {
     inner: JoinHandle<Result<Output, TaskError>>,
@@ -409,7 +403,8 @@ impl Scheduler {
                         next_identifier: 0,
                         tasks: HashMap::new(),
                     }),
-                    root: Arc::new(Owner::new()),
+                    remaining: AtomicUsize::new(0),
+                    completion: Event::new(),
                 }),
             },
         }
@@ -430,39 +425,18 @@ impl Scheduler {
         self.handle.spawn(future)
     }
 
-    pub fn barrier(&self) -> Barrier {
-        self.handle.barrier()
-    }
-
-    /// Close admission, cancel all owned tasks (including barrier children),
+    /// Close admission, cancel all owned tasks,
     /// and wait for their futures to be destroyed.
     pub async fn shutdown(self) {
         assert_outside_scheduler(&self.handle.shared);
-        self.handle.shared.close(None, true);
-        loop {
-            let owners: Vec<_> = self
-                .handle
-                .shared
-                .registry
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .tasks
-                .values()
-                .map(|task| Arc::clone(&task.state.owner))
-                .collect();
-            if owners.is_empty() {
-                break;
-            }
-            for owner in owners {
-                owner.wait().await;
-            }
-        }
+        self.handle.shared.close();
+        self.handle.shared.wait().await;
     }
 }
 
 impl Drop for Scheduler {
     fn drop(&mut self) {
-        self.handle.shared.close(None, true);
+        self.handle.shared.close();
     }
 }
 
@@ -481,14 +455,7 @@ impl SchedulerHandle {
         FutureType: Future + Send + 'static,
         FutureType::Output: Send + 'static,
     {
-        self.shared.spawn(&self.shared.root, future)
-    }
-
-    pub fn barrier(&self) -> Barrier {
-        Barrier {
-            scheduler: self.clone(),
-            owner: Arc::new(Owner::new()),
-        }
+        self.shared.spawn(future)
     }
 
     fn check_runtime(&self, runtime: ::tokio::runtime::Id) -> io::Result<()> {
@@ -503,77 +470,11 @@ impl SchedulerHandle {
     }
 }
 
-/// Explicit ownership of a group of Tokio tasks.
-pub struct Barrier {
-    scheduler: SchedulerHandle,
-    owner: Arc<Owner>,
-}
-
-impl Barrier {
-    pub fn spawn<FutureType>(
-        &self,
-        future: FutureType,
-    ) -> Result<TaskHandle<FutureType::Output>, SpawnError>
-    where
-        FutureType: Future + Send + 'static,
-        FutureType::Output: Send + 'static,
-    {
-        self.scheduler.shared.spawn(&self.owner, future)
-    }
-
-    pub fn close(&self) {
-        self.scheduler.shared.close(Some(&self.owner), false);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.owner.is_empty()
-    }
-
-    /// Wait for direct children. Panics if called by one of those children.
-    pub async fn wait(&self) {
-        assert_outside_owner(&self.owner);
-        self.owner.wait().await;
-    }
-
-    /// Cancel direct children and join their destruction.
-    pub async fn stop(&self) {
-        assert_outside_owner(&self.owner);
-        self.scheduler.shared.close(Some(&self.owner), true);
-        self.owner.wait().await;
-    }
-}
-
-impl Drop for Barrier {
-    fn drop(&mut self) {
-        self.scheduler.shared.close(Some(&self.owner), true);
-    }
-}
-
-fn assert_outside_owner(owner: &Arc<Owner>) {
+fn assert_outside_scheduler(shared: &Arc<Shared>) {
     assert!(
-        CURRENT_OWNER.with(|current| current
-            .borrow()
-            .as_ref()
-            .is_none_or(|current| !Arc::ptr_eq(current, owner))),
-        "a task cannot wait for its own owner"
+        CURRENT_SCHEDULER.with(|current| !Weak::ptr_eq(&current.borrow(), &Arc::downgrade(shared))),
+        "a task cannot shut down its own scheduler"
     );
-}
-
-fn assert_outside_scheduler(shared: &Shared) {
-    let current = CURRENT_OWNER.with(|current| current.borrow().clone());
-    if let Some(current) = current {
-        let registry = shared
-            .registry
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        assert!(
-            !registry
-                .tasks
-                .values()
-                .any(|task| Arc::ptr_eq(&task.state.owner, &current)),
-            "a task cannot shut down its own scheduler"
-        );
-    }
 }
 
 /// A Tokio socket registered with the adapter's runtime.
@@ -795,24 +696,7 @@ impl Spawn for SchedulerHandle {
         FutureType: Future + Send + 'static,
         FutureType::Output: Send + 'static,
     {
-        self.shared.spawn(&self.shared.root, future)
-    }
-}
-
-impl Spawn for Barrier {
-    type Handle<Output>
-        = TaskHandle<Output>
-    where
-        Output: Send + 'static;
-    fn spawn<FutureType>(
-        &self,
-        future: FutureType,
-    ) -> Result<TaskHandle<FutureType::Output>, SpawnError>
-    where
-        FutureType: Future + Send + 'static,
-        FutureType::Output: Send + 'static,
-    {
-        self.scheduler.shared.spawn(&self.owner, future)
+        self.shared.spawn(future)
     }
 }
 

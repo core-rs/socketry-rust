@@ -4,7 +4,7 @@ This document records the agreed direction for `socketry-executor`: an explicit 
 
 ## Execution model
 
-Use Rust's existing `Future`, `Context`, and `Waker` contracts. A separate computation trait is unnecessary for the current design. Ordinary operations construct futures; awaiting them allows the executor to poll them and suspend until a wakeup permits progress. Polling does not mean busy waiting. The explicit submission methods described below are an exception: they transfer responsibility to the scheduler when called, with optional futures for observing completion.
+Use Rust's existing `Future`, `Context`, and `Waker` contracts. A separate computation trait is unnecessary for the current design. Operations construct futures; awaiting them allows the executor to poll them and suspend until a wakeup permits progress. Polling does not mean busy waiting. Selected request operations distinguish waiting for admission from waiting for execution to complete, as described below; constructing their futures does not submit work.
 
 The scheduler executes pinned futures on ordinary worker stacks. Independently spawned tasks are `Send + 'static` and can migrate between workers, while their pinned storage remains stationary. Only one worker polls a task at a time. Blocking system calls must run outside the workers that poll futures.
 
@@ -39,7 +39,7 @@ A trait bound guarantees an implementation exists; it cannot guarantee that ever
 
 Use a blocking pool when native asynchronous support is unavailable. This is acceptable on Windows and other platforms. A fallback may change performance, but must preserve the documented semantics. Allocation cannot silently become truncation, message I/O cannot discard ancillary data, and a positioned operation cannot alter the shared cursor if its contract promises to preserve it.
 
-Bound blocking concurrency and provide asynchronous admission/backpressure. Cancellation can prevent queued work from starting. Once a blocking syscall has started, the operation may have to finish; retain its resources and buffer throughout. A cancellation result must not imply that completed side effects were undone.
+Bound blocking concurrency and provide asynchronous admission/backpressure. For ordinary cancellation-aware operations, cancellation can prevent queued work from starting. The non-cancellable submission/completion pairs below retain responsibility once admitted. Once a blocking syscall has started, the operation may have to finish; retain its resources and buffer throughout. A cancellation result must not imply that completed side effects were undone.
 
 An application explicitly selecting a specialized backend may receive an initialization failure instead of automatic fallback. The policy must be clear at that boundary. The current Linux io\_uring backend follows this approach: it probes its requirements and fails initialization when they are unavailable. Automatic backend fallback remains a design option, not implemented behaviour.
 
@@ -144,7 +144,7 @@ pub type OperationResult<T> = Result<T, OperationError>;
 pub type BufferResult<B> = (OperationResult<usize>, B);
 ```
 
-Operations borrowing a resource return `OperationResult<T>`. Operations taking a caller-owned buffer return `BufferResult<B>`, with the buffer outside the `Result` so it can be recovered on failure. Reads and writes return partial transfer counts. A read's count identifies the valid received prefix; a write sends only initialized bytes. Read-exact, write-all, and send-all loops belong above this interface.
+Ordinary cancellation-aware operations borrowing a resource return `OperationResult<T>`. Operations taking a caller-owned buffer return `BufferResult<B>`, with the buffer outside the `Result` so it can be recovered on failure. Reads and writes return partial transfer counts. A read's count identifies the valid received prefix; a write sends only initialized bytes. Read-exact, write-all, and send-all loops belong above this interface. The non-cancellable submission/completion pairs below return `std::io::Result<()>` instead.
 
 An already-cancelled input prevents new ordinary work from starting. For work already in flight, cancellation requests a cooperative stop; awaiting the operation still establishes its completion and resource ownership. Report a successful transfer that races cancellation as progress rather than replacing its count with `Cancelled`. Cancellation never promises to undo side effects.
 
@@ -238,7 +238,7 @@ pub trait Clock: Send + Sync {
 }
 ```
 
-The proposed associated file resource allows a backend-owned handle rather than fixing future implementations to `std::fs::File`. This is a change from the current `File` trait. The connect convenience above creates and connects a socket; a lower-level variant taking an existing socket may be needed for callers that configure it before connecting. Socket creation, binding, listening, registration, message ownership, and portable flags still need their own signatures. Explicit close follows the non-cancellable ownership-transfer contract below.
+The proposed associated file resource allows a backend-owned handle rather than fixing future implementations to `std::fs::File`. This is a change from the current `File` trait. The connect convenience above creates and connects a socket; a lower-level variant taking an existing socket may be needed for callers that configure it before connecting. Socket creation, binding, listening, registration, message ownership, and portable flags still need their own signatures. Explicit close consumes its handle and follows the shared admission contract below.
 
 Additional capability shapes follow the same convention:
 
@@ -256,32 +256,38 @@ These rows identify extension capabilities; they do not require every scheduler 
 
 Cleanup and selected request operations have two proposed forms:
 
-| Submit without waiting | Observe completion | Resource input |
+| Await admission | Await admission and completion | Resource input |
 | --- | --- | --- |
-| `file_close(file)` | `file_close_wait(file).await` | Consume the file handle. |
-| `socket_close(socket)` | `socket_close_wait(socket).await` | Consume the socket handle. |
-| `socket_shutdown(socket, how)` | `socket_shutdown_wait(socket, how).await` | Borrow the socket; retain its backend resource while pending. |
-| `file_advise(file, offset, length, advice)` | `file_advise_wait(file, offset, length, advice).await` | Borrow the file; retain its backend resource while pending. |
+| `file_close(file).await` | `file_close_wait(file).await` | Consume the file handle. |
+| `socket_close(socket).await` | `socket_close_wait(socket).await` | Consume the socket handle. |
+| `socket_shutdown(socket, how).await` | `socket_shutdown_wait(socket, how).await` | Borrow the socket; retain its backend resource while pending. |
+| `file_advise(file, offset, length, advice).await` | `file_advise_wait(file, offset, length, advice).await` | Borrow the file; retain its backend resource while pending. |
 
-Both forms are ordinary Rust methods that submit work when called. The form without `_wait` returns `()` once the scheduler accepts responsibility; it does not wait for OS completion. The `_wait` form submits the same work and returns a future yielding `std::io::Result<()>` on completion. It observes the result through polling and wakeups without blocking an executor worker. Use `_wait` rather than `_sync`, which could imply blocking the calling thread or synchronizing file contents.
+Both forms return lazy futures yielding `std::io::Result<()>`. Polling first waits for admission capacity and transfers responsibility for the job to the scheduler. If the bounded submission queue is full, the future suspends through wakeups until capacity becomes available; it does not block an executor worker. Constructing or discarding an unpolled future does not enqueue the job.
+
+The form without `_wait` returns `Ok(())` once the scheduler accepts responsibility. This confirms admission, not that the syscall has started or finished; errors from this form concern admission. The `_wait` form uses the same admission path and additionally waits for OS completion, reporting admission or execution errors. Use `_wait` rather than `_sync`, which could imply blocking the calling thread or synchronizing file contents.
 
 For example, these are alternative ways to close an owned handle:
 
 ```rust
-scheduler.file_close(file);
+scheduler.file_close(file).await?; // Accepted for execution.
 // Or, when completion and errors matter:
 scheduler.file_close_wait(file).await?;
 ```
 
-These methods omit cancellation inputs. Once submitted, the scheduler must carry out the request even if the completion future is dropped or the caller's cancellation scope is cancelled. Close transfers ownership in both forms; dropping its waiter does not return the handle or abandon cleanup. Admission and backpressure mechanics remain to be specified. An infallible submission method must retain responsibility when execution capacity is unavailable, rather than discard the request or block an executor worker waiting for capacity.
+All four operation pairs use the same admission queue and job ownership mechanism. Close consumes its handle, while shutdown and advice retain the borrowed resource's underlying backend ownership for the job. This contract does not require a separate per-fd retirement mechanism. Queue capacity and fairness remain implementation choices; bounding a scheduler queue does not itself bound the number of caller-owned futures waiting for admission.
+
+These methods omit cancellation inputs. Before acceptance, the admission future owns its inputs: dropping it, or rejecting admission, releases those inputs according to their ordinary destruction rules. For close, this means dropping the consumed handle; no asynchronous close job has been accepted. The resource's ordinary destruction policy remains to be specified and is not replaced by constructing a close future.
+
+Once the scheduler accepts the job, it must carry out the request even if the caller drops either form's future or its cancellation scope is cancelled. Acceptance is the ownership boundary even if the caller abandons the future before observing its result. Dropping a waiter after acceptance does not return a consumed handle or undo submission.
 
 Submitting work does not establish completion order. Preserve the required dependencies on earlier I/O through operation tracking or explicit chains, especially for close and write-side shutdown. Retain underlying resources until dependent backend access ends, and do not reuse a registered descriptor slot merely because close was queued. Graceful runtime draining must include outstanding submitted jobs even when they have no application waiter.
 
 Shutdown completion confirms the local shutdown operation, not remote receipt or processing. Advice completion confirms that the hint was processed, not that all requested data was prefetched; `WILLNEED` initiates nonblocking read-ahead. See [shutdown](https://man7.org/linux/man-pages/man2/shutdown.2.html) and [file advice](https://man7.org/linux/man-pages/man2/posix_fadvise.2.html).
 
-The contract is portable. A blocking-pool backend queues a job that owns or retains the required resources. The caller can return without waiting for that job. The `_wait` future receives that job's result through a completion notification; it does not join the worker thread. Workers remain reusable. A readiness backend can retain pending requests in its state, while an io_uring backend can submit SQEs. All backends must preserve ownership, ordering, bounded execution concurrency, and draining semantics.
+The contract is portable. A blocking-pool backend admits a job that owns or retains the required resources into its bounded queue. The ordinary form returns after admission without waiting for execution. The `_wait` future additionally receives that job's result through a completion notification; it does not join the worker thread. Workers remain reusable. A readiness backend can retain admitted requests in its state, while an io\_uring backend can queue them for SQE submission. All backends must preserve admission backpressure, ownership, ordering, bounded execution concurrency, and draining semantics.
 
-Not waiting at the application level does not automatically allow the backend to skip completion tracking. For eligible io_uring requests, `IOSQE_CQE_SKIP_SUCCESS` can suppress successful CQEs; failures still produce CQEs that the selector must consume. Only use it when resource retirement and dependencies remain safe without the successful CQE. It is incompatible with `IOSQE_IO_DRAIN` in the same ring. The current selector expects a terminal CQE per request and needs changes before using this optimization. See [CQE suppression](https://man7.org/linux/man-pages/man2/io_uring_enter.2.html).
+Not waiting at the application level does not automatically allow the backend to skip completion tracking. For eligible io\_uring requests, `IOSQE_CQE_SKIP_SUCCESS` can suppress successful CQEs; failures still produce CQEs that the selector must consume. Only use it when resource retirement and dependencies remain safe without the successful CQE. It is incompatible with `IOSQE_IO_DRAIN` in the same ring. The current selector expects a terminal CQE per request and needs changes before using this optimization. See [CQE suppression](https://man7.org/linux/man-pages/man2/io_uring_enter.2.html).
 
 Close errors can still be useful diagnostics, including delayed write failures. The completion-aware form exposes them; the form without a waiter leaves error handling to the backend's diagnostics policy. Do not blindly retry close after an error: Linux normally releases the descriptor before reporting such failures. See [close errors](https://man7.org/linux/man-pages/man2/close.2.html).
 
@@ -617,7 +623,7 @@ Registration does not itself guarantee zero-copy transport. Zero-copy sends can 
 | Capabilities | `File`, `Socket`, `Clock`, and `Spawn` implemented; broader hooks and optional extension boundaries remain proposed. |
 | Linked operations | Prepared chains and a portable `Linked` capability remain proposed; native SQE linking, whole-chain blocking jobs, and readiness sequencing are not implemented. |
 | File operations | Owned-buffer positioned read/write implemented; stateful I/O, lifecycle, allocation and metadata hooks pending. |
-| Submission and completion | Close, socket shutdown, and file advice pairs remain proposed; eager submission, optional waiters, and safe CQE suppression are not implemented. |
+| Submission and completion | Close, socket shutdown, and file advice pairs remain proposed; shared asynchronous admission, optional completion waiting, and safe CQE suppression are not implemented. |
 | Socket operations | TCP registration, connect, accept, read/write and readiness implemented; general sockets and message I/O pending. |
 | Backends | Shared native readiness, blocking file fallbacks, a Linux io_uring selector, and an adapter to an existing Tokio runtime implemented. |
 | Buffers | Owned `Vec<u8>` implemented; generic owned-buffer traits, fixed registered leases, and provided/software pools remain proposed. |

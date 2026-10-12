@@ -133,6 +133,8 @@ scheduler.file_read_at(file, buffer, offset, cancellation)
 scheduler.socket_accept(listener, cancellation)
 scheduler.socket_sendmsg(socket, message, flags, cancellation)
 scheduler.address_resolve(name, options, cancellation)
+scheduler.now()
+scheduler.sleep_until(deadline, cancellation)
 scheduler.sleep(duration, cancellation)
 ```
 
@@ -140,9 +142,46 @@ These are illustrative proposed signatures, not current APIs. Exact resource, op
 
 An optional context pairing a scheduler reference with a cancellation signal could reduce repetitive arguments. Such a context should preserve explicit dependency and cancellation boundaries; it is a convenience, not a new computation abstraction.
 
-Sleep uses monotonic time and completes when the requested interval has elapsed. It need not return the elapsed time; callers can measure that separately. Cancellation-aware sleep is expected to return completion or `Cancelled`. Current `Clock::sleep` returns `()` and has no cancellation argument.
+`Clock` supplies synchronous monotonic time access and cancellable timer futures, as specified below. Current `Clock::sleep` only accepts a duration and returns `()`; `now`, `sleep_until`, and cancellation-aware waits remain proposed.
 
 Blocking and unblocking a suspended computation should use registration and wakeups with protection against lost notifications. This synchronization interface is separate from running a blocking syscall on a thread pool; its precise API remains open.
+
+## Clock and timer composition
+
+`Clock::now()` returns monotonic, nondecreasing time in the scheduler's clock domain. Use it for durations and deadlines. Wall-clock timestamps would belong to a separate capability; changing calendar time must not change these deadlines.
+
+Use `std::time::Instant` for instants and `std::time::Duration` for intervals initially. Generic code obtains every current-time observation through `scheduler.now()`, including elapsed-time measurements:
+
+```rust
+let started = scheduler.now();
+// Perform work using this scheduler.
+let elapsed = scheduler.now().duration_since(started);
+```
+
+Calling `Instant::now()` or an instant's `elapsed()` directly bypasses the scheduler's clock. The standard type permits those calls, so this is an interface convention rather than a type-enforced restriction. Deadline arithmetic should use `checked_add` and handle an unrepresentable deadline rather than relying on overflowing addition. The public error mapping for that case remains to be specified. Do not promise uniform behaviour across system suspend, which Rust leaves platform-dependent. See the [standard Instant contract](https://doc.rust-lang.org/std/time/struct.Instant.html).
+
+A simulated scheduler can choose an initial instant and advance an offset under test control. The Tokio adapter can obtain time from its selected runtime's clock and convert Tokio instants through `into_std` and `from_std`, preserving virtual-time behaviour when that runtime pauses or advances time. These conversions are supported by [Tokio's Instant](https://docs.rs/tokio/latest/tokio/time/struct.Instant.html). Deadlines and observations must belong to the same clock domain; sharing the standard value type does not make independently advancing simulated clocks interchangeable.
+
+`now` and `sleep_until` are the fundamental timer operations. `sleep(duration, cancellation)` is a convenience that can compute a deadline and delegate to `sleep_until`. The proposed timer contract is:
+
+- Timer futures are lazy. Relative sleep measures its duration from the first poll; an absolute deadline stays fixed regardless of when its future is first polled.
+- A successful wait completes at or after its deadline. Scheduling can delay resumption, and the interface does not promise precise execution at the deadline.
+- An already-cancelled signal returns `Cancelled` without registering a timer. Otherwise, a deadline already reached can complete immediately. Zero-duration sleep does not promise a scheduler yield.
+- Observed cancellation ends the timer wait with `OperationError::Cancelled`; it does not cancel the surrounding task.
+- Dropping a timer future abandons the wait and safely releases its registration. Backend reclamation may be deferred, but racing wakeups must not access destroyed future state or a reused registration.
+- Completion returns `OperationResult<()>`; callers measure elapsed time separately through the scheduler.
+
+### Composing a deadline with I/O
+
+A cooperative deadline wrapper can poll an operation and a timer within the same task. Each future registers wakeups for the enclosing task; no monitoring task or busy waiting is required. For a file read, give the operation a child cancellation signal and follow this sequence:
+
+1. Poll the read and `sleep_until(deadline, cancellation)` together.
+2. If the read completes first, return its result and buffer, dropping the timer.
+3. If the timer expires first, request cancellation on the read's child signal and continue polling the read until it completes.
+
+The deadline determines when cancellation is requested, not when the wrapper must return. Submitted I/O may still access its buffer or finish successfully after that request; preserve the operation's eventual result and returned buffer. A successful read observed alongside timer expiry remains useful progress. Work that ignores cancellation may continue beyond the deadline. Cancelling the parent signal also reaches the operation through its child signal. Abandoning the wrapper drops its futures under the ordinary operation-lifetime contract and gives up cooperative draining.
+
+Timeouts, intervals, retry policies, and callback scheduling are higher-level operations built on this interface. Periodic work can advance an absolute deadline to avoid drift from repeated relative sleeps and choose its own missed-tick policy. Timer heaps, batching, registration storage, and wakeup mechanisms remain backend details. A reusable timer/reset interface can be considered later if measurements justify it.
 
 ## High-level interface sketch
 
@@ -248,6 +287,14 @@ pub trait Socket: Send + Sync {
 }
 
 pub trait Clock: Send + Sync {
+    fn now(&self) -> Instant;
+
+    fn sleep_until(
+        &self,
+        deadline: Instant,
+        cancellation: &Cancellation,
+    ) -> impl Future<Output = OperationResult<()>> + Send;
+
     fn sleep(
         &self,
         duration: Duration,
@@ -647,7 +694,7 @@ Registration does not itself guarantee zero-copy transport. Zero-copy sends can 
 | Buffers | Owned `Vec<u8>` implemented; generic owned-buffer traits, fixed registered leases, and provided/software pools remain proposed. |
 | Buffer forwarding | `with_previous_buffer` is hypothetical, with no selected implementation target. |
 | Optimization | Dedicated io_uring selector uses an unbounded command channel and a completion channel per operation; pooling and submission backpressure pending. |
-| Timers | Existing backend timers provide sleep; the io-event timer algorithm port remains planned. |
+| Timers | Existing `Clock::sleep(duration)` returns `()` without cancellation. Monotonic `now`, cancellable `sleep_until` and relative sleep, generic deadline composition, and the io-event timer algorithm port remain proposed. |
 
 Next design work is to choose the dependable core and extension boundaries, cancellation-aware error and buffer-return contracts, linked-chain continuation rules, resource lifecycle semantics, and owned-buffer trait safety requirements. Then integrate cooperative cancellation into operations and runtime shutdown before expanding optional optimizations.
 

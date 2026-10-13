@@ -4,13 +4,18 @@
 //! Owned tasks and cooperative future polling on work-stealing workers.
 //!
 //! Tasks require `Send + 'static` and use the ordinary worker thread stack.
-//! The scheduler owns spawned tasks even when their join handles are dropped.
+//! Task handles own execution lifetimes; dropping one abandons its task.
 #![doc = include_str!("../readme.md")]
 
+mod buffer_slice;
 mod cancellation;
 mod cancelled;
 mod defer_cancel;
+mod file_options;
+mod io_buf;
+mod io_buf_mut;
 mod notify;
+mod operation_error;
 pub mod scheduler;
 #[cfg(all(unix, feature = "signals", any(feature = "native", feature = "tokio")))]
 mod signal_registration;
@@ -18,12 +23,18 @@ mod spawn;
 mod task;
 mod worker;
 
+pub use buffer_slice::BufferSlice;
 pub use cancellation::Cancellation;
 pub use cancelled::Cancelled;
 pub use defer_cancel::defer_cancel;
+pub use file_options::FileOptions;
+pub use io_buf::IoBuf;
+pub use io_buf_mut::IoBufMut;
 pub use notify::Notify;
+pub use operation_error::{OperationError, OperationResult};
 pub use scheduler::{
     BufferResult, Clock, File, Interest, Scheduler, SchedulerHandle, Signals, Socket,
+    SocketRegistration,
 };
 #[cfg(all(unix, feature = "signals"))]
 pub use signal_hook::consts::signal;

@@ -216,7 +216,7 @@ impl SchedulerHandle {
         Self { shared }
     }
 
-    /// Spawn a task owned by the scheduler.
+    /// Spawn a task whose returned handle owns its execution lifetime.
     pub fn spawn<FutureType>(
         &self,
         future: FutureType,
@@ -254,8 +254,8 @@ impl Spawn for SchedulerHandle {
 
 /// A futures executor with worker queues, remote inboxes and idle work stealing.
 ///
-/// Workers start at construction. Tasks run until completion or cancellation,
-/// even if their join handles are dropped. There are no private task stacks.
+/// Workers start at construction. Tasks run until completion or abandonment.
+/// Dropping an owning task handle requests destruction after an active poll. There are no private task stacks.
 /// Tasks must yield through pending futures; blocking calls block their worker.
 /// The `native` feature supplies I/O selectors and timers. The `io-uring`
 /// feature selects native completion reads/writes on Linux.
@@ -359,7 +359,7 @@ impl Scheduler {
         self.handle.worker_count()
     }
 
-    /// Spawn a task owned by this scheduler.
+    /// Spawn a task whose returned handle owns its execution lifetime.
     pub fn spawn<FutureType>(
         &self,
         future: FutureType,
@@ -390,8 +390,8 @@ impl Scheduler {
 
     /// Poll a root future on the calling thread while workers execute tasks.
     /// The root may borrow local data and need not be Send. It is not an owned
-    /// task: `Task::current()` is None. Spawned tasks belong to the scheduler.
-    /// Returning does not cancel other scheduler tasks.
+    /// task: `Task::current()` is None. Returning drops task handles still owned
+    /// by the root; handles moved elsewhere retain their execution lifetimes.
     ///
     /// # Panics
     /// Panics on a Socketry worker. Use `.await` inside tasks.

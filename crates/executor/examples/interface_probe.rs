@@ -1,54 +1,61 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Executable design experiment, not an exported scheduler API.
+//! The same generic application using the public File and Socket capabilities.
 //! Run with `--features tokio` for native, Tokio, and simulated I/O.
 //! With `--no-default-features`, only the in-memory implementation runs.
-
-#[path = "interface_probe/file.rs"]
-mod file;
-#[cfg(any(feature = "native", feature = "tokio"))]
-#[path = "interface_probe/real.rs"]
-mod real;
 #[path = "interface_probe/simulated.rs"]
 mod simulated;
-#[path = "interface_probe/socket.rs"]
-mod socket;
 
-use file::{File, Open};
-use socket::Socket;
+use socketry_executor::{Cancellation, File, FileOptions, IoBuf, OperationResult, Socket};
 use std::{io, path::Path};
+static NEVER: Cancellation = Cancellation::never();
 
 const PAYLOAD: &[u8] = b"Explicit schedulers keep protocol code portable.\n";
 const BUFFER_SIZE: usize = 16;
 
 /// Application code only sees the backend's associated resources.
-async fn copy<S: File>(scheduler: &S, source: &Path, destination: &Path) -> io::Result<u64> {
-    let source = scheduler.file_open(source, Open::Read).await?;
-    let destination = scheduler.file_open(destination, Open::Create).await?;
+async fn copy<S: File>(
+    scheduler: &S,
+    source: &Path,
+    destination: &Path,
+    cancellation: &Cancellation,
+) -> OperationResult<u64> {
+    let source = scheduler
+        .file_open(source, FileOptions::READ, cancellation)
+        .await?;
+    let destination = scheduler
+        .file_open(destination, FileOptions::CREATE, cancellation)
+        .await?;
     let mut buffer = vec![0; BUFFER_SIZE];
     let mut offset = 0;
     loop {
-        let (result, returned) = scheduler.file_read_at(&source, buffer, offset).await;
+        let (result, returned) = scheduler
+            .file_read_at(&source, buffer, offset, cancellation)
+            .await;
         buffer = returned;
         let count = result?;
         if count == 0 {
             return Ok(offset);
         }
-        buffer.truncate(count);
-        while !buffer.is_empty() {
-            let (result, returned) = scheduler.file_write_at(&destination, buffer, offset).await;
-            buffer = returned;
+        let mut written = 0;
+        while written < count {
+            let (result, returned) = scheduler
+                .file_write_at(
+                    &destination,
+                    buffer.slice(written..count),
+                    offset + written as u64,
+                    cancellation,
+                )
+                .await;
+            buffer = returned.into_inner();
             let count = result?;
             if count == 0 {
-                return Err(io::ErrorKind::WriteZero.into());
+                return Err(io::Error::from(io::ErrorKind::WriteZero).into());
             }
-            offset += count as u64;
-            // Vec has no owned subrange view. This moves the unwritten suffix
-            // within the same allocation; a future IoBuf view should avoid it.
-            buffer.drain(..count);
+            written += count;
         }
-        buffer.resize(BUFFER_SIZE, 0);
+        offset += count as u64;
     }
 }
 
@@ -56,49 +63,57 @@ async fn send_all<S: Socket>(
     scheduler: &S,
     socket: &S::Socket,
     mut buffer: Vec<u8>,
-) -> io::Result<()> {
-    while !buffer.is_empty() {
-        let (result, returned) = scheduler.socket_send(socket, buffer).await;
-        buffer = returned;
+    cancellation: &Cancellation,
+) -> OperationResult<()> {
+    let mut written = 0;
+    while written < buffer.len() {
+        let (result, returned) = scheduler
+            .io_write(socket, buffer.slice(written..), cancellation)
+            .await;
+        buffer = returned.into_inner();
         let count = result?;
         if count == 0 {
-            return Err(io::ErrorKind::WriteZero.into());
+            return Err(io::Error::from(io::ErrorKind::WriteZero).into());
         }
-        buffer.drain(..count);
+        written += count;
     }
     Ok(())
 }
 
 /// Serve one connection until peer EOF, echoing each received prefix.
-async fn serve<S: Socket>(scheduler: &S, listener: &S::Listener) -> io::Result<usize> {
-    let socket = scheduler.socket_accept(listener).await?;
+async fn serve<S: Socket>(scheduler: &S, listener: &S::Listener) -> OperationResult<usize> {
+    let (socket, _) = scheduler.accept(listener, &NEVER).await?;
     let mut total = 0;
     loop {
-        let (result, mut buffer) = scheduler.socket_recv(&socket, vec![0; BUFFER_SIZE]).await;
+        let (result, mut buffer) = scheduler
+            .io_read(&socket, vec![0; BUFFER_SIZE], &NEVER)
+            .await;
         let count = result?;
         if count == 0 {
             return Ok(total);
         }
         total += count;
         buffer.truncate(count);
-        send_all(scheduler, &socket, buffer).await?;
+        send_all(scheduler, &socket, buffer, &NEVER).await?;
     }
 }
 
-async fn exchange<S: Socket>(scheduler: &S) -> io::Result<()> {
+async fn exchange<S: Socket>(scheduler: &S) -> OperationResult<()> {
     let listener = scheduler
-        .socket_listen("127.0.0.1:0".parse().unwrap())
+        .socket_listen("127.0.0.1:0".parse().unwrap(), &NEVER)
         .await?;
     let address = scheduler.listener_addr(&listener)?;
     let client = async {
-        let socket = scheduler.socket_connect(address).await?;
-        send_all(scheduler, &socket, PAYLOAD.to_vec()).await?;
+        let socket = scheduler.connect(address, &NEVER).await?;
+        send_all(scheduler, &socket, PAYLOAD.to_vec(), &NEVER).await?;
         let mut received = Vec::new();
         while received.len() < PAYLOAD.len() {
-            let (result, buffer) = scheduler.socket_recv(&socket, vec![0; BUFFER_SIZE]).await;
+            let (result, buffer) = scheduler
+                .io_read(&socket, vec![0; BUFFER_SIZE], &NEVER)
+                .await;
             let count = result?;
             if count == 0 {
-                return Err(io::ErrorKind::UnexpectedEof.into());
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
             }
             received.extend_from_slice(&buffer[..count]);
         }
@@ -117,9 +132,9 @@ async fn exercise<S: File + Socket>(
     scheduler: &S,
     source: &Path,
     destination: &Path,
-) -> io::Result<()> {
+) -> OperationResult<()> {
     assert_eq!(
-        copy(scheduler, source, destination).await?,
+        copy(scheduler, source, destination, &NEVER).await?,
         PAYLOAD.len() as u64
     );
     exchange(scheduler).await
@@ -145,9 +160,7 @@ fn main() -> io::Result<()> {
     #[cfg(feature = "native")]
     {
         let scheduler = socketry_executor::Scheduler::with_workers(2)?;
-        let backend = real::Native {
-            scheduler: scheduler.handle(),
-        };
+        let backend = scheduler.handle();
         let destination = directory.path().join("native-copy");
         scheduler.block_on(exercise(&backend, &source, &destination))?;
         assert_eq!(std::fs::read(destination)?, PAYLOAD);
@@ -160,10 +173,7 @@ fn main() -> io::Result<()> {
             .build()?;
         let scheduler =
             socketry_executor::scheduler::tokio::Scheduler::new(runtime.handle().clone());
-        let backend = real::Tokio {
-            scheduler: scheduler.handle(),
-            runtime: runtime.handle().clone(),
-        };
+        let backend = scheduler.handle();
         let destination = directory.path().join("tokio-copy");
         runtime.block_on(exercise(&backend, &source, &destination))?;
         assert_eq!(std::fs::read(destination)?, PAYLOAD);

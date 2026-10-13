@@ -20,7 +20,7 @@ Pass the implementation into libraries explicitly. A library should require the 
 
 ## Capability traits and static dispatch
 
-`File`, `Socket`, and `Clock` name scheduler capabilities. `Spawn` provides primitive task dispatch; the scheduler retains spawned tasks independently of their result handles. `File` is the capability trait; `std::fs::File` is currently the resource type, conventionally imported as `StdFile` when both names are needed. `Socket` replaces the earlier capability name `Network`.
+`File`, `Socket`, and `Clock` name scheduler capabilities. `Spawn` provides primitive task dispatch and returns an owning task handle. `File::File`, `Socket::Socket`, and `Socket::Listener` are associated resource types chosen by each implementation. `Socket` replaces the earlier capability name `Network`.
 
 Prefer generic trait bounds, concrete resource types, and concrete future types. These allow compile-time capability checking, monomorphization, and inlining without requiring a boxed future for each operation. The compiler decides which calls to inline; the interface should make that optimization possible.
 
@@ -34,11 +34,11 @@ Do not create one trait per syscall automatically. Group operations around capab
 
 Generic code takes a scheduler such as `&S`, with bounds describing the portion of the interface it uses. A task group may require `S: Spawn`; a timed primitive may additionally require `Clock`; an HTTP server may require `Spawn + Socket`. These bounds describe the same chosen scheduler implementation. A named aggregate trait can make a standard bundle convenient once its required capabilities are settled; it should not force a task-only primitive to require file or socket support. The current public `Scheduler` is the concrete native implementation, not an aggregate scheduler trait.
 
-Resource creation belongs inside the corresponding capability. `File` declares an associated file type, and file creation returns that type. `Socket` declares associated socket and listener types, with scheduler-level creation, binding, and listening hooks. Generic consumers use those associated types rather than creating a `std::fs::File` or `std::net::TcpListener` themselves. Exact socket-creation signatures remain to be specified.
+Resource creation belongs inside the corresponding capability. `File` declares an associated file type, and file creation returns that type. `Socket` declares associated socket and listener types, with a combined TCP `socket_listen` operation and `connect`. Generic consumers use those associated types rather than creating a `std::fs::File` or `std::net::TcpListener` themselves. Separate socket creation, binding, options, and listening remain extensions to specify.
 
 The interface does not require `Arc` around every resource. Concrete implementations choose their resource representation and how to retain it during in-flight work. They may use OS handles, registered-resource tables, shared ownership, or simulated resource identifiers. Taking a resource by reference does not remove the backend's obligation to retain everything still accessible by a submitted operation after its waiting future is dropped.
 
-These are agreed interface requirements, not implemented changes. The current `File` capability still accepts `Arc<std::fs::File>`, and socket registration still accepts `std::net` resources. Resource creation and representation must enter the abstraction before generic consumers can run entirely against a simulated scheduler.
+These resource contracts are implemented. `File::file_open` accepts public `FileOptions`; positioned operations borrow `&Self::File`. The native and Tokio implementations choose `Arc<std::fs::File>` internally. `Socket` includes listener/local/peer address inspection. Optional `SocketRegistration` imports existing `std::net` resources and is not required of simulated implementations.
 
 ## Platform support and fallbacks
 
@@ -65,7 +65,7 @@ An application explicitly selecting a specialized backend may receive an initial
 
 Cancellation signals intent. Task handles establish completion. Resource ownership determines what remains alive. Keep these responsibilities distinct.
 
-Rust's destruction semantics help release owned resources and make an implicit cancellation hierarchy unnecessary. They do not replace task ownership or asynchronous cleanup: ordinary `Drop` cannot await, and dropping a future does not execute the rest of its async body. The scheduler retains independently spawned tasks, and callers explicitly track completion through their handles.
+Rust's destruction semantics help release owned resources and make an implicit cancellation hierarchy unnecessary. They do not replace task ownership or asynchronous cleanup: ordinary `Drop` cannot await, and dropping a future does not execute the rest of its async body. An owning task handle controls whether an independently spawned future remains live, and awaiting the handle establishes its completion.
 
 Use explicit cancellation scopes to describe shutdown relationships. A process can have a root signal and each service can have a child signal. This cancellation tree need not mirror the task ownership graph. A task tree is not imposed on every future.
 
@@ -138,9 +138,9 @@ drop(reload_registration);
 drop(shutdown_registration);
 ```
 
-Dropping the guard stops new dispatch admission for that subscription and requests backend cleanup. Already-admitted dispatch may finish and must retain its destination until completion. Drop does not join callbacks or await cleanup. Other subscriptions remain active. Each registration spawns a task owned by its scheduler. The application must keep both the guard and scheduler/runtime alive and driven throughout graceful draining. Scheduler shutdown also ends delivery and releases the subscription, even if a guard survives. Repeated shutdown signals have no automatic escalation behavior.
+Dropping the guard stops new dispatch admission for that subscription and requests backend cleanup. Already-admitted dispatch may finish and must retain its destination until completion. Drop does not join callbacks or await cleanup. Other subscriptions remain active. Each registration retains the owning handle of a task executed by its scheduler. The application must keep both the guard and scheduler/runtime alive and driven throughout graceful draining. Scheduler shutdown also ends delivery and releases the subscription, even if a guard survives. Repeated shutdown signals have no automatic escalation behavior.
 
-`Notify` runs in ordinary thread context, outside raw signal handlers and scheduler locks. It may enqueue or wake work without being async-signal-safe, and should return promptly. The Unix backend uses signal-hook's self-pipe with an asynchronous reader in a spawned scheduler task: async-io for native, or the supplied Tokio runtime for the adapter. There is no dedicated thread per registration and no hidden cross-runtime reactor. Guard removal cancels the task's wait so it exits and releases the subscription. The task yields after each batch for fairness. Callback panics follow the scheduler's normal task panic handling; EOF or a terminal read error also ends delivery. Linux signalfd or kqueue can be future implementations with the same public contract, subject to their process/thread setup requirements.
+`Notify` runs in ordinary thread context, outside raw signal handlers and scheduler locks. It may enqueue or wake work without being async-signal-safe, and should return promptly. The Unix backend uses signal-hook's self-pipe with an asynchronous reader in a spawned scheduler task: async-io for native, or the supplied Tokio runtime for the adapter. There is no dedicated thread per registration and no hidden cross-runtime reactor. Guard removal stops dispatch admission and drops the task handle; the task releases its subscription once any active poll finishes. The task yields after each batch for fairness. Callback panics follow the scheduler's normal task panic handling; EOF or a terminal read error also ends delivery. Linux signalfd or kqueue can be future implementations with the same public contract, subject to their process/thread setup requirements.
 
 The OS and backend can coalesce repeated signals before dispatch and need not preserve ordering between different signals. A queue retains delivered values while its consumer is busy; it cannot reconstruct every original occurrence. Removing a registration does not restore original process-wide signal dispositions, even after partial setup failure. Applications must coordinate signal ownership with other libraries and existing handlers.
 
@@ -158,11 +158,24 @@ The callback runs before the next protected poll, including the first poll if th
 
 The wrapper does not mask cancellation inputs passed to operations inside the future. Cleanup must use inputs that permit it to complete, such as a separate scope or `Cancellation::never()`. Dropping the wrapper still drops its future; it does not intercept task destruction.
 
-### Transitional runtime behaviour
+### Owning task handles and runtime lifetime
 
-The cooperative primitives are implemented, but existing `Task::cancel`, scheduler shutdown, and scheduler destruction still request destruction of task futures. They can bypass deferred asynchronous cleanup. Callers must currently request cooperative cancellation and await draining before invoking those lifecycle operations.
+`Spawn::spawn(future)` returns a movable, awaitable owning handle. Awaiting it explicitly waits for the task result. Dropping it abandons unfinished work: the runtime destroys the future after any currently active poll returns. Drop does not wait, run code after an await, or request graceful cancellation through an application's `Cancellation`.
 
-The executor has no implicit task hierarchy or task-group primitive. Completing or cancelling a task does not cancel independently spawned work. Await individual task handles when their completion matters. Higher-level groups can be implemented above `Spawn`; they are outside the executor for now. Cooperative scheduler shutdown remains future work.
+```rust,ignore
+let child = scheduler.spawn(async move { do_work().await })?;
+let waiter = scheduler.spawn(async move {
+    // Ownership moves here; this task now decides whether to await or drop it.
+    child.await
+})?;
+let result = waiter.await?;
+```
+
+There is no implicit parent/child tree. Destroying an owner drops the handles it still contains, which in turn abandon their tasks. A handle moved into another task or returned to a caller survives the original owner's destruction. Handles are `Send + 'static`; forgetting one deliberately relinquishes normal destructor cleanup and does not establish completion.
+
+Native handles request task destruction through the scheduler; Tokio handles abort the underlying task on drop. The existing explicit native `Task::cancel` also requests destruction. Scheduler shutdown and destruction abandon remaining futures. These mechanisms can bypass asynchronous cleanup; graceful callers instead request cooperative cancellation and await the handles they own before shutting down runtime services. Higher-level groups can implement that policy above `Spawn`.
+
+The scheduler does not automatically wait for all application work to finish gracefully. Backend resource retirement is a separate obligation: submitted I/O must retain buffers and descriptors until kernel access ends even after the task and its handle disappear. Future `_submit` operations will also require backend accounting for admitted work without application waiters.
 
 ## Scheduler operation interface
 
@@ -180,7 +193,7 @@ scheduler.sleep_until(deadline, cancellation)
 scheduler.sleep(duration, cancellation)
 ```
 
-These are illustrative proposed signatures, not current APIs. Exact resource, options, cancellation borrowing, and error types still need to be chosen. Operations that return owned buffers must preserve that ownership contract for errors and cancellation as well as success.
+This list includes proposed extensions. The implemented `File` methods are `file_open`, `file_read_at`, and `file_write_at`. The implemented TCP methods are `socket_listen`, `connect`, `accept`, `io_read`, `io_write`, and `io_wait`, plus synchronous `listener_addr`, `socket_local_addr`, and `socket_peer_addr`. Async I/O methods take `&Cancellation`; buffer operations return `(OperationResult<usize>, B)` on success, error, and cancellation.
 
 An optional context pairing a scheduler reference with a cancellation signal could reduce repetitive arguments. Such a context should preserve explicit dependency and cancellation boundaries; it is a convenience, not a new computation abstraction.
 
@@ -227,7 +240,7 @@ Timeouts, intervals, retry policies, and callback scheduling are higher-level op
 
 ## High-level interface sketch
 
-The following is a proposed API for discussion, not a description of implemented interfaces or a compilable example. It specifies caller-visible behaviour without choosing backend machinery. Resource, options, buffer, and error type names are provisional. `IoBuf` and `IoBufMut` stand for the owned-buffer contracts described below; their definitions remain open.
+The results and owned-buffer contracts below are implemented. The wider capability sketch includes proposed stateful file operations, syscall-oriented socket names and flags, and clock changes; consult the operation list above or the exported traits for the current subset. Pool, close/submission, and prepared-chain examples remain proposals.
 
 ### Results and ownership
 
@@ -260,7 +273,7 @@ pub trait File: Send + Sync {
     fn file_open(
         &self,
         path: &Path,
-        options: FileOpenOptions,
+        options: FileOptions,
         cancellation: &Cancellation,
     ) -> impl Future<Output = OperationResult<Self::File>> + Send;
 
@@ -345,7 +358,7 @@ pub trait Clock: Send + Sync {
 }
 ```
 
-The proposed associated file resource allows a backend-owned handle rather than fixing future implementations to `std::fs::File`. This is a change from the current `File` trait. The connect convenience above creates and connects a socket; a lower-level variant taking an existing socket may be needed for callers that configure it before connecting. Socket creation, binding, listening, registration, message ownership, and portable flags still need their own signatures. Explicit close consumes its handle and follows the shared admission contract below.
+The associated file resource and positioned file operations are implemented. Stateful `file_read`/`file_write` above remain proposed. Current TCP operations use `connect`, `accept`, `io_read`, and `io_write`, without flags; the sketch shows possible syscall-oriented extensions. The connect convenience creates and connects a socket; a lower-level variant taking an existing socket may be needed for callers that configure it before connecting. Combined TCP `socket_listen`, address inspection, and optional `SocketRegistration` are implemented; separate socket setup, message ownership, and portable flags still need signatures. Explicit close consumes its handle and follows the shared admission contract below.
 
 Additional capability shapes follow the same convention:
 
@@ -438,7 +451,7 @@ async fn read_header<S: File>(
     cancellation: &Cancellation,
 ) -> OperationResult<Vec<u8>> {
     let file = scheduler
-        .file_open(path, FileOpenOptions::read_only(), cancellation)
+        .file_open(path, FileOptions::READ, cancellation)
         .await?;
 
     let (result, mut buffer) = scheduler
@@ -483,7 +496,7 @@ async fn forward<S: Socket + PoolReceive>(
 }
 ```
 
-`send_all` here is a proposed higher-level helper, not a scheduler hook. It repeatedly calls `socket_send` with owned views of the unsent range, handles zero progress, and returns the lease on success or failure after all backend access ends. The view interface also remains to be specified. This example uses explicit sequential awaits and makes no assumption about `with_previous_buffer`.
+`send_all` here is a proposed higher-level helper, not a scheduler hook. It repeatedly calls `socket_send` with owned views of the unsent range, handles zero progress, and returns the lease on success or failure after all backend access ends. Ordinary buffers now support owned `BufferSlice` views; compatibility with registered leases remains to be specified. This example uses explicit sequential awaits and makes no assumption about `with_previous_buffer`.
 
 Create the pool once and share it across connections, for example:
 
@@ -637,25 +650,23 @@ Preserve partial transfer counts, relevant flags, addresses, ancillary data, rec
 
 A safe owned message representation should retain its payload buffers and all address, iovec, control, and header storage required by the backend for the duration of kernel access. It can construct native metadata without inherently copying the payload. Specific raw layouts and ancillary features may be platform extensions. See [io\_uring\_prep\_sendmsg](https://man7.org/linux/man-pages/man3/io_uring_prep_sendmsg.3.html).
 
-Cancellation is a request, not a transactional rollback: a cancelled read may consume bytes and a cancelled write may transmit bytes. Define how callers observe completion and recover buffer ownership before committing to the cancellation-aware result types.
+Cancellation is a request, not a transactional rollback: a cancelled read may consume bytes and a cancelled write may transmit bytes. Awaiting the operation returns its actual result and buffer after access ends; abandoning the future gives up that result while the backend retains any in-flight storage.
 
 ## Buffer ownership
 
 Completion-based I/O requires a buffer whose address remains valid while the kernel uses it. The operation must retain buffers and descriptors even if its waiting future is dropped. A cancellation completion alone does not establish that the original operation has finished accessing memory.
 
-The current API transfers an owned `Vec<u8>` and returns `(io::Result<usize>, Vec<u8>)`. Reads operate on initialized length rather than spare capacity, leave that length unchanged, and report the number of valid bytes separately. Capacity alone is not writable input under this contract.
+The implemented API accepts `B: IoBuf` for writes and `B: IoBufMut` for reads, and returns `(OperationResult<usize>, B)`. These unsafe traits extend `AsRef<[u8]>` and `AsMut<[u8]>`, with `Send + 'static` ownership. Implementors must retain a stable initialized allocation and range even when the owning value moves. Writable buffers must exclude all conflicting access by other owners. Inline storage that moves with its owner is unsuitable.
 
-There is no standard owned completion-buffer trait to adopt directly. `Vec<u8>` and `Box<[u8]>` provide useful owned storage. Standard [`IoSlice`](https://doc.rust-lang.org/std/io/struct.IoSlice.html) and `IoSliceMut` provide borrowed vectored views rather than owning the underlying memory. [`bytes::Bytes` and `BytesMut`](https://docs.rs/bytes/latest/bytes/) provide useful sharing and slicing; `Buf`/`BufMut` alone do not establish completion-I/O lifetime safety.
+`Vec<u8>`, `Box<[u8]>`, and `BufferSlice<B>` implement these contracts. Reads use initialized length, leave that length unchanged, and report the valid received prefix separately. Spare capacity and uninitialized storage are not supported. Read-only buffers need not be `Sync`.
 
-Consider small owned buffer traits modeled on the contracts described by Tokio-uring's [`IoBuf`](https://docs.rs/tokio-uring/latest/tokio_uring/buf/trait.IoBuf.html) and [`IoBufMut`](https://docs.rs/tokio-uring/latest/tokio_uring/buf/trait.IoBufMut.html). They would express:
+`buffer.slice(range)` consumes an owner and creates a checked view without copying bytes. An operation returns that view; `into_inner()` recovers the original owner. Nested views are supported. Partial-write loops advance an owned view over the unwritten suffix without draining or moving bytes. A successful zero-byte write for nonempty input must terminate such a loop with `WriteZero`.
 
-- A stable backing address while the owned buffer value moves.
-- Initialized length distinct from writable capacity.
-- Exclusive writable access and a sound way to mark newly initialized bytes.
-- Ownership sufficient to keep storage alive through completion.
-- `Send` where operations cross Socketry worker or selector threads.
+No standard buffer trait establishes this complete ownership contract. Standard [`IoSlice`](https://doc.rust-lang.org/std/io/struct.IoSlice.html) and `IoSliceMut` borrow memory. Optional bytes types and registered leases can be considered later, but their implementations must uphold the same lifetime and aliasing rules. Uninitialized-capacity support requires a separate initialization contract.
 
-Support ordinary owned buffers first, with optional implementations for bytes types and later registered-buffer leases. Any unsafe buffer contract must be explicit and enforceable. Supporting uninitialized capacity could avoid initialization work, but is a deliberate change from the current read contract, not an automatic property of passing a `Vec`.
+Cancellation is backend-specific beneath the public contract. Readiness operations can abandon a pending readiness wait safely. Blocking work checks cancellation before entering the syscall and preserves its actual result once running. The io\_uring backend requests cancellation once and still awaits the original terminal completion before returning the buffer; successful progress wins a racing cancellation. Dropping an operation abandons its result, while the backend retains any storage still accessible by a worker or kernel.
+
+The io\_uring command queue currently erases each generic request behind `Box<dyn PendingRequest>`, retaining a typed completion sender and returning the original buffer without copying. This adds one boxed request per operation alongside the existing command/completion channels; request pooling and submission backpressure remain optimization work.
 
 ## Buffer pools, registered buffers, and specialized I/O
 
@@ -722,61 +733,53 @@ Registration does not itself guarantee zero-copy transport. Zero-copy sends can 
 
 ## Interface review and validation
 
-The overall architecture covers the intended scheduler boundary, but four contracts need further validation before freezing the interface:
+The initial public contracts now cover associated resources and creation, owned buffer ranges, explicit I/O cancellation, and transferable task ownership. The same generic application and contract tests exercise native, Tokio, and in-memory implementations. This validates a useful core without committing every scheduler to the wider proposed syscall set.
 
-1. **Resource creation and ownership:** specify associated file resources, socket creation/bind/listen, address inspection, and ordinary resource `Drop` alongside explicit close. Generic application code must not construct OS resources or require `Arc`; each backend chooses how to retain resources for pending operations.
-2. **Operation results and buffers:** settle owned-buffer traits, valid ranges, partial transfers, cancellation races, and the point at which buffers are safe to return. Successful progress wins cancellation races; cancellation does not undo side effects. Dropping a waiting future must not release memory still accessed by an operation.
-3. **Blocking execution:** consider an optional capability for submitting synchronous closures through the selected scheduler. Specify asynchronous admission, cancellation before execution, and completion once execution starts. Libraries should not independently choose a blocking pool. This does not require scheduler-specific synchronization wait/wake methods.
-4. **Runtime draining:** account for all accepted work, including `_submit` jobs without application waiters, before stopping workers and I/O services. Application cancellation policy and task groups stay above the primitives. Current runtime shutdown destroys futures and is not this graceful-draining contract.
+Remaining design work includes:
 
-Process creation/waiting and pipes are useful optional extensions. They do not need to enlarge the initial core. Existing `File`, `Socket`, and `Clock` implementations still lag the proposed resource creation, cancellation, and monotonic clock contracts.
+1. **Resource lifecycle and wider I/O:** separate socket creation/options, stateful files, explicit close/submission, message I/O, and extension boundaries.
+2. **Blocking execution:** an optional public capability for synchronous closures, with bounded asynchronous admission, cancellation before execution, and completion once execution starts. Existing private blocking fallbacks do not expose this capability.
+3. **Backend retirement:** account for all accepted work, including future `_submit` jobs without application waiters. Application completion remains explicit through owned task handles; there is no implicit graceful join of all spawned work.
+4. **Clock integration:** implement the monotonic clock and cancellable deadline contract above using the independent timers crate where appropriate.
 
-The experiment below exercises a small generic server and file-copy operation with native, Tokio, and in-memory implementations. Its provisional traits stay local to the example while public signatures are refined. It tests partial transfers, errors, buffer ownership, and resource creation without substituting fake OS descriptors or `Unsupported` implementations. The wider proposed syscall set and optional optimizations remain separate work.
+Process creation/waiting and pipes remain useful optional extensions. Prepared linking, registered buffers, and pools remain separate later work.
 
 ### Executable interface experiment
 
-[interface\_probe.rs](examples/interface_probe.rs) now runs the same `copy`, `serve`, and `exchange` application functions with native, Tokio, and in-memory implementations. Run all three with:
+[interface\_probe.rs](examples/interface_probe.rs) runs the same `copy`, `serve`, and `exchange` functions through the public `File` and `Socket` traits with native, Tokio, and in-memory implementations:
 
 ```sh
 cargo run -p socketry-executor --example interface_probe --features tokio
 cargo test -p socketry-executor --example interface_probe --features tokio
 ```
 
-Using `--no-default-features` runs the simulation without either I/O backend; adding `--features tokio` runs the simulation and Tokio adapter. The native adapter follows the crate's selected native backend, including io\_uring when enabled on Linux. The example-local `File` and `Socket` traits are provisional subsets, not exported APIs. Production I/O traits are unchanged.
+Using `--no-default-features` runs the simulation without either I/O backend; adding `--features tokio` includes the Tokio adapter. Native uses the selected backend, including io\_uring on Linux when enabled. The earlier example-local traits and real-adapter wrappers have been removed.
 
-The generic code creates files and listeners exclusively through these traits. Real adapters reuse the existing scheduler reads/writes; their file representation remains `Arc<std::fs::File>` internally. File opening runs on the selected backend's blocking pool. The simulator supplies in-memory files and duplex streams, without OS files, sockets, registrations, or `Unsupported` stubs. Its read and write limits differ so both applications must handle partial writes as well as partial reads.
+Generic code opens files, binds listeners, and inspects addresses through public traits without naming an OS resource or `Arc`. The native and Tokio implementations retain their concrete file representation internally. The simulator implements the same traits with in-memory resources and cooperative cancellation, without fake descriptors or `Unsupported` stubs.
 
-The experiment establishes these concrete requirements:
+File copy and send-all loops use owned buffer ranges for partial transfers. Client and server compose through `try_zip`; simulated accept/read waits use event registration and wakeups. No new synchronization dispatch primitive or task group is needed. The separate `portable_io` example exercises `Spawn`.
 
-- **Associated file resources and creation hooks remove the application leak.** Neither application function names a concrete file, socket, runtime, or `Arc`. Moving current file operations to `&Self::File` and adding file opening are the next public changes to make.
-- **Address inspection belongs in the interface.** Binding to port zero requires a generic way to discover the bound address. The probe uses `listener_addr`. Its combined TCP `socket_listen` is sufficient for this experiment; separate socket creation, bind, listen, options, and peer-address hooks still need design before broader use.
-- **Owned buffer views matter for partial transfers.** The probe truncates to the received prefix and drains written prefixes from a `Vec`, reusing its allocation but moving bytes. A future owned subrange view should retain the allocation while exposing only the unwritten suffix; reads need a defined initialized output range. A successful zero-byte write for a nonempty request must terminate the higher-level write loop with `WriteZero`.
-- **Future composition is enough for synchronization.** Client and server run concurrently through `try_zip`, while the simulated accept/read futures use event registration and wakeups. Tests explicitly verify wake delivery. No scheduler-specific `block`/`unblock`, task group, or new dispatch primitive is needed for these consumers; the existing `portable_io` example separately exercises `Spawn`.
-- **Drop and completion remain distinct.** The example's ordinary resource destruction closes connections and releases file handles, including on copy errors. Completed partial writes remain visible on failure. This does not establish the proposed explicit close, admission, cancellation, or runtime-draining contracts.
+Tests cover resource creation, options, empty files, short transfers, open/read/write failures, zero-progress writes, buffer allocation retention, accept/read wakeups, EOF, cancellation before execution and while waiting, and listener release. Task tests cover explicit waiting, transfer to a new owner, and dropping an owner with retained children. Backend tests exercise cancellation races and retention beyond abandonment.
 
-Tests cover empty files, multiple buffers, short transfers, truncating an existing destination, missing sources, injected open/read/write failures, zero-progress writes, buffer allocation retention on success/error/EOF, accept/read wakeups, connection EOF, and releasing listener addresses. The copy example assumes distinct source and destination resources; it is not a production replacement for a filesystem copy utility and does not promise durability.
-
-This is an ownership and creation experiment, not a complete simulated runtime or kernel model. The simulator has a bounded in-memory file size and unbounded byte queues; it does not model network backpressure, cancellation, timers, task scheduling, or kernel completion after an abandoned future. Real adapters retain the existing Windows positioned-file cursor behavior. Cancellation-aware results, generic buffer safety, separate socket setup, blocking admission, explicit close, and graceful draining remain the next contracts to implement and test. Prepared links and registered pools are still optional later work.
+The simulator has bounded in-memory file sizes and unbounded byte queues. It does not model network backpressure, timers, task scheduling, or kernel completion after an abandoned future. Copy assumes distinct source and destination resources and does not promise durability. The existing Windows positioned-file fallback still changes the shared cursor. These are limits of the current implementations, not guarantees supplied by generic dispatch.
 
 ## Current implementation and remaining work
 
 | Area | Current status |
 | --- | --- |
-| Executor | Future workers, work stealing, scheduler-owned tasks and primitive `Spawn` dispatch implemented. Higher-level task groups are deferred. |
-| Cancellation | `Cancellation`, `Cancelled`, and `defer_cancel` implemented and re-exported. |
-| Signal notifications | `Notify<Value>`, `Signals`, and optional Unix signal registration guards implemented for native and Tokio schedulers; cancellation and unbounded queue targets supported. |
-| Graceful runtime shutdown | Cooperative scheduler draining and cancellation-aware I/O remain pending; existing shutdown destroys task futures. |
-| Capabilities | `File`, `Socket`, `Clock`, and `Spawn` implemented; a common scheduler contract, associated file resources, scheduler-level resource creation, broader hooks and optional extension boundaries remain design work. |
-| Linked operations | Prepared chains and a portable `Linked` capability remain proposed; native SQE linking, whole-chain blocking jobs, and readiness sequencing are not implemented. |
-| File operations | Owned-buffer positioned read/write implemented; stateful I/O, lifecycle, allocation and metadata hooks pending. |
-| Submission and completion | Close, socket shutdown, and file advice pairs remain proposed; shared asynchronous admission, exceptional `_submit` futures, and safe CQE suppression are not implemented. |
-| Socket operations | TCP registration, connect, accept, read/write and readiness implemented; general sockets and message I/O pending. |
-| Backends | Shared native readiness, blocking file fallbacks, a Linux io_uring selector, and an adapter to an existing Tokio runtime implemented. |
-| Buffers | Owned `Vec<u8>` implemented; generic owned-buffer traits, fixed registered leases, and provided/software pools remain proposed. |
+| Executor | Future workers, work stealing, primitive `Spawn`, and owning handles implemented. Await joins; move transfers ownership; drop abandons unfinished work. Task groups remain above the primitives. |
+| Cancellation | `Cancellation`, `Cancelled`, `defer_cancel`, and cancellation-aware file/socket operations implemented. Application shutdown is cooperative. |
+| Signal notifications | `Notify<Value>`, `Signals`, and optional Unix registration guards implemented for native and Tokio; each guard owns its dispatch task. |
+| Runtime lifetime | Application waits are explicit. Runtime shutdown abandons futures; backend retention protects submitted I/O. Future submission-only jobs need further draining/accounting design. |
+| Capabilities | Public `File`, `Socket`, `SocketRegistration`, `Clock`, and `Spawn`; associated resources and initial file/TCP creation implemented. Broader hooks remain design work. |
+| Linked operations | Prepared chains and `Linked` remain proposed; native linking, whole-chain blocking jobs, and readiness sequencing are not implemented. |
+| File operations | `file_open` and generic owned-buffer positioned read/write implemented. Stateful I/O, explicit close, allocation, and metadata hooks pending. |
+| Submission and completion | Close, socket shutdown, and advice pairs remain proposed; bounded admission, `_submit`, and safe CQE suppression pending. |
+| Socket operations | TCP listen, connect, accept, address inspection, generic read/write, readiness, and optional OS registration implemented. General sockets and message I/O pending. |
+| Backends | Native readiness, blocking file fallbacks, Linux io_uring, and an adapter to an existing Tokio runtime implemented; the example simulator implements the public I/O traits. |
+| Buffers | Unsafe `IoBuf`/`IoBufMut`, `Vec<u8>`, `Box<[u8]>`, and owned `BufferSlice` implemented. Registered leases and pools remain proposed. |
 | Buffer forwarding | `with_previous_buffer` is hypothetical, with no selected implementation target. |
-| Optimization | Dedicated io_uring selector uses an unbounded command channel and a completion channel per operation; pooling and submission backpressure pending. |
-| Timers | The independent `socketry-timers` crate implements the io-event timer algorithm; scheduler integration remains pending. Existing `Clock::sleep(duration)` returns `()` without cancellation. Monotonic `now`, cancellable `sleep_until` and relative sleep, and generic deadline composition remain proposed. |
+| Optimization | io_uring uses an unbounded command channel, a boxed request, and a completion channel per operation; pooling/backpressure pending. |
+| Timers | Independent `socketry-timers` implemented; scheduler integration pending. Existing `Clock::sleep(duration)` returns `()` without cancellation. Monotonic `now`, cancellable `sleep_until`/relative sleep, and deadline composition remain proposed. |
 
-Next design work is to choose the dependable core and extension boundaries, cancellation-aware error and buffer-return contracts, linked-chain continuation rules, resource lifecycle semantics, and owned-buffer trait safety requirements. Then integrate cooperative cancellation into operations and runtime shutdown before expanding optional optimizations.
-
-The workspace's [architecture guide](https://github.com/socketry/socketry-rust/blob/main/context/design.md) and [implementation guide](https://github.com/socketry/socketry-rust/blob/main/context/implementation.md) provide further details. In the source checkout, `context/gaps.md` records the four architectural gaps. The executor [README](readme.md) documents existing APIs.
+The workspace's [architecture guide](../../context/design.md), [implementation guide](../../context/implementation.md), and [gaps](../../context/gaps.md) provide further context. The executor [README](readme.md) documents existing APIs.

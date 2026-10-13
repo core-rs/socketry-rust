@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Workers start when the scheduler is constructed. `spawn` accepts `Send + 'static` futures and returns an awaitable result handle. Dropping that handle leaves the task owned by its scheduler. Dropping the scheduler requests cancellation and joins workers when called outside a worker.
+Workers start when the scheduler is constructed. `spawn` accepts `Send + 'static` futures and returns an owning task handle. Moving it transfers ownership; dropping it requests task destruction after any active poll returns. Dropping the scheduler requests cancellation and joins workers when called outside a worker.
 
 Schedulers and their handles implement the primitive `Spawn` contract. Await individual task handles to observe completion, results, and panics. Task groups can be built above dispatch; the executor does not provide a group abstraction.
 
@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Cancellation expresses intent; task handles confirm completion. Keep the scheduler and I/O services alive while draining. Existing task cancellation and scheduler shutdown still destroy futures; `defer_cancel` cannot protect a future from destruction. Cancellation inputs on I/O operations remain pending. There is no signal escalation policy: an external supervisor can enforce SIGTERM followed by SIGKILL.
+Cancellation expresses intent; task handles confirm completion. Keep the scheduler and I/O services alive while draining. Existing task cancellation and scheduler shutdown still destroy futures; `defer_cancel` cannot protect a future from destruction. File and socket operations take explicit cancellation inputs; clock cancellation remains proposed. There is no signal escalation policy: an external supervisor can enforce SIGTERM followed by SIGKILL.
 
 The optional `signals` feature adds Unix `Signals::signal_notify(&signals, target)` to both scheduler implementations. Targets implement `Notify<Value>`: pass a `Cancellation` for shutdown or an unbounded channel sender for queued events such as reload requests. Keep the returned `SignalRegistration` alive and drop it to unsubscribe; already-admitted callbacks may finish. Callbacks run outside raw signal handlers. See the executor's [signal notification contract](crates/executor/readme.md#signal-notifications) for examples, lifetime rules, and process-wide signal disposition behavior.
 
@@ -78,14 +78,15 @@ The optional `signals` feature adds Unix `Signals::signal_notify(&signals, targe
 
 Generic code can accept `Socket`, `File`, `Clock`, and `Spawn` capabilities. Socketry and the optional Tokio adapter implement these contracts with concrete future and resource types. Import the traits to call their methods.
 
-`File` is the scheduler capability trait; `std::fs::File` is the file resource. Alias the resource when using both names:
+`File` is the scheduler capability trait; `File::File` is its associated resource type. Generic code can create and use files without importing OS resource types:
 
 ```rust
-use socketry::File;
-use std::{fs::File as StdFile, io, sync::Arc};
+use socketry::{Cancellation, File, FileOptions, OperationResult};
+use std::path::Path;
 
-async fn read_prefix<S: File>(scheduler: &S, file: Arc<StdFile>) -> io::Result<Vec<u8>> {
-    let (result, mut buffer) = scheduler.file_read_at(file, vec![0; 4096], 0).await;
+async fn read_prefix<S: File>(scheduler: &S, path: &Path, cancellation: &Cancellation) -> OperationResult<Vec<u8>> {
+    let file = scheduler.file_open(path, FileOptions::READ, cancellation).await?;
+    let (result, mut buffer) = scheduler.file_read_at(&file, vec![0; 4096], 0, cancellation).await;
     buffer.truncate(result?);
     Ok(buffer)
 }
@@ -99,7 +100,7 @@ async fn read_prefix<S: File>(scheduler: &S, file: Arc<StdFile>) -> io::Result<V
 | `default-features = false, features = ["tokio"]` | Tokio adapter without Socketry's native I/O dependencies. |
 | `default-features = false` | Task executor and portable contracts, without I/O implementations. |
 
-Socket registrations persist across operations and worker migration. Reads and writes take a reusable owned `Vec<u8>` and return `(io::Result<usize>, Vec<u8>)`. Reads fill the buffer's existing length; allocate it with `vec![0; capacity]`. Operations may transfer fewer bytes than requested. Dropping a future can abandon an operation that has already consumed or transmitted bytes.
+Socket registrations persist across operations and worker migration. Reads and writes accept owned `IoBuf`/`IoBufMut` storage and return `(OperationResult<usize>, B)`, preserving buffers on cancellation and errors. `Vec<u8>`, `Box<[u8]>`, and owned slice views are supported. Reads fill the buffer's existing length; allocate it with `vec![0; capacity]`. Operations may transfer fewer bytes than requested. Dropping a future can abandon an operation that has already consumed or transmitted bytes.
 
 Run the same TCP exchange with either runtime:
 
@@ -110,7 +111,7 @@ cargo run -p socketry-executor --example portable_io --no-default-features --fea
 cargo run -p socketry-executor --example portable_io --features io-uring
 ```
 
-The Tokio adapter needs a live runtime with I/O and time enabled. It preserves scheduler task ownership, and its asynchronous `shutdown().await` joins task destruction. Passing its handle explicitly selects Tokio; Socketry's `Scheduler::current()` continues to identify Socketry execution.
+The Tokio adapter needs a live runtime with I/O and time enabled. Its task handles preserve transferable execution ownership, and its asynchronous `shutdown().await` joins task destruction. Passing its handle explicitly selects Tokio; Socketry's `Scheduler::current()` continues to identify Socketry execution.
 
 ## Current scope
 

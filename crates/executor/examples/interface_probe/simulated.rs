@@ -3,14 +3,20 @@
 
 //! In-memory files and duplex byte streams. No OS resources or native runtime.
 //! This is an interface probe, not a model of TCP scheduling or durability.
-use super::{File, Open, Socket};
+use super::{Cancellation, File, FileOptions, OperationResult, Socket};
 use event_listener::Event;
 use socketry_executor::BufferResult;
+use socketry_executor::{Interest, IoBuf, IoBufMut};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
+use std::{
+    future::{Future, poll_fn},
+    pin::pin,
+    task::Poll,
+};
 
 type Bytes = Arc<Mutex<Vec<u8>>>;
 
@@ -24,6 +30,7 @@ pub struct Scheduler {
 pub struct FileHandle {
     bytes: Bytes,
     writable: bool,
+    readable: bool,
 }
 
 #[derive(Default)]
@@ -53,6 +60,8 @@ struct Pipe {
 pub struct Connection {
     input: Arc<Pipe>,
     output: Arc<Pipe>,
+    local: SocketAddr,
+    peer: SocketAddr,
 }
 
 impl Drop for Connection {
@@ -100,56 +109,101 @@ impl Scheduler {
 impl File for Scheduler {
     type File = FileHandle;
 
-    async fn file_open(&self, path: &Path, mode: Open) -> io::Result<FileHandle> {
+    async fn file_open(
+        &self,
+        path: &Path,
+        options: FileOptions,
+        cancellation: &Cancellation,
+    ) -> OperationResult<FileHandle> {
+        cancellation.check()?;
+        if (!options.read && !options.write)
+            || ((options.create || options.create_new || options.truncate) && !options.write)
+        {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
+        }
         let mut files = self.files.lock().unwrap();
-        let writable = matches!(mode, Open::Create);
-        let bytes = match mode {
-            Open::Read => files.get(path).ok_or(io::ErrorKind::NotFound)?.clone(),
-            Open::Create => {
-                let bytes = files.entry(path.to_owned()).or_default();
-                bytes.lock().unwrap().clear();
-                bytes.clone()
-            }
-        };
-        Ok(FileHandle { bytes, writable })
+        if options.create_new && files.contains_key(path) {
+            return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
+        }
+        if !files.contains_key(path) && !(options.create || options.create_new) {
+            return Err(io::Error::from(io::ErrorKind::NotFound).into());
+        }
+        let bytes = files.entry(path.to_owned()).or_default().clone();
+        if options.truncate {
+            bytes.lock().unwrap().clear();
+        }
+        Ok(FileHandle {
+            bytes,
+            writable: options.write,
+            readable: options.read,
+        })
     }
 
-    async fn file_read_at(
+    async fn file_read_at<B: IoBufMut>(
         &self,
         file: &FileHandle,
-        mut buffer: Vec<u8>,
+        mut buffer: B,
         offset: u64,
-    ) -> BufferResult {
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        if let Err(error) = cancellation.check() {
+            return (Err(error.into()), buffer);
+        }
+        if !file.readable {
+            return (
+                Err(io::Error::from(io::ErrorKind::PermissionDenied).into()),
+                buffer,
+            );
+        }
         let bytes = file.bytes.lock().unwrap();
         let count = if offset >= bytes.len() as u64 {
             0
         } else {
             let offset = offset as usize;
-            let count = buffer.len().min(self.read_limit).min(bytes.len() - offset);
-            buffer[..count].copy_from_slice(&bytes[offset..offset + count]);
+            let count = buffer
+                .as_ref()
+                .len()
+                .min(self.read_limit)
+                .min(bytes.len() - offset);
+            buffer.as_mut()[..count].copy_from_slice(&bytes[offset..offset + count]);
             count
         };
         (Ok(count), buffer)
     }
 
-    async fn file_write_at(&self, file: &FileHandle, buffer: Vec<u8>, offset: u64) -> BufferResult {
-        if !file.writable {
-            return (Err(io::ErrorKind::PermissionDenied.into()), buffer);
+    async fn file_write_at<B: IoBuf>(
+        &self,
+        file: &FileHandle,
+        buffer: B,
+        offset: u64,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        if let Err(error) = cancellation.check() {
+            return (Err(error.into()), buffer);
         }
-        let count = buffer.len().min(self.write_limit);
+        if !file.writable {
+            return (
+                Err(io::Error::from(io::ErrorKind::PermissionDenied).into()),
+                buffer,
+            );
+        }
+        let count = buffer.as_ref().len().min(self.write_limit);
         // Keep the model's filesystem bounded so malformed offsets cannot
         // turn a test error into an unbounded allocation.
         let end = offset
             .checked_add(count as u64)
             .filter(|end| *end <= 1024 * 1024);
         let Some(end) = end else {
-            return (Err(io::ErrorKind::InvalidInput.into()), buffer);
+            return (
+                Err(io::Error::from(io::ErrorKind::InvalidInput).into()),
+                buffer,
+            );
         };
         if count > 0 {
             let mut bytes = file.bytes.lock().unwrap();
             let length = bytes.len().max(end as usize);
             bytes.resize(length, 0);
-            bytes[offset as usize..end as usize].copy_from_slice(&buffer[..count]);
+            bytes[offset as usize..end as usize].copy_from_slice(&buffer.as_ref()[..count]);
         }
         (Ok(count), buffer)
     }
@@ -159,7 +213,12 @@ impl Socket for Scheduler {
     type Socket = Connection;
     type Listener = Listener;
 
-    async fn socket_listen(&self, mut address: SocketAddr) -> io::Result<Listener> {
+    async fn socket_listen(
+        &self,
+        mut address: SocketAddr,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Listener> {
+        cancellation.check()?;
         let mut listeners = self.listeners.lock().unwrap();
         listeners.retain(|_, incoming| incoming.strong_count() > 0);
         if address.port() == 0 {
@@ -169,11 +228,11 @@ impl Socket for Scheduler {
                     candidate.set_port(*port);
                     !listeners.contains_key(&candidate)
                 })
-                .ok_or(io::ErrorKind::AddrNotAvailable)?;
+                .ok_or_else(|| io::Error::from(io::ErrorKind::AddrNotAvailable))?;
             address.set_port(port);
         }
         if listeners.contains_key(&address) {
-            return Err(io::ErrorKind::AddrInUse.into());
+            return Err(io::Error::from(io::ErrorKind::AddrInUse).into());
         }
         let incoming = Arc::new(Incoming::default());
         listeners.insert(address, Arc::downgrade(&incoming));
@@ -184,64 +243,154 @@ impl Socket for Scheduler {
         Ok(listener.address)
     }
 
-    async fn socket_accept(&self, listener: &Listener) -> io::Result<Connection> {
+    fn socket_local_addr(&self, socket: &Connection) -> io::Result<SocketAddr> {
+        Ok(socket.local)
+    }
+    fn socket_peer_addr(&self, socket: &Connection) -> io::Result<SocketAddr> {
+        Ok(socket.peer)
+    }
+    async fn io_wait(
+        &self,
+        socket: &Connection,
+        interest: Interest,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        if matches!(interest, Interest::Writable) {
+            return Ok(());
+        }
+        loop {
+            let ready = socket.input.ready.listen();
+            {
+                let state = socket.input.state.lock().unwrap();
+                if !state.bytes.is_empty() || state.writer_closed {
+                    return Ok(());
+                }
+            }
+            wait(ready, cancellation).await?;
+        }
+    }
+    async fn accept(
+        &self,
+        listener: &Listener,
+        cancellation: &Cancellation,
+    ) -> OperationResult<(Connection, SocketAddr)> {
+        cancellation.check()?;
         loop {
             // Register before checking state; await and notify outside locks.
             let ready = listener.incoming.ready.listen();
             let socket = listener.incoming.sockets.lock().unwrap().pop_front();
             if let Some(socket) = socket {
-                return Ok(socket);
+                let peer = socket.peer;
+                return Ok((socket, peer));
             }
-            ready.await;
+            wait(ready, cancellation).await?;
         }
     }
 
-    async fn socket_connect(&self, address: SocketAddr) -> io::Result<Connection> {
+    async fn connect(
+        &self,
+        address: SocketAddr,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Connection> {
+        cancellation.check()?;
         let incoming = self
             .listeners
             .lock()
             .unwrap()
             .get(&address)
             .and_then(Weak::upgrade)
-            .ok_or(io::ErrorKind::ConnectionRefused)?;
+            .ok_or_else(|| io::Error::from(io::ErrorKind::ConnectionRefused))?;
         let input = Arc::new(Pipe::default());
         let output = Arc::new(Pipe::default());
+        let mut client_address = address;
+        client_address.set_port(40000);
         let server = Connection {
+            local: address,
+            peer: client_address,
             input: output.clone(),
             output: input.clone(),
         };
         incoming.sockets.lock().unwrap().push_back(server);
         incoming.ready.notify(usize::MAX);
-        Ok(Connection { input, output })
+        Ok(Connection {
+            input,
+            output,
+            local: client_address,
+            peer: address,
+        })
     }
 
-    async fn socket_recv(&self, socket: &Connection, mut buffer: Vec<u8>) -> BufferResult {
+    async fn io_read<B: IoBufMut>(
+        &self,
+        socket: &Connection,
+        mut buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        if let Err(error) = cancellation.check() {
+            return (Err(error.into()), buffer);
+        }
         loop {
             let ready = socket.input.ready.listen();
             {
                 let mut state = socket.input.state.lock().unwrap();
-                let count = buffer.len().min(self.read_limit).min(state.bytes.len());
-                if count > 0 || buffer.is_empty() || state.writer_closed {
-                    for byte in &mut buffer[..count] {
+                let count = buffer
+                    .as_ref()
+                    .len()
+                    .min(self.read_limit)
+                    .min(state.bytes.len());
+                if count > 0 || buffer.as_ref().is_empty() || state.writer_closed {
+                    for byte in &mut buffer.as_mut()[..count] {
                         *byte = state.bytes.pop_front().unwrap();
                     }
                     return (Ok(count), buffer);
                 }
             }
-            ready.await;
+            if let Err(error) = wait(ready, cancellation).await {
+                return (Err(error), buffer);
+            }
         }
     }
 
-    async fn socket_send(&self, socket: &Connection, buffer: Vec<u8>) -> BufferResult {
-        let count = buffer.len().min(self.write_limit);
+    async fn io_write<B: IoBuf>(
+        &self,
+        socket: &Connection,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        if let Err(error) = cancellation.check() {
+            return (Err(error.into()), buffer);
+        }
+        let count = buffer.as_ref().len().min(self.write_limit);
         {
             let mut state = socket.output.state.lock().unwrap();
             if state.reader_closed {
-                return (Err(io::ErrorKind::BrokenPipe.into()), buffer);
+                return (
+                    Err(io::Error::from(io::ErrorKind::BrokenPipe).into()),
+                    buffer,
+                );
             }
-            state.bytes.extend(&buffer[..count]);
+            state.bytes.extend(&buffer.as_ref()[..count]);
         }
         socket.output.ready.notify(usize::MAX);
         (Ok(count), buffer)
     }
+}
+
+async fn wait(
+    ready: event_listener::EventListener,
+    cancellation: &Cancellation,
+) -> OperationResult<()> {
+    let mut ready = pin!(ready);
+    let mut cancelled = pin!(cancellation.cancelled());
+    poll_fn(|context| {
+        if ready.as_mut().poll(context).is_ready() {
+            return Poll::Ready(Ok(()));
+        }
+        cancelled
+            .as_mut()
+            .poll(context)
+            .map(|()| Err(socketry_executor::Cancelled.into()))
+    })
+    .await
 }

@@ -14,8 +14,8 @@ use std::task::Poll;
 /// Owns a Unix signal subscription created by `Signals::signal_notify`.
 ///
 /// Dropping this guard disables further dispatch and wakes the subscription's
-/// scheduler task to release its resources. An already-admitted notification
-/// may finish; the task owns its destination throughout the callback. Drop
+/// owned scheduler task to be destroyed after any active poll. An already-admitted
+/// notification may finish; the task retains its destination. Drop
 /// does not join the task or wait for user code.
 ///
 /// Keep the guard, scheduler, and I/O services alive during graceful draining.
@@ -29,6 +29,8 @@ use std::task::Poll;
 #[must_use = "dropping the registration removes the signal subscription"]
 pub struct SignalRegistration {
     stopped: Cancellation,
+    // One owning handle per subscription, erased only at the guard boundary.
+    _task: Box<dyn Send>,
 }
 
 impl std::fmt::Debug for SignalRegistration {
@@ -61,15 +63,14 @@ impl SignalRegistration {
         delivery: SignalDelivery<Reader, SignalOnly>,
         target: impl Notify<c_int> + 'static,
     ) -> io::Result<Self> {
+        let stopped = Cancellation::new();
+        let task = scheduler
+            .spawn(dispatch(delivery, target, stopped.clone()))
+            .map_err(io::Error::other)?;
         let registration = Self {
-            stopped: Cancellation::new(),
+            stopped,
+            _task: Box::new(task),
         };
-        // Spawn retains the task when its result handle is dropped.
-        drop(
-            scheduler
-                .spawn(dispatch(delivery, target, registration.stopped.clone()))
-                .map_err(io::Error::other)?,
-        );
         Ok(registration)
     }
 }

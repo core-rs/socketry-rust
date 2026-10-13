@@ -1,6 +1,8 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+static NEVER: crate::Cancellation = crate::Cancellation::never();
+
 use super::*;
 
 #[test]
@@ -14,7 +16,8 @@ fn queued_request_returns_its_buffer_if_the_selector_exits() {
             Arc::new(StdFile::open(std::env::current_exe().unwrap()).unwrap()),
             0,
         ),
-        buffer,
+        buffer: Some(buffer),
+        pointer: |buffer| buffer.as_mut_ptr(),
         write: false,
         reply: Some(reply),
         cancelling: false,
@@ -65,13 +68,14 @@ impl Drop for Failures {
     }
 }
 
-fn request(identifier: u64) -> (Request, oneshot::Receiver<BufferResult>) {
+fn request(identifier: u64) -> (Request, oneshot::Receiver<RawBufferResult>) {
     let (reply, result) = oneshot::channel();
     (
         Request {
             identifier,
             resource: Resource::File(Arc::new(tempfile::tempfile().unwrap()), 0),
-            buffer: vec![1],
+            buffer: Some(vec![1]),
+            pointer: |buffer| buffer.as_mut_ptr(),
             write: false,
             reply: Some(reply),
             cancelling: false,
@@ -163,12 +167,14 @@ fn rejected_operations_preserve_buffer_allocations() {
         let (selector, _peer) = disconnected_selector();
         let file = Arc::new(tempfile::tempfile().unwrap());
         let (_, buffer) = selector
-            .file_read_at(Arc::clone(&file), Vec::new(), 0)
+            .file_read_at(&Arc::clone(&file), Vec::new(), 0, &NEVER)
             .await;
         assert!(buffer.is_empty());
         let buffer = vec![7; 8];
         let allocation = buffer.as_ptr();
-        let (result, returned) = selector.file_read_at(Arc::clone(&file), buffer, 0).await;
+        let (result, returned) = selector
+            .file_read_at(&Arc::clone(&file), buffer, 0, &NEVER)
+            .await;
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
         assert_eq!(returned.as_ptr(), allocation);
         selector
@@ -177,7 +183,7 @@ fn rejected_operations_preserve_buffer_allocations() {
             .store(CANCEL_TAG - 1, Ordering::Relaxed);
         let buffer = vec![9; 8];
         let allocation = buffer.as_ptr();
-        let (result, returned) = selector.file_write_at(file, buffer, 0).await;
+        let (result, returned) = selector.file_write_at(&file, buffer, 0, &NEVER).await;
         assert!(
             result
                 .unwrap_err()
@@ -196,7 +202,7 @@ fn failure_retains_in_flight_resources_before_notifying_callers() {
     };
     let retained = Arc::downgrade(file);
     let mut in_flight = InFlight::default();
-    in_flight.0.insert(0, request);
+    in_flight.0.insert(0, Box::new(request));
     drop(in_flight);
     assert!(receiver.try_recv().is_err());
     assert_eq!(retained.strong_count(), 1);
@@ -234,6 +240,7 @@ fn socket_retries_keep_the_owned_buffer_and_propagate_wait_errors() {
                 waits.set(waits.get() + 1);
                 std::future::ready(Ok(()))
             },
+            &NEVER,
         )
         .await;
         assert_eq!(result.unwrap(), 4);
@@ -243,6 +250,7 @@ fn socket_retries_keep_the_owned_buffer_and_propagate_wait_errors() {
             buffer,
             |buffer| std::future::ready((Err(io::ErrorKind::WouldBlock.into()), buffer)),
             || std::future::ready(Err(io::ErrorKind::BrokenPipe.into())),
+            &NEVER,
         )
         .await;
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
@@ -266,9 +274,27 @@ fn closed_selector_rejects_its_direct_network_operations() {
         selector.wait_closed();
         assert!(selector.register_socket(raw_socket).is_err());
         assert!(selector.register_listener(raw_listener).is_err());
-        assert!(selector.connect(address).await.is_err());
-        assert!(selector.accept(&listener).await.is_err());
-        assert!(selector.io_wait(&socket, Interest::Readable).await.is_err());
+        assert!(selector.socket_listen(address, &NEVER).await.is_err());
+        assert!(selector.listener_addr(&listener).is_err());
+        assert!(selector.socket_local_addr(&socket).is_err());
+        assert!(selector.socket_peer_addr(&socket).is_err());
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("closed");
+        assert!(
+            selector
+                .file_open(&path, FileOptions::CREATE, &NEVER)
+                .await
+                .is_err()
+        );
+        assert!(!path.exists());
+        assert!(selector.connect(address, &NEVER).await.is_err());
+        assert!(selector.accept(&listener, &NEVER).await.is_err());
+        assert!(
+            selector
+                .io_wait(&socket, Interest::Readable, &NEVER)
+                .await
+                .is_err()
+        );
     });
 }
 
@@ -315,7 +341,7 @@ fn reactor_drains_notifications_and_retries_interrupted_waits() {
 fn pending_cancellation_returns_buffers_and_late_cancellation_is_harmless() {
     let (mut reactor, _commands, _notification) = new_reactor();
     let (request, mut result) = request(7);
-    reactor.pending.push_back(request);
+    reactor.pending.push_back(Box::new(request));
     reactor.cancel(7);
     let (result, buffer) = result.try_recv().unwrap().unwrap();
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
@@ -328,9 +354,9 @@ fn closing_reactor_rejects_new_requests_after_draining_pending_requests() {
     let (mut reactor, commands, _notification) = new_reactor();
     let (pending, mut pending_result) = request(1);
     let (late, mut late_result) = request(2);
-    commands.send(Command::Submit(pending)).unwrap();
+    commands.send(Command::Submit(Box::new(pending))).unwrap();
     commands.send(Command::Shutdown).unwrap();
-    commands.send(Command::Submit(late)).unwrap();
+    commands.send(Command::Submit(Box::new(late))).unwrap();
     reactor.run().unwrap();
     for result in [&mut pending_result, &mut late_result] {
         assert_eq!(
@@ -346,7 +372,7 @@ fn command_batches_do_not_starve_shutdown_or_completions() {
     let mut results = Vec::new();
     for identifier in 0..257 {
         let (request, result) = request(identifier);
-        commands.send(Command::Submit(request)).unwrap();
+        commands.send(Command::Submit(Box::new(request))).unwrap();
         results.push(result);
     }
     commands.send(Command::Shutdown).unwrap();
@@ -364,7 +390,7 @@ fn repeated_cancellation_does_not_duplicate_submission_and_full_queues_defer_it(
     let mut results = Vec::new();
     for identifier in 0..3 {
         let (request, result) = request(identifier);
-        reactor.in_flight.0.insert(identifier, request);
+        reactor.in_flight.0.insert(identifier, Box::new(request));
         let entry = reactor.in_flight.0.get_mut(&identifier).unwrap().entry();
         // SAFETY: the map owns the stable allocation before publication and
         // run() retains it until the original completion is received.
@@ -397,7 +423,7 @@ fn socket_readiness_retries_preserve_allocations() {
         let buffer = vec![0; 5];
         let allocation = buffer.as_ptr();
         let failures = Failures::new([("operation", io::ErrorKind::WouldBlock.into())]);
-        let (result, buffer) = selector.io_read(&socket, buffer).await;
+        let (result, buffer) = selector.io_read(&socket, buffer, &NEVER).await;
         let count = result.unwrap();
         assert!(count > 0);
         assert_eq!(&buffer[..count], &b"ready"[..count]);
@@ -407,7 +433,7 @@ fn socket_readiness_retries_preserve_allocations() {
         let buffer = b"write".to_vec();
         let allocation = buffer.as_ptr();
         let _failures = Failures::new([("operation", io::ErrorKind::WouldBlock.into())]);
-        let (result, buffer) = selector.io_write(&socket, buffer).await;
+        let (result, buffer) = selector.io_write(&socket, buffer, &NEVER).await;
         let count = result.unwrap();
         assert!(count > 0);
         assert_eq!(buffer.as_ptr(), allocation);
@@ -416,5 +442,123 @@ fn socket_readiness_retries_preserve_allocations() {
         assert_eq!(received, &b"write"[..count]);
         assert!(FAILURES.with(|failures| failures.borrow().is_empty()));
         selector.wait_closed();
+    });
+}
+
+#[test]
+fn cooperative_cancellation_waits_for_original_completion_and_preserves_progress() {
+    use std::sync::atomic::AtomicUsize;
+    struct CountedBuffer {
+        bytes: Vec<u8>,
+        dropped: Arc<AtomicUsize>,
+    }
+    impl AsRef<[u8]> for CountedBuffer {
+        fn as_ref(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+    impl AsMut<[u8]> for CountedBuffer {
+        fn as_mut(&mut self) -> &mut [u8] {
+            &mut self.bytes
+        }
+    }
+    // SAFETY: The Vec retains its initialized heap storage through owner moves.
+    unsafe impl IoBuf for CountedBuffer {}
+    unsafe impl IoBufMut for CountedBuffer {}
+    impl Drop for CountedBuffer {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async_io::block_on(async {
+        for successful in [false, true] {
+            let (commands, incoming) = mpsc::channel();
+            let (notification, _peer) = UnixStream::pair().unwrap();
+            let selector = Selector {
+                controller: Arc::new(Controller {
+                    commands,
+                    notification,
+                    next_identifier: AtomicU64::new(0),
+                    closed: AtomicBool::new(false),
+                    shutdown: Arc::new(Shutdown {
+                        finished: AtomicBool::new(false),
+                        event: CompletionEvent::new(),
+                    }),
+                }),
+            };
+            let file = Arc::new(tempfile::tempfile().unwrap());
+            let cancelled = Cancellation::new();
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let buffer = CountedBuffer {
+                bytes: vec![7; 4],
+                dropped: dropped.clone(),
+            };
+            let pointer = buffer.bytes.as_ptr();
+            let mut read = Box::pin(selector.file_read_at(&file, buffer, 0, &cancelled));
+            assert!(futures_lite::future::poll_once(&mut read).await.is_none());
+            let Command::Submit(request) = incoming.try_recv().unwrap() else {
+                panic!("missing original submission")
+            };
+            let identifier = request.identifier();
+            cancelled.cancel();
+            assert!(futures_lite::future::poll_once(&mut read).await.is_none());
+            assert!(
+                matches!(incoming.try_recv().unwrap(), Command::Cancel(value) if value == identifier)
+            );
+            assert!(futures_lite::future::poll_once(&mut read).await.is_none());
+            assert!(
+                incoming.try_recv().is_err(),
+                "cancellation is submitted only once"
+            );
+            assert_eq!(dropped.load(Ordering::SeqCst), 0);
+            // No SQE was published in this controlled selector. Simulate its
+            // terminal original CQE only after confirming cancellation retained
+            // the typed buffer, regardless of the cancellation request result.
+            request.finish(if successful {
+                Ok(3)
+            } else {
+                Err(io::Error::from_raw_os_error(libc::ECANCELED))
+            });
+            let (result, buffer) = read.await;
+            if successful {
+                assert_eq!(result.unwrap(), 3);
+            } else {
+                assert!(matches!(result, Err(crate::OperationError::Cancelled(_))));
+            }
+            assert_eq!(buffer.bytes.as_ptr(), pointer);
+            assert_eq!(dropped.load(Ordering::SeqCst), 0);
+            drop(buffer);
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        }
+    });
+}
+
+#[test]
+fn cancellation_before_submission_and_retry_returns_owned_buffers() {
+    async_io::block_on(async {
+        let cancellation = Cancellation::new();
+        cancellation.cancel();
+        let (selector, _peer) = disconnected_selector();
+        let file = Arc::new(tempfile::tempfile().unwrap());
+        let buffer = vec![5; 3];
+        let allocation = buffer.as_ptr();
+        let (result, buffer) = selector
+            .file_write_at(&file, buffer, 0, &cancellation)
+            .await;
+        assert!(matches!(result, Err(crate::OperationError::Cancelled(_))));
+        let (result, buffer) = retry_operation(
+            buffer,
+            |_| std::future::ready((Ok(0), Vec::new())),
+            || std::future::ready(Ok(())),
+            &cancellation,
+        )
+        .await;
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(buffer.as_ptr(), allocation);
+        assert!(matches!(
+            operation_result::<()>(Err(io::ErrorKind::Interrupted.into()), &cancellation),
+            Err(crate::OperationError::Cancelled(_))
+        ));
     });
 }

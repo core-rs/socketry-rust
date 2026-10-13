@@ -7,12 +7,15 @@
 //! It remains available while registered resources are alive; Socketry task
 //! shutdown does not shut down that shared reactor. Futures contain no private
 //! coroutine stacks and may be polled on different workers.
+use crate::scheduler::operation::cancellable;
 use crate::scheduler::positioned_file::{read_at, write_at};
 use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
+use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
 use async_io::Async;
 use std::fs::File as StdFile;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -64,10 +67,7 @@ fn wrap_accepted(
     accepted.map(|(socket, address)| (Socket(Arc::new(socket)), address))
 }
 
-impl SocketOperations for Selector {
-    type Socket = Socket;
-    type Listener = Listener;
-
+impl SocketRegistration for Selector {
     fn register_socket(&self, socket: TcpStream) -> io::Result<Socket> {
         wrap_socket(Async::new(socket))
     }
@@ -75,65 +75,154 @@ impl SocketOperations for Selector {
     fn register_listener(&self, listener: TcpListener) -> io::Result<Listener> {
         wrap_listener(Async::new(listener))
     }
+}
 
-    async fn connect(&self, address: SocketAddr) -> io::Result<Socket> {
-        wrap_socket(Async::<TcpStream>::connect(address).await)
+impl SocketOperations for Selector {
+    type Socket = Socket;
+    type Listener = Listener;
+    async fn socket_listen(
+        &self,
+        address: SocketAddr,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Listener> {
+        cancellation.check()?;
+        self.register_listener(TcpListener::bind(address)?)
+            .map_err(Into::into)
     }
-
-    async fn accept(&self, listener: &Listener) -> io::Result<(Socket, SocketAddr)> {
-        wrap_accepted(listener.0.accept().await)
+    fn listener_addr(&self, listener: &Listener) -> io::Result<SocketAddr> {
+        listener.local_addr()
     }
-
-    async fn io_read(&self, socket: &Socket, mut buffer: Vec<u8>) -> BufferResult {
-        let result = socket
-            .0
-            .read_with(|mut socket| socket.read(&mut buffer))
-            .await;
+    fn socket_local_addr(&self, socket: &Socket) -> io::Result<SocketAddr> {
+        socket.local_addr()
+    }
+    fn socket_peer_addr(&self, socket: &Socket) -> io::Result<SocketAddr> {
+        socket.peer_addr()
+    }
+    async fn connect(
+        &self,
+        address: SocketAddr,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Socket> {
+        cancellable(cancellation, async {
+            wrap_socket(Async::<TcpStream>::connect(address).await)
+        })
+        .await
+    }
+    async fn accept(
+        &self,
+        listener: &Listener,
+        cancellation: &Cancellation,
+    ) -> OperationResult<(Socket, SocketAddr)> {
+        cancellable(cancellation, async {
+            wrap_accepted(listener.0.accept().await)
+        })
+        .await
+    }
+    async fn io_read<B: IoBufMut>(
+        &self,
+        socket: &Socket,
+        mut buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let result = cancellable(
+            cancellation,
+            socket
+                .0
+                .read_with(|mut socket| socket.read(buffer.as_mut())),
+        )
+        .await;
         (result, buffer)
     }
-
-    async fn io_write(&self, socket: &Socket, buffer: Vec<u8>) -> BufferResult {
-        let result = socket
-            .0
-            .write_with(|mut socket| socket.write(&buffer))
-            .await;
+    async fn io_write<B: IoBuf>(
+        &self,
+        socket: &Socket,
+        mut buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let owned = &mut buffer;
+        let result = cancellable(
+            cancellation,
+            socket
+                .0
+                .write_with(move |mut socket| socket.write(owned.as_ref())),
+        )
+        .await;
         (result, buffer)
     }
-
-    async fn io_wait(&self, socket: &Socket, interest: Interest) -> io::Result<()> {
-        match interest {
-            Interest::Readable => socket.0.readable().await,
-            Interest::Writable => socket.0.writable().await,
-        }
+    async fn io_wait(
+        &self,
+        socket: &Socket,
+        interest: Interest,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellable(cancellation, async {
+            match interest {
+                Interest::Readable => socket.0.readable().await,
+                Interest::Writable => socket.0.writable().await,
+            }
+        })
+        .await
     }
 }
 
 impl File for Selector {
-    async fn file_read_at(
+    type File = Arc<StdFile>;
+    async fn file_open(
         &self,
-        file: Arc<StdFile>,
-        mut buffer: Vec<u8>,
-        offset: u64,
-    ) -> BufferResult {
+        path: &Path,
+        options: FileOptions,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::File> {
+        cancellation.check()?;
+        let path = path.to_owned();
+        let cancellation = cancellation.clone();
         blocking::unblock(move || {
-            let result = read_at(&file, &mut buffer, offset);
-            (result, buffer)
+            crate::scheduler::blocking::run(&cancellation, || options.open(&path).map(Arc::new))
         })
         .await
     }
+    async fn file_read_at<B: IoBufMut>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        offset: u64,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let file = Arc::clone(file);
+        file_operation(buffer, cancellation, move |buffer| {
+            read_at(&file, buffer.as_mut(), offset)
+        })
+        .await
+    }
+    async fn file_write_at<B: IoBuf>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        offset: u64,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let file = Arc::clone(file);
+        file_operation(buffer, cancellation, move |buffer| {
+            write_at(&file, buffer.as_ref(), offset)
+        })
+        .await
+    }
+}
 
-    async fn file_write_at(
-        &self,
-        file: Arc<StdFile>,
-        buffer: Vec<u8>,
-        offset: u64,
-    ) -> BufferResult {
-        blocking::unblock(move || {
-            let result = write_at(&file, &buffer, offset);
-            (result, buffer)
-        })
-        .await
+async fn file_operation<B: IoBuf>(
+    mut buffer: B,
+    cancellation: &Cancellation,
+    operation: impl FnOnce(&mut B) -> io::Result<usize> + Send + 'static,
+) -> BufferResult<B> {
+    if let Err(error) = cancellation.check() {
+        return (Err(error.into()), buffer);
     }
+    let cancellation = cancellation.clone();
+    blocking::unblock(move || {
+        let result = crate::scheduler::blocking::run(&cancellation, || operation(&mut buffer));
+        (result, buffer)
+    })
+    .await
 }
 
 impl Clock for Selector {

@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+- Make task handles own execution lifetimes: moving a handle transfers ownership, while dropping it requests destruction after any active poll. Await explicitly for completion. Signal guards retain their subscription task handles.
+
+- Add associated file resources, `file_open`, portable `FileOptions`, TCP listener creation and address inspection. Move OS socket importing to `SocketRegistration`. Add `IoBuf`, `IoBufMut`, owned `BufferSlice` views and explicit file/socket cancellation with `OperationError`; return buffers only after backend access ends. The generic example now uses the public traits across native, Tokio, and simulated I/O.
+
 - Document the complete timer lifecycle comparison with Tokio across cancellation rates in the timer crate readme.
-- Add an executable scheduler-interface experiment with generic file-copy and echo-server functions running on native, Tokio, and in-memory backends. Record resource creation, buffer-range, blocking execution, and draining requirements in the executor design; public I/O traits remain unchanged.
+
+- Add an executable scheduler-interface experiment with generic file-copy and echo-server functions running on native, Tokio, and in-memory backends. Record resource creation, buffer-range, blocking execution, and backend cleanup requirements in the executor design.
 
 - Add `Notify<Value>` and the `Signals` scheduler capability with associated signal and registration types. The optional Unix `signals` feature supports cancellation and queued notifications on Socketry and Tokio; dropping the returned guard removes its subscription without waiting for callbacks already in progress.
 

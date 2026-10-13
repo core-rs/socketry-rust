@@ -1,6 +1,6 @@
 # Scheduler Gaps
 
-Socketry has a working future executor, scheduler-owned tasks, portable I/O capabilities, and a Tokio adapter. These four gaps describe the remaining architectural work toward a scheduler inspired by [Zig's `std.Io` model](https://ziglang.org/download/0.16.0/release-notes.html#I-O-as-an-Interface), while retaining ordinary Rust futures and `.await`.
+Socketry has a working future executor, owning task handles, portable I/O capabilities, and a Tokio adapter. These four gaps describe the remaining architectural work toward a scheduler inspired by [Zig's `std.Io` model](https://ziglang.org/download/0.16.0/release-notes.html#I-O-as-an-Interface), while retaining ordinary Rust futures and `.await`.
 
 ## 1. Graceful cancellation needs runtime integration
 
@@ -8,19 +8,19 @@ Task cancellation currently drops the future before its next poll. An active pol
 
 `Cancellation` and `defer_cancel` now provide runtime-independent cooperative requests and deferred cleanup. Signals can be shared or linked through child signals to shut down the application or an individual service. They signal intent; task handles still confirm completion.
 
-Integrating these primitives into scheduler shutdown and cancellation-aware I/O remains pending. Graceful shutdown must keep workers, I/O services, and the scheduler available until draining completes. The intended model has no default forced abort or internal escalation; a process supervisor handles SIGTERM followed by SIGKILL. Existing task cancellation and scheduler shutdown still destroy futures, so callers must request cooperative cancellation and await work first.
+File and socket operations now accept these signals. Applications explicitly await tasks they want to finish; abandoning an owning task handle requests destruction. Graceful shutdown must keep workers, I/O services, and the scheduler available until draining completes. Cooperative cancellation has no automatic forced abort or internal escalation; a process supervisor handles SIGTERM followed by SIGKILL. Existing task cancellation and scheduler shutdown still destroy futures, so callers must request cooperative cancellation and await work first.
 
 ## 2. Higher-level task grouping is deferred
 
-`Spawn::spawn(future)` is primitive dispatch shared by schedulers and their handles. It registers a scheduler-owned task and returns a handle. Completing or cancelling the spawning task does not cancel independently spawned work; callers await individual handles when completion matters.
+`Spawn::spawn(future)` is primitive dispatch shared by schedulers and their handles. It registers a task and returns its owning handle. Moving that handle transfers its lifetime; destroying a task drops handles it still owns; callers await individual handles when completion matters.
 
 The executor does not expose a Barrier or require a group/owner argument. Libraries can eventually provide groups above this primitive, coordinating cooperative cancellation and completion without adding an implicit hierarchy to dispatch. A portable higher-level group lifecycle remains unspecified and is outside the executor for now.
 
 ## 3. The I/O boundary is still narrow
 
-`Socket` covers TCP registration, connect, accept, reads, writes, and readiness. Listener binding happens through `std::net`. `File` accepts an already-open `std::fs::File`, and `Clock` only supplies relative sleep.
+`Socket` covers TCP listener creation, address inspection, connect, accept, reads, writes, and readiness. OS-resource import is a separate `SocketRegistration` capability. `File` opens associated resources and borrows them for positioned I/O. File/socket operations support cancellation and owned buffer views. `Clock` currently supplies relative sleep.
 
-Opening resources, DNS, deadlines, synchronization, randomness, and processes remain outside the portable boundary. Expand capabilities as real consumers need them, keeping the application's implementation choice explicit. A broader boundary would also allow more operating-system behavior to be substituted in deterministic tests.
+General socket creation/options, DNS, deadlines, randomness, and processes remain outside the portable boundary. Ordinary synchronization uses futures and wakers above scheduler primitives. Expand capabilities as real consumers need them, keeping the application's implementation choice explicit. A broader boundary would also allow more operating-system behavior to be substituted in deterministic tests.
 
 ## 4. The backends establish behavior before performance
 

@@ -1,7 +1,10 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+static NEVER: crate::Cancellation = crate::Cancellation::never();
+
 use super::{DefaultSelector, Scheduler, check_initialized_open, check_open};
+use crate::SocketRegistration;
 use crate::scheduler::{Clock, File, Interest, Socket};
 use std::fs::OpenOptions;
 use std::io;
@@ -113,8 +116,10 @@ fn scheduler_and_handle_forward_network_file_and_clock_operations() {
     let (_first_client, _first_server) = std::thread::scope(|scope| {
         let handle = handle.clone();
         let scheduler = &scheduler;
-        let connect = scope.spawn(move || scheduler.block_on(handle.connect(address)));
-        let (server, _) = scheduler.block_on(scheduler.accept(&listener)).unwrap();
+        let connect = scope.spawn(move || scheduler.block_on(handle.connect(address, &NEVER)));
+        let (server, _) = scheduler
+            .block_on(scheduler.accept(&listener, &NEVER))
+            .unwrap();
         let client = connect.join().unwrap().unwrap();
         (client, server)
     });
@@ -123,8 +128,10 @@ fn scheduler_and_handle_forward_network_file_and_clock_operations() {
     let listener = handle.register_listener(raw_listener).unwrap();
     let (client, server) = std::thread::scope(|scope| {
         let scheduler = &scheduler;
-        let connect = scope.spawn(move || scheduler.block_on(scheduler.connect(address)));
-        let (server, _) = scheduler.block_on(handle.accept(&listener)).unwrap();
+        let connect = scope.spawn(move || scheduler.block_on(scheduler.connect(address, &NEVER)));
+        let (server, _) = scheduler
+            .block_on(handle.accept(&listener, &NEVER))
+            .unwrap();
         let client = connect.join().unwrap().unwrap();
         (client, server)
     });
@@ -150,41 +157,46 @@ fn scheduler_and_handle_forward_network_file_and_clock_operations() {
     );
 
     scheduler.block_on(async {
-        let (result, buffer) = handle.io_write(&client, vec![42]).await;
+        let (result, buffer) = handle.io_write(&client, vec![42], &NEVER).await;
         assert_eq!(result.unwrap(), 1);
         assert_eq!(buffer, vec![42]);
-        handle.io_wait(&server, Interest::Readable).await.unwrap();
-        let (result, buffer) = scheduler.io_read(&server, vec![0]).await;
+        handle
+            .io_wait(&server, Interest::Readable, &NEVER)
+            .await
+            .unwrap();
+        let (result, buffer) = scheduler.io_read(&server, vec![0], &NEVER).await;
         assert_eq!(result.unwrap(), 1);
         assert_eq!(buffer, vec![42]);
 
-        let (result, buffer) = scheduler.io_write(&client, vec![43]).await;
+        let (result, buffer) = scheduler.io_write(&client, vec![43], &NEVER).await;
         assert_eq!(result.unwrap(), 1);
         assert_eq!(buffer, vec![43]);
         scheduler
-            .io_wait(&server, Interest::Readable)
+            .io_wait(&server, Interest::Readable, &NEVER)
             .await
             .unwrap();
-        let (result, buffer) = handle.io_read(&server, vec![0]).await;
+        let (result, buffer) = handle.io_read(&server, vec![0], &NEVER).await;
         assert_eq!(result.unwrap(), 1);
         assert_eq!(buffer, vec![43]);
 
         let (result, buffer) = scheduler
-            .file_write_at(Arc::clone(&file), b"data".to_vec(), 0)
+            .file_write_at(&Arc::clone(&file), b"data".to_vec(), 0, &NEVER)
             .await;
         assert_eq!(result.unwrap(), 4);
         assert_eq!(buffer, b"data".to_vec());
-        let (result, buffer) = handle.file_read_at(Arc::clone(&file), vec![0; 4], 0).await;
+        let (result, buffer) = handle
+            .file_read_at(&Arc::clone(&file), vec![0; 4], 0, &NEVER)
+            .await;
         assert_eq!(result.unwrap(), 4);
         assert_eq!(buffer, b"data".to_vec());
 
         let (result, buffer) = handle
-            .file_write_at(Arc::clone(&file), b"test".to_vec(), 4)
+            .file_write_at(&Arc::clone(&file), b"test".to_vec(), 4, &NEVER)
             .await;
         assert_eq!(result.unwrap(), 4);
         assert_eq!(buffer, b"test".to_vec());
         let (result, buffer) = scheduler
-            .file_read_at(Arc::clone(&file), vec![0; 4], 4)
+            .file_read_at(&Arc::clone(&file), vec![0; 4], 4, &NEVER)
             .await;
         assert_eq!(result.unwrap(), 4);
         assert_eq!(buffer, b"test".to_vec());

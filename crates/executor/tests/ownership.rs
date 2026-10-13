@@ -26,12 +26,13 @@ fn schedulers_and_handles_share_the_spawn_contract() {
 }
 
 #[test]
-fn scheduler_waits_after_join_handles_are_dropped() {
+fn scheduler_can_observe_completion_while_handles_remain_owned() {
     let scheduler = Scheduler::with_workers(4).unwrap();
     let completed = Arc::new(AtomicUsize::new(0));
+    let mut tasks = Vec::new();
     for _ in 0..500 {
         let completed = Arc::clone(&completed);
-        drop(
+        tasks.push(
             scheduler
                 .spawn(async move {
                     yield_now().await;
@@ -49,14 +50,12 @@ fn cancellation_before_first_poll_drops_captured_values() {
     let scheduler = Scheduler::with_workers(1).unwrap();
     let (started_sender, started_receiver) = mpsc::channel();
     let (release_sender, release_receiver) = mpsc::channel();
-    drop(
-        scheduler
-            .spawn(async move {
-                started_sender.send(()).unwrap();
-                receive(&release_receiver);
-            })
-            .unwrap(),
-    );
+    let blocker = scheduler
+        .spawn(async move {
+            started_sender.send(()).unwrap();
+            receive(&release_receiver);
+        })
+        .unwrap();
     receive(&started_receiver);
     let polled = Arc::new(AtomicBool::new(false));
     let dropped = Arc::new(AtomicUsize::new(0));
@@ -76,6 +75,7 @@ fn cancellation_before_first_poll_drops_captured_values() {
     ));
     assert!(!polled.load(Ordering::SeqCst));
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    scheduler.block_on(blocker).unwrap();
 }
 
 #[test]
@@ -101,6 +101,32 @@ fn cancellation_does_not_destroy_an_in_progress_poll() {
         scheduler.block_on(handle),
         Err(TaskError::Cancelled)
     ));
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn dropping_a_handle_waits_for_an_active_poll_before_destroying_the_future() {
+    let scheduler = Scheduler::with_workers(2).unwrap();
+    let (started_sender, started_receiver) = mpsc::channel();
+    let (release_sender, release_receiver) = mpsc::channel();
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let guard = CountDrop(Arc::clone(&dropped));
+    let handle = scheduler
+        .spawn(poll_fn(move |_| {
+            let _ = &guard;
+            started_sender.send(()).unwrap();
+            receive(&release_receiver);
+            Poll::<()>::Pending
+        }))
+        .unwrap();
+    receive(&started_receiver);
+    let task = handle.task();
+    drop(handle);
+    assert!(!task.is_finished());
+    assert_eq!(dropped.load(Ordering::SeqCst), 0);
+    release_sender.send(()).unwrap();
+    scheduler.run();
+    assert!(task.is_finished());
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
 }
 

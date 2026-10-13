@@ -16,6 +16,7 @@
 //! buffers with the kernel.
 use super::readiness::{self, Listener, Socket};
 use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
+use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
 use event_listener::{Event as CompletionEvent, Listener as _};
 use futures_channel::oneshot;
 use io_uring::{IoUring, opcode, squeue, types};
@@ -30,6 +31,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
+use std::{
+    future::{Future, poll_fn},
+    path::Path,
+    pin::pin,
+    task::Poll,
+};
 
 const CANCEL_TAG: u64 = 1 << 63;
 const COMMAND_EVENT: usize = 0;
@@ -77,18 +84,27 @@ fn validate_operation_support(supported: impl Fn(u8) -> bool) -> io::Result<()> 
     Ok(())
 }
 
-async fn retry_operation<O, F, W, G>(
-    mut buffer: Vec<u8>,
+type RawBufferResult<B = Vec<u8>> = (io::Result<usize>, B);
+
+async fn retry_operation<B, O, F, W, G>(
+    mut buffer: B,
     mut operation: O,
     mut wait: W,
-) -> BufferResult
+    cancellation: &Cancellation,
+) -> RawBufferResult<B>
 where
-    O: FnMut(Vec<u8>) -> F,
-    F: std::future::Future<Output = BufferResult>,
+    O: FnMut(B) -> F,
+    F: std::future::Future<Output = RawBufferResult<B>>,
     W: FnMut() -> G,
     G: std::future::Future<Output = io::Result<()>>,
 {
     loop {
+        if cancellation.is_cancelled() {
+            return (
+                Err(io::Error::new(io::ErrorKind::Interrupted, crate::Cancelled)),
+                buffer,
+            );
+        }
         let (result, returned) = operation(buffer).await;
         buffer = returned;
         match result {
@@ -108,19 +124,21 @@ enum Resource {
     File(Arc<StdFile>, u64),
 }
 
-struct Request {
+struct Request<B: IoBuf = Vec<u8>> {
     identifier: u64,
     resource: Resource,
-    buffer: Vec<u8>,
+    buffer: Option<B>,
+    pointer: fn(&mut B) -> *mut u8,
     write: bool,
-    reply: Option<oneshot::Sender<BufferResult>>,
+    reply: Option<oneshot::Sender<RawBufferResult<B>>>,
     cancelling: bool,
 }
 
-impl Request {
+impl<B: IoBuf> Request<B> {
     fn entry(&mut self) -> squeue::Entry {
-        let length = self.buffer.len().min(i32::MAX as usize) as u32;
-        let pointer = self.buffer.as_mut_ptr();
+        let buffer = self.buffer.as_mut().expect("request retains its buffer");
+        let length = buffer.as_ref().len().min(i32::MAX as usize) as u32;
+        let pointer = (self.pointer)(buffer);
         let entry = match &self.resource {
             Resource::Socket(socket) => {
                 let descriptor = types::Fd(socket.0.get_ref().as_raw_fd());
@@ -153,16 +171,14 @@ impl Request {
             .reply
             .take()
             .expect("unfinished requests retain their completion sender");
-        let _ = reply.send((result, std::mem::take(&mut self.buffer)));
-    }
-
-    fn into_buffer(mut self) -> Vec<u8> {
-        self.reply.take();
-        std::mem::take(&mut self.buffer)
+        let _ = reply.send((
+            result,
+            self.buffer.take().expect("request returns its buffer once"),
+        ));
     }
 }
 
-impl Drop for Request {
+impl<B: IoBuf> Drop for Request<B> {
     fn drop(&mut self) {
         // A submission can race Shutdown and remain in the incoming queue as
         // the selector exits. Such requests have never reached the kernel and
@@ -174,9 +190,42 @@ impl Drop for Request {
                     io::ErrorKind::BrokenPipe,
                     "selector closed before submission",
                 )),
-                std::mem::take(&mut self.buffer),
+                self.buffer.take().expect("request returns its buffer once"),
             ));
         }
+    }
+}
+
+// One erased request allocation lets a selector queue heterogeneous owned
+// buffer types. Its typed completion returns the exact original owner.
+trait PendingRequest: Send {
+    fn identifier(&self) -> u64;
+    fn entry(&mut self) -> squeue::Entry;
+    fn finish(self: Box<Self>, result: io::Result<usize>);
+    fn cancelling(&self) -> bool;
+    fn set_cancelling(&mut self);
+    fn take_reply(&mut self) -> Option<Box<dyn Send>>;
+}
+impl<B: IoBuf> PendingRequest for Request<B> {
+    fn identifier(&self) -> u64 {
+        self.identifier
+    }
+    fn entry(&mut self) -> squeue::Entry {
+        Request::entry(self)
+    }
+    fn finish(self: Box<Self>, result: io::Result<usize>) {
+        Request::finish(*self, result);
+    }
+    fn cancelling(&self) -> bool {
+        self.cancelling
+    }
+    fn set_cancelling(&mut self) {
+        self.cancelling = true;
+    }
+    fn take_reply(&mut self) -> Option<Box<dyn Send>> {
+        self.reply
+            .take()
+            .map(|reply| Box::new(reply) as Box<dyn Send>)
     }
 }
 
@@ -184,13 +233,13 @@ impl Drop for Request {
 /// On an unexpected selector failure, leak kernel-accessible resources rather
 /// than freeing memory whose completion cannot be established.
 #[derive(Default)]
-struct InFlight(HashMap<u64, Request>);
+struct InFlight(HashMap<u64, Box<dyn PendingRequest>>);
 
 impl Drop for InFlight {
     fn drop(&mut self) {
         let mut replies = Vec::new();
         for (_, mut request) in self.0.drain() {
-            replies.extend(request.reply.take());
+            replies.extend(request.take_reply());
             std::mem::forget(request);
         }
         // Wake abandoned callers only after every in-flight buffer is retained.
@@ -199,7 +248,7 @@ impl Drop for InFlight {
 }
 
 enum Command {
-    Submit(Request),
+    Submit(Box<dyn PendingRequest>),
     Cancel(u64),
     Shutdown,
 }
@@ -256,15 +305,21 @@ struct CancelOnDrop {
     identifier: u64,
     armed: bool,
 }
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
+impl CancelOnDrop {
+    fn request(&mut self) {
         if self.armed {
             let _ = self
                 .controller
                 .commands
                 .send(Command::Cancel(self.identifier));
             self.controller.notify();
+            self.armed = false;
         }
+    }
+}
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.request();
     }
 }
 
@@ -359,7 +414,20 @@ impl Selector {
         }
     }
 
-    async fn operation(&self, resource: Resource, buffer: Vec<u8>, write: bool) -> BufferResult {
+    async fn operation<B: IoBuf>(
+        &self,
+        resource: Resource,
+        buffer: B,
+        write: bool,
+        pointer: fn(&mut B) -> *mut u8,
+        cancellation: &Cancellation,
+    ) -> RawBufferResult<B> {
+        if cancellation.is_cancelled() {
+            return (
+                Err(io::Error::new(io::ErrorKind::Interrupted, crate::Cancelled)),
+                buffer,
+            );
+        }
         // Some kernels retry EAGAIN internally. Tests can deterministically
         // exercise the public retry contract before submitting real I/O.
         #[cfg(test)]
@@ -369,7 +437,7 @@ impl Selector {
         if let Err(error) = self.check_open() {
             return (Err(error), buffer);
         }
-        if buffer.is_empty() {
+        if buffer.as_ref().is_empty() {
             return (Ok(0), buffer);
         }
         if matches!(&resource, Resource::File(_, offset) if *offset > i64::MAX as u64) {
@@ -398,23 +466,24 @@ impl Selector {
         let request = Request {
             identifier,
             resource,
-            buffer,
+            buffer: Some(buffer),
+            pointer,
             write,
             reply: Some(reply),
             cancelling: false,
         };
-        if let Err(mpsc::SendError(Command::Submit(request))) =
-            self.controller.commands.send(Command::Submit(request))
+        if let Err(mpsc::SendError(Command::Submit(request))) = self
+            .controller
+            .commands
+            .send(Command::Submit(Box::new(request)))
         {
-            return (
-                Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "io_uring selector has exited",
-                )),
-                request.into_buffer(),
-            );
+            request.finish(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "io_uring selector has exited",
+            )));
         }
-        let mut cancellation = CancelOnDrop {
+
+        let mut cancel_request = CancelOnDrop {
             controller: Arc::clone(&self.controller),
             identifier,
             armed: true,
@@ -422,18 +491,39 @@ impl Selector {
         self.controller.notify();
         // A disconnected reply is an unexpected selector failure. Its original
         // buffer is deliberately retained; it cannot safely be returned.
-        let result = result
-            .await
-            .expect("io_uring selector failed with an operation in flight");
-        cancellation.armed = false;
+        let mut result = pin!(result);
+        let mut cancelled = pin!(cancellation.cancelled());
+        let result = poll_fn(|context| {
+            // Original completion wins the race. A cancellation request never
+            // releases its buffer; continue waiting for the original CQE.
+            if let Poll::Ready(result) = result.as_mut().poll(context) {
+                return Poll::Ready(result);
+            }
+            if cancel_request.armed && cancelled.as_mut().poll(context).is_ready() {
+                cancel_request.request();
+            }
+            Poll::Pending
+        })
+        .await
+        .expect("io_uring selector failed with an operation in flight");
+        cancel_request.armed = false;
         result
     }
 }
 
-impl SocketOperations for Selector {
-    type Socket = Socket;
-    type Listener = Listener;
-
+fn operation_result<T>(result: io::Result<T>, cancellation: &Cancellation) -> OperationResult<T> {
+    match result {
+        Err(error)
+            if cancellation.is_cancelled()
+                && (error.kind() == io::ErrorKind::Interrupted
+                    || error.raw_os_error() == Some(libc::ECANCELED)) =>
+        {
+            Err(crate::Cancelled.into())
+        }
+        result => result.map_err(Into::into),
+    }
+}
+impl SocketRegistration for Selector {
     fn register_socket(&self, socket: TcpStream) -> io::Result<Socket> {
         self.check_open()?;
         readiness::Selector.register_socket(socket)
@@ -442,49 +532,164 @@ impl SocketOperations for Selector {
         self.check_open()?;
         readiness::Selector.register_listener(listener)
     }
-    async fn connect(&self, address: SocketAddr) -> io::Result<Socket> {
+}
+impl SocketOperations for Selector {
+    type Socket = Socket;
+    type Listener = Listener;
+    async fn socket_listen(
+        &self,
+        address: SocketAddr,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Listener> {
         self.check_open()?;
-        readiness::Selector.connect(address).await
+        readiness::Selector
+            .socket_listen(address, cancellation)
+            .await
     }
-    async fn accept(&self, listener: &Listener) -> io::Result<(Socket, SocketAddr)> {
+    fn listener_addr(&self, listener: &Listener) -> io::Result<SocketAddr> {
         self.check_open()?;
-        readiness::Selector.accept(listener).await
+        listener.local_addr()
     }
-    async fn io_read(&self, socket: &Socket, buffer: Vec<u8>) -> BufferResult {
-        retry_operation(
+    fn socket_local_addr(&self, socket: &Socket) -> io::Result<SocketAddr> {
+        self.check_open()?;
+        socket.local_addr()
+    }
+    fn socket_peer_addr(&self, socket: &Socket) -> io::Result<SocketAddr> {
+        self.check_open()?;
+        socket.peer_addr()
+    }
+    async fn connect(
+        &self,
+        address: SocketAddr,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Socket> {
+        self.check_open()?;
+        readiness::Selector.connect(address, cancellation).await
+    }
+    async fn accept(
+        &self,
+        listener: &Listener,
+        cancellation: &Cancellation,
+    ) -> OperationResult<(Socket, SocketAddr)> {
+        self.check_open()?;
+        readiness::Selector.accept(listener, cancellation).await
+    }
+    async fn io_read<B: IoBufMut>(
+        &self,
+        socket: &Socket,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let (result, buffer) = retry_operation(
             buffer,
-            |buffer| self.operation(Resource::Socket(socket.clone()), buffer, false),
-            || readiness::Selector.io_wait(socket, Interest::Readable),
+            |buffer| {
+                self.operation(
+                    Resource::Socket(socket.clone()),
+                    buffer,
+                    false,
+                    |buffer| buffer.as_mut().as_mut_ptr(),
+                    cancellation,
+                )
+            },
+            || async {
+                readiness::Selector
+                    .io_wait(socket, Interest::Readable, cancellation)
+                    .await
+                    .map_err(Into::into)
+            },
+            cancellation,
         )
-        .await
+        .await;
+        (operation_result(result, cancellation), buffer)
     }
-    async fn io_write(&self, socket: &Socket, buffer: Vec<u8>) -> BufferResult {
-        retry_operation(
+    async fn io_write<B: IoBuf>(
+        &self,
+        socket: &Socket,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let (result, buffer) = retry_operation(
             buffer,
-            |buffer| self.operation(Resource::Socket(socket.clone()), buffer, true),
-            || readiness::Selector.io_wait(socket, Interest::Writable),
+            |buffer| {
+                self.operation(
+                    Resource::Socket(socket.clone()),
+                    buffer,
+                    true,
+                    |buffer| buffer.as_ref().as_ptr().cast_mut(),
+                    cancellation,
+                )
+            },
+            || async {
+                readiness::Selector
+                    .io_wait(socket, Interest::Writable, cancellation)
+                    .await
+                    .map_err(Into::into)
+            },
+            cancellation,
         )
-        .await
+        .await;
+        (operation_result(result, cancellation), buffer)
     }
-    async fn io_wait(&self, socket: &Socket, interest: Interest) -> io::Result<()> {
+    async fn io_wait(
+        &self,
+        socket: &Socket,
+        interest: Interest,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
         self.check_open()?;
-        readiness::Selector.io_wait(socket, interest).await
+        readiness::Selector
+            .io_wait(socket, interest, cancellation)
+            .await
     }
 }
-
 impl File for Selector {
-    async fn file_read_at(&self, file: Arc<StdFile>, buffer: Vec<u8>, offset: u64) -> BufferResult {
-        self.operation(Resource::File(file, offset), buffer, false)
+    type File = Arc<StdFile>;
+    async fn file_open(
+        &self,
+        path: &Path,
+        options: FileOptions,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::File> {
+        self.check_open()?;
+        readiness::Selector
+            .file_open(path, options, cancellation)
             .await
     }
-    async fn file_write_at(
+    async fn file_read_at<B: IoBufMut>(
         &self,
-        file: Arc<StdFile>,
-        buffer: Vec<u8>,
+        file: &Self::File,
+        buffer: B,
         offset: u64,
-    ) -> BufferResult {
-        self.operation(Resource::File(file, offset), buffer, true)
-            .await
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let (result, buffer) = self
+            .operation(
+                Resource::File(Arc::clone(file), offset),
+                buffer,
+                false,
+                |buffer| buffer.as_mut().as_mut_ptr(),
+                cancellation,
+            )
+            .await;
+        (operation_result(result, cancellation), buffer)
+    }
+    async fn file_write_at<B: IoBuf>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        offset: u64,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let (result, buffer) = self
+            .operation(
+                Resource::File(Arc::clone(file), offset),
+                buffer,
+                true,
+                |buffer| buffer.as_ref().as_ptr().cast_mut(),
+                cancellation,
+            )
+            .await;
+        (operation_result(result, cancellation), buffer)
     }
 }
 impl Clock for Selector {
@@ -499,7 +704,7 @@ struct Reactor {
     ring: IoUring,
     notification: UnixStream,
     incoming: mpsc::Receiver<Command>,
-    pending: VecDeque<Request>,
+    pending: VecDeque<Box<dyn PendingRequest>>,
     in_flight: InFlight,
     cancellations: VecDeque<u64>,
     closing: bool,
@@ -542,7 +747,7 @@ impl Reactor {
         if let Some(position) = self
             .pending
             .iter()
-            .position(|request| request.identifier == identifier)
+            .position(|request| request.identifier() == identifier)
         {
             let request = self
                 .pending
@@ -550,9 +755,9 @@ impl Reactor {
                 .expect("pending queue is unchanged since finding this position");
             request.finish(Err(io::ErrorKind::Interrupted.into()));
         } else if let Some(request) = self.in_flight.0.get_mut(&identifier)
-            && !request.cancelling
+            && !request.cancelling()
         {
-            request.cancelling = true;
+            request.set_cancelling();
             self.cancellations.push_back(identifier);
         }
     }
@@ -577,9 +782,9 @@ impl Reactor {
                             request.finish(Err(io::ErrorKind::Interrupted.into()));
                         }
                         for request in self.in_flight.0.values_mut() {
-                            if !request.cancelling {
-                                request.cancelling = true;
-                                self.cancellations.push_back(request.identifier);
+                            if !request.cancelling() {
+                                request.set_cancelling();
+                                self.cancellations.push_back(request.identifier());
                             }
                         }
                     }
@@ -627,7 +832,7 @@ impl Reactor {
                     let Some(request) = self.pending.pop_front() else {
                         break;
                     };
-                    let identifier = request.identifier;
+                    let identifier = request.identifier();
                     let request = self.in_flight.0.entry(identifier).or_insert(request);
                     let entry = request.entry();
                     // SAFETY: InFlight owns the buffer allocation and descriptor

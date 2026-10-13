@@ -5,10 +5,10 @@
 use super::{Scheduler, SchedulerHandle};
 use crate::scheduler::selector::DefaultSelector;
 use crate::scheduler::{BufferResult, Clock, File, Interest, Socket};
-use std::fs::File as StdFile;
+use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
+use std::path::Path;
 use std::time::Duration;
 
 fn check_open(closed: bool) -> io::Result<()> {
@@ -75,126 +75,234 @@ impl SchedulerHandle {
     }
 }
 
-impl Socket for SchedulerHandle {
-    type Socket = <DefaultSelector as Socket>::Socket;
-    type Listener = <DefaultSelector as Socket>::Listener;
-
+impl SocketRegistration for SchedulerHandle {
     fn register_socket(&self, socket: TcpStream) -> io::Result<Self::Socket> {
         self.selector()?.register_socket(socket)
     }
-
     fn register_listener(&self, listener: TcpListener) -> io::Result<Self::Listener> {
         self.selector()?.register_listener(listener)
     }
-
-    async fn connect(&self, address: SocketAddr) -> io::Result<Self::Socket> {
-        self.selector()?.connect(address).await
-    }
-
-    async fn accept(&self, listener: &Self::Listener) -> io::Result<(Self::Socket, SocketAddr)> {
-        self.selector()?.accept(listener).await
-    }
-
-    async fn io_read(&self, socket: &Self::Socket, buffer: Vec<u8>) -> BufferResult {
-        match self.selector() {
-            Ok(selector) => selector.io_read(socket, buffer).await,
-            Err(error) => (Err(error), buffer),
-        }
-    }
-
-    async fn io_write(&self, socket: &Self::Socket, buffer: Vec<u8>) -> BufferResult {
-        match self.selector() {
-            Ok(selector) => selector.io_write(socket, buffer).await,
-            Err(error) => (Err(error), buffer),
-        }
-    }
-
-    async fn io_wait(&self, socket: &Self::Socket, interest: Interest) -> io::Result<()> {
-        self.selector()?.io_wait(socket, interest).await
-    }
 }
-
-impl File for SchedulerHandle {
-    async fn file_read_at(&self, file: Arc<StdFile>, buffer: Vec<u8>, offset: u64) -> BufferResult {
-        match self.selector() {
-            Ok(selector) => selector.file_read_at(file, buffer, offset).await,
-            Err(error) => (Err(error), buffer),
-        }
-    }
-
-    async fn file_write_at(
+impl Socket for SchedulerHandle {
+    type Socket = <DefaultSelector as Socket>::Socket;
+    type Listener = <DefaultSelector as Socket>::Listener;
+    async fn socket_listen(
         &self,
-        file: Arc<StdFile>,
-        buffer: Vec<u8>,
-        offset: u64,
-    ) -> BufferResult {
+        address: SocketAddr,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Listener> {
+        self.selector()?.socket_listen(address, cancellation).await
+    }
+    fn listener_addr(&self, listener: &Self::Listener) -> io::Result<SocketAddr> {
+        self.selector()?.listener_addr(listener)
+    }
+    fn socket_local_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+        self.selector()?.socket_local_addr(socket)
+    }
+    fn socket_peer_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+        self.selector()?.socket_peer_addr(socket)
+    }
+    async fn connect(
+        &self,
+        address: SocketAddr,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Socket> {
+        self.selector()?.connect(address, cancellation).await
+    }
+    async fn accept(
+        &self,
+        listener: &Self::Listener,
+        cancellation: &Cancellation,
+    ) -> OperationResult<(Self::Socket, SocketAddr)> {
+        self.selector()?.accept(listener, cancellation).await
+    }
+    async fn io_read<B: IoBufMut>(
+        &self,
+        socket: &Self::Socket,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
         match self.selector() {
-            Ok(selector) => selector.file_write_at(file, buffer, offset).await,
-            Err(error) => (Err(error), buffer),
+            Ok(selector) => selector.io_read(socket, buffer, cancellation).await,
+            Err(error) => (Err(error.into()), buffer),
+        }
+    }
+    async fn io_write<B: IoBuf>(
+        &self,
+        socket: &Self::Socket,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        match self.selector() {
+            Ok(selector) => selector.io_write(socket, buffer, cancellation).await,
+            Err(error) => (Err(error.into()), buffer),
+        }
+    }
+    async fn io_wait(
+        &self,
+        socket: &Self::Socket,
+        interest: Interest,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.selector()?
+            .io_wait(socket, interest, cancellation)
+            .await
+    }
+}
+impl File for SchedulerHandle {
+    type File = <DefaultSelector as File>::File;
+    async fn file_open(
+        &self,
+        path: &Path,
+        options: FileOptions,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::File> {
+        self.selector()?
+            .file_open(path, options, cancellation)
+            .await
+    }
+    async fn file_read_at<B: IoBufMut>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        offset: u64,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        match self.selector() {
+            Ok(selector) => {
+                selector
+                    .file_read_at(file, buffer, offset, cancellation)
+                    .await
+            }
+            Err(error) => (Err(error.into()), buffer),
+        }
+    }
+    async fn file_write_at<B: IoBuf>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        offset: u64,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        match self.selector() {
+            Ok(selector) => {
+                selector
+                    .file_write_at(file, buffer, offset, cancellation)
+                    .await
+            }
+            Err(error) => (Err(error.into()), buffer),
         }
     }
 }
-
 impl Clock for SchedulerHandle {
     async fn sleep(&self, duration: Duration) {
         // Timer progress is independent of selector initialization and ring support.
         async_io::Timer::after(duration).await;
     }
 }
-
-impl Socket for Scheduler {
-    type Socket = <SchedulerHandle as Socket>::Socket;
-    type Listener = <SchedulerHandle as Socket>::Listener;
-
+impl SocketRegistration for Scheduler {
     fn register_socket(&self, socket: TcpStream) -> io::Result<Self::Socket> {
         self.handle.register_socket(socket)
     }
-
     fn register_listener(&self, listener: TcpListener) -> io::Result<Self::Listener> {
         self.handle.register_listener(listener)
     }
-
-    async fn connect(&self, address: SocketAddr) -> io::Result<Self::Socket> {
-        self.handle.connect(address).await
-    }
-
-    async fn accept(&self, listener: &Self::Listener) -> io::Result<(Self::Socket, SocketAddr)> {
-        self.handle.accept(listener).await
-    }
-
-    async fn io_read(&self, socket: &Self::Socket, buffer: Vec<u8>) -> BufferResult {
-        self.handle.io_read(socket, buffer).await
-    }
-
-    async fn io_write(&self, socket: &Self::Socket, buffer: Vec<u8>) -> BufferResult {
-        self.handle.io_write(socket, buffer).await
-    }
-
-    async fn io_wait(&self, socket: &Self::Socket, interest: Interest) -> io::Result<()> {
-        self.handle.io_wait(socket, interest).await
-    }
 }
-
-impl File for Scheduler {
-    async fn file_read_at(&self, file: Arc<StdFile>, buffer: Vec<u8>, offset: u64) -> BufferResult {
-        self.handle.file_read_at(file, buffer, offset).await
-    }
-
-    async fn file_write_at(
+impl Socket for Scheduler {
+    type Socket = <SchedulerHandle as Socket>::Socket;
+    type Listener = <SchedulerHandle as Socket>::Listener;
+    async fn socket_listen(
         &self,
-        file: Arc<StdFile>,
-        buffer: Vec<u8>,
-        offset: u64,
-    ) -> BufferResult {
-        self.handle.file_write_at(file, buffer, offset).await
+        address: SocketAddr,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Listener> {
+        self.handle.socket_listen(address, cancellation).await
+    }
+    fn listener_addr(&self, listener: &Self::Listener) -> io::Result<SocketAddr> {
+        self.handle.listener_addr(listener)
+    }
+    fn socket_local_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+        self.handle.socket_local_addr(socket)
+    }
+    fn socket_peer_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+        self.handle.socket_peer_addr(socket)
+    }
+    async fn connect(
+        &self,
+        address: SocketAddr,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Socket> {
+        self.handle.connect(address, cancellation).await
+    }
+    async fn accept(
+        &self,
+        listener: &Self::Listener,
+        cancellation: &Cancellation,
+    ) -> OperationResult<(Self::Socket, SocketAddr)> {
+        self.handle.accept(listener, cancellation).await
+    }
+    async fn io_read<B: IoBufMut>(
+        &self,
+        socket: &Self::Socket,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        self.handle.io_read(socket, buffer, cancellation).await
+    }
+    async fn io_write<B: IoBuf>(
+        &self,
+        socket: &Self::Socket,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        self.handle.io_write(socket, buffer, cancellation).await
+    }
+    async fn io_wait(
+        &self,
+        socket: &Self::Socket,
+        interest: Interest,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.handle.io_wait(socket, interest, cancellation).await
     }
 }
-
+impl File for Scheduler {
+    type File = <SchedulerHandle as File>::File;
+    async fn file_open(
+        &self,
+        path: &Path,
+        options: FileOptions,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::File> {
+        self.handle.file_open(path, options, cancellation).await
+    }
+    async fn file_read_at<B: IoBufMut>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        offset: u64,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        self.handle
+            .file_read_at(file, buffer, offset, cancellation)
+            .await
+    }
+    async fn file_write_at<B: IoBuf>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        offset: u64,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        self.handle
+            .file_write_at(file, buffer, offset, cancellation)
+            .await
+    }
+}
 impl Clock for Scheduler {
     async fn sleep(&self, duration: Duration) {
         self.handle.sleep(duration).await;
     }
 }
-
 #[cfg(test)]
 mod tests;

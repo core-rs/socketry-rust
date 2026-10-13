@@ -1,6 +1,6 @@
 # Future foundation
 
-This document records the direction for Socketry's Rust foundation. The executor now polls futures directly using async-task and Crossbeam queues, with worker threads, work stealing and scheduler-owned tasks. The coroutine prototype is preserved in commit `b520f3d` on branch `coroutine`. Portable TCP, file and clock capabilities, native selectors and a Tokio adapter are now implemented. The independent io-event timer queue is implemented in `socketry-timers`; scheduler integration and further optimizations remain planned.
+This document records the direction for Socketry's Rust foundation. The executor now polls futures directly using async-task and Crossbeam queues, with worker threads, work stealing and transferable task ownership. The coroutine prototype is preserved in commit `b520f3d` on branch `coroutine`. Portable TCP, file and clock capabilities, native selectors and a Tokio adapter are now implemented. The independent io-event timer queue is implemented in `socketry-timers`; scheduler integration and further optimizations remain planned.
 
 ## Goals
 
@@ -41,12 +41,12 @@ Keep protocol parsing and serialization independent of the runtime wherever poss
 
 The executor polls pinned future state on worker threads' ordinary stacks. Use Send futures for tasks eligible to run on different workers. A local task facility can accept non-Send futures with explicit thread restrictions. Pinned future storage stays at a stable address while the worker allowed to poll it may change. Only one worker may poll a task at a time.
 
-The scheduler owns tasks submitted through itself or its handles. Both expose the primitive `Spawn` contract: dispatch accepts a future and returns a task handle, without a group or owner argument. Independently spawned tasks have no implicit parent-child lifecycle.
+Returned task handles own execution lifetimes; the scheduler retains task storage until completion or destruction. Schedulers and their handles expose the primitive `Spawn` contract: dispatch accepts a future and returns a task handle, without a group or owner argument. Independently spawned tasks have no implicit parent-child lifecycle.
 
 - Register the task before making it runnable.
 - Await its handle to observe completion and failures.
-- Dropping the handle abandons the result while the scheduler retains the task.
-- Completing or cancelling the spawning task does not cancel independently spawned work.
+- Moving the handle transfers ownership. Dropping it requests future destruction after any active poll, without waiting.
+- Destroying a task drops handles it still owns. Handles moved elsewhere remain owned there, independently of their spawning task.
 - Closing the scheduler prevents new submissions; shutdown joins task destruction.
 
 Higher-level groups can be built above dispatch. The executor does not provide a Barrier or require group membership for spawning.
@@ -63,17 +63,17 @@ Contextual APIs such as `Scheduler::current()` can remain conveniences. Set and 
 
 ### Cooperative cancellation
 
-The shutdown direction is cooperative: request graceful termination and let the application continue polling until its work completes. There is no default forced abort, second-request escalation, or grace-period deadline. If a process refuses to stop, its supervisor can follow SIGTERM with SIGKILL.
+The shutdown direction is cooperative: request graceful termination and let the application continue polling until its work completes. Cooperative requests have no automatic abort, second-request escalation, or grace-period deadline. Explicitly dropping an owning task handle abandons its future and bypasses asynchronous cleanup. If a process refuses to stop, its supervisor can follow SIGTERM with SIGKILL.
 
 `Cancellation` is implemented in `socketry-executor` and re-exported by `socketry`. It works independently of the executor. Clones share a persistent signal; child signals receive ancestor cancellation without propagating it to parents or siblings. This explicit cancellation tree expresses service boundaries without imposing an implicit task hierarchy. Dropping a signal does not cancel it. Rust destructors release retained resources, but asynchronous draining still requires live futures and explicit completion tracking through task handles.
 
-`cancel()` signals intent; `check()` returns `Cancelled` at cooperative cancellation points; `cancelled().await` suspends using wakers. `never()` represents work without cooperative cancellation. Passing signals explicitly to future I/O operations remains planned; current Socket, File, and Clock signatures are unchanged.
+`cancel()` signals intent; `check()` returns `Cancelled` at cooperative cancellation points; `cancelled().await` suspends using wakers. `never()` represents work without cooperative cancellation. File and socket operations now accept explicit signals and return cancellation separately from OS errors. Monotonic, cancellation-aware Clock signatures remain planned.
 
 `defer_cancel(&signal, future, on_cancel)` observes the signal, invokes a synchronous shutdown callback once, and keeps awaiting the future's normal output. The callback tells the protected work to stop accepting new work or begin draining. Async cleanup belongs in that future, with cancellation inputs that allow it to finish. The wrapper uses standard future polling, handles pinned futures, and neither busy-waits nor prevents its own destruction.
 
-The intended application sequence is to request application or service cancellation, await task completion while runtime services remain available, then release the scheduler. Cooperative scheduler shutdown remains future integration work. Existing Task cancellation and scheduler shutdown still destroy futures and bypass deferred async cleanup; they are distinct from cooperative cancellation.
+The intended application sequence is to request application or service cancellation, await task completion while runtime services remain available, then release the scheduler. Applications explicitly await the tasks they want to finish; there is no implicit wait for every child. Backends still retain resources for outstanding operations and must honour accepted submissions. Existing Task cancellation and scheduler shutdown still destroy futures and bypass deferred async cleanup; they are distinct from cooperative cancellation.
 
-`Signals::signal_notify` explicitly connects signals to an ordinary `Notify<Value>` target. Cancellation requests shutdown; an unbounded channel queues other events such as reload requests. Waiting remains specific to the destination. An associated, must-use registration guard owns the subscription; the scheduler/runtime must remain alive and driven for delivery. Dropping it stops admission without awaiting already-dispatching callbacks. The optional Unix `signals` backend spawns one task per subscription, asynchronously reading signal-hook's self-pipe through the chosen runtime's I/O services. Guard removal wakes that task to exit, and scheduler shutdown also ends delivery. It creates no dedicated signal thread. It never calls user notification code in a raw signal handler. OS/backend coalescing and persistent process-wide signal dispositions remain part of the contract; no forced termination or escalation policy is installed.
+`Signals::signal_notify` explicitly connects signals to an ordinary `Notify<Value>` target. Cancellation requests shutdown; an unbounded channel queues other events such as reload requests. Waiting remains specific to the destination. An associated, must-use registration guard owns the subscription; the scheduler/runtime must remain alive and driven for delivery. Dropping it stops admission without awaiting already-dispatching callbacks. The optional Unix `signals` backend spawns one task per subscription, asynchronously reading signal-hook's self-pipe through the chosen runtime's I/O services. The guard retains the task handle; removal drops it after stopping dispatch admission, and scheduler shutdown also ends delivery. It creates no dedicated signal thread. It never calls user notification code in a raw signal handler. OS/backend coalescing and persistent process-wide signal dispositions remain part of the contract; no forced termination or escalation policy is installed.
 
 ### Current executor
 
@@ -81,7 +81,7 @@ The implementation currently lives in socketry-executor. async-task owns pinned 
 
 Periodic external checks prevent a busy local queue from starving submissions. Idle flags and a post-registration queue search coordinate parking and wakeups. Task registration and completion use an ownership mutex; ordinary polling and wakeups use the task state and queues without that mutex.
 
-Scheduler and SchedulerHandle implement Spawn. Its associated handle type permits runtime-specific join implementations. Public TaskHandle drop abandons a result while leaving execution owned by the scheduler. Awaiting it reports output, cancellation or a panic payload. There is no implicit task hierarchy; group coordination belongs above dispatch.
+Scheduler and SchedulerHandle implement Spawn. Its associated handle type permits runtime-specific join implementations. Public TaskHandle drop abandons execution; moving the handle transfers its lifetime to the recipient. Awaiting it reports output, cancellation or a panic payload. There is no implicit task hierarchy; group coordination belongs above dispatch.
 
 Native I/O and sleep capabilities now accompany the executor. Regular-file fallbacks use blocking pools; there is no public blocking-task API or local non-Send task executor. Coroutine sources and historical tests are preserved on their branch and are no longer built by this workspace.
 
@@ -129,10 +129,9 @@ The implementations live under `scheduler/selector/`, selected with Cargo featur
 
 The Linux `io-uring` feature selects a dedicated ring for socket/file reads and writes. Connect, accept, explicit readiness waits and sleep still use async-io. Initialization probes required opcodes and reliable completion overflow; it returns an error if unavailable rather than silently changing implementation. Shutdown cancels and drains original completions. Operation identifiers are never reused, and cancellation completions cannot release original buffers. Unexpected selector failure retains resources whose kernel lifetime cannot be established and panics their waiting operations. Normal cancellation does not retain completed resources.
 
-The current owned-buffer API uses Vec values and returns `(io::Result<usize>,
-Vec<u8>)`. Read buffers must already have an initialized length. Operations may be partial; dropping a waiting future can abandon I/O that consumes or transmits bytes. Socket and listener types are associated with the concrete implementation. Tokio registrations reject use through another runtime's adapter.
+The owned-buffer API supports `IoBuf`, `IoBufMut`, and `BufferSlice`, returning `(OperationResult<usize>, B)` with ownership on every normal result. Read buffers must already have an initialized length. Operations may be partial; dropping a waiting future can abandon I/O that consumes or transmits bytes. Socket and listener types are associated with the concrete implementation. Tokio registrations reject use through another runtime's adapter.
 
-This is an initial implementation: each ring operation uses a command and a completion channel, and operation records and buffers are not pooled. General descriptors, UDP and native overlapped Windows files remain future work. Blocking file operations can outlive task cancellation; neither Socketry nor the Tokio adapter shuts down the process-wide or external blocking pool.
+This is an initial implementation: each ring operation uses a boxed typed request, a command, and a completion channel, and operation records and buffers are not pooled. General descriptors, UDP and native overlapped Windows files remain future work. Blocking file operations can outlive task cancellation; neither Socketry nor the Tokio adapter shuts down the process-wide or external blocking pool.
 
 ## Timer port
 
@@ -170,7 +169,7 @@ The algorithm's existing Ruby performance motivates the port. Rust performance c
 
 1. Record boundaries and reusable Rust conventions (implemented).
 2. Replace stackful execution with async-task and Crossbeam worker queues (implemented). Keep the coroutine prototype in its saved branch.
-3. Implement primitive task dispatch, scheduler ownership, cancellation and shutdown (implemented). Runtime-independent cooperative signals and deferred cancellation are implemented; cooperative scheduler shutdown and cancellation-aware I/O remain future work. Higher-level task groups are outside the executor for now.
+3. Implement primitive task dispatch, scheduler ownership, cancellation and shutdown (implemented). Runtime-independent cooperative signals and deferred cancellation are implemented; cancellation-aware file/socket operations and transferable task ownership are implemented. Clock cancellation and submission-only cleanup remain future work. Higher-level task groups are outside the executor for now.
 4. Establish minimal clock and I/O contracts with concrete consumers (implemented with Socket, File, Clock and a portable TCP example).
 5. Implement native readiness and the Tokio adapter, running the same consumers with both (implemented). Native sleep uses async-io until scheduler integration with `socketry-timers`.
 6. Implement io\_uring's owned-buffer lifecycle, socket/file operations, cancellation and runtime probing (implemented). Improve operation reuse, buffer registration and submission backpressure in subsequent work.

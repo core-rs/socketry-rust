@@ -7,6 +7,9 @@
 //! runtime. Dropping it closes admission and requests cancellation. Await
 //! shutdown to join task destruction. Socketry's Task::current and
 //! Scheduler::current describe Socketry execution, not Tokio tasks.
+#[cfg(all(unix, feature = "signals"))]
+mod signals;
+
 use super::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
 use crate::{Spawn, SpawnError, TaskError};
 use ::tokio::runtime::Handle;

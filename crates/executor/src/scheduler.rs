@@ -34,3 +34,6 @@ pub use file::File;
 
 mod clock;
 pub use clock::Clock;
+
+mod signals;
+pub use signals::Signals;

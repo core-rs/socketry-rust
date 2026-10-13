@@ -35,7 +35,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
         if: matrix.runner == 'ubuntu-24.04'
       - name: Run tests and require complete source-region coverage
-        run: cargo bake --locked test:coverage --all-targets true --features tokio
+        run: cargo bake --locked test:coverage --all-targets true --features tokio,signals
 
   test:
     name: ${{ matrix.name }}
@@ -59,13 +59,15 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Run workspace tests
-        run: cargo test --workspace --all-targets --features tokio --locked
+        run: cargo test --workspace --all-targets --features tokio,signals --locked
       - name: Run documentation tests
-        run: cargo test --workspace --doc --features tokio --locked
+        run: cargo test --workspace --doc --features tokio,signals --locked
       - name: Check executor-only and Tokio-only configurations
         run: |
           cargo check --workspace --all-targets --no-default-features --locked
           cargo check --workspace --all-targets --no-default-features --features tokio --locked
+          cargo check --workspace --all-targets --no-default-features --features signals --locked
+          cargo check --workspace --all-targets --no-default-features --features tokio,signals --locked
 
   io-uring:
     name: io_uring ${{ matrix.runner }}
@@ -107,7 +109,7 @@ jobs:
             rustup component add llvm-tools-preview
             cargo install socketry-cargo-bake --locked
             cargo install cargo-llvm-cov --locked
-            cargo bake --locked test:coverage --all-targets true --features tokio
+            cargo bake --locked test:coverage --all-targets true --features tokio,signals
 
   sanitizer:
     name: Linux x86-64 ${{ matrix.name }}

@@ -102,6 +102,48 @@ Workers, selectors, timers, blocking-operation services, and the scheduler must 
 
 There is no default forced abort, grace-period deadline, or escalation on a second request. Work may choose to ignore cancellation. A process supervisor can enforce termination by following SIGTERM with SIGKILL. An application can also abandon futures and destroy its runtime, giving up asynchronous cleanup; this does not remove the runtime's obligation to retain memory still accessible by the kernel.
 
+### Signal notifications and registration lifetime
+
+Signals are inputs to application policy, not inherently cancellation requests. The implemented `Notify<Value>` trait has one synchronous method, `notify(&self, value)`. Cancellation ignores the value and requests shutdown; unbounded `std::sync::mpsc::Sender` and `futures_channel::mpsc::UnboundedSender` queue it. A closed receiver discards values. Bounded senders require an application wrapper that defines overflow behavior. `Arc<T>` forwards to its target. Waiting stays target-specific: `Cancellation::cancelled()` or a channel receive; there is no shared waiting trait.
+
+The implemented scheduler capability is:
+
+```rust,ignore
+pub trait Signals: Send + Sync {
+    type Signal: Copy + Send + 'static;
+    type Registration: Send + 'static;
+
+    fn signal_notify<Target>(
+        &self,
+        signals: &[Self::Signal],
+        target: Target,
+    ) -> io::Result<Self::Registration>
+    where
+        Target: Notify<Self::Signal> + 'static;
+}
+```
+
+Registration is explicit, synchronous, and fallible. The optional `signals` feature supplies Unix implementations for native and Tokio schedulers and their handles, with `c_int` signal identifiers and a `#[must_use] SignalRegistration`. The trait remains available for other implementations; unsupported platforms have no built-in implementation. Scheduler construction installs no handlers. Closed scheduler handles reject new registrations.
+
+```rust,ignore
+use socketry_executor::{Cancellation, Signals, signal::{SIGINT, SIGTERM, SIGHUP}};
+
+let shutdown = Cancellation::new();
+let shutdown_registration = scheduler.signal_notify(&[SIGINT, SIGTERM], shutdown.clone())?;
+let (reload, reloads) = futures_channel::mpsc::unbounded();
+let reload_registration = scheduler.signal_notify(&[SIGHUP], reload)?;
+// Consume reloads through the channel; request shutdown through Cancellation.
+// Keep both registrations alive while the application drains.
+drop(reload_registration);
+drop(shutdown_registration);
+```
+
+Dropping the guard stops new dispatch admission for that subscription and requests backend cleanup. Already-admitted dispatch may finish and must retain its destination until completion. Drop does not join callbacks or await cleanup. Other subscriptions remain active. Each registration spawns a task owned by its scheduler. The application must keep both the guard and scheduler/runtime alive and driven throughout graceful draining. Scheduler shutdown also ends delivery and releases the subscription, even if a guard survives. Repeated shutdown signals have no automatic escalation behavior.
+
+`Notify` runs in ordinary thread context, outside raw signal handlers and scheduler locks. It may enqueue or wake work without being async-signal-safe, and should return promptly. The Unix backend uses signal-hook's self-pipe with an asynchronous reader in a spawned scheduler task: async-io for native, or the supplied Tokio runtime for the adapter. There is no dedicated thread per registration and no hidden cross-runtime reactor. Guard removal cancels the task's wait so it exits and releases the subscription. The task yields after each batch for fairness. Callback panics follow the scheduler's normal task panic handling; EOF or a terminal read error also ends delivery. Linux signalfd or kqueue can be future implementations with the same public contract, subject to their process/thread setup requirements.
+
+The OS and backend can coalesce repeated signals before dispatch and need not preserve ordering between different signals. A queue retains delivered values while its consumer is busy; it cannot reconstruct every original occurrence. Removing a registration does not restore original process-wide signal dispositions, even after partial setup failure. Applications must coordinate signal ownership with other libraries and existing handlers.
+
 ### Deferred cancellation
 
 The implemented wrapper is:
@@ -120,7 +162,7 @@ The wrapper does not mask cancellation inputs passed to operations inside the fu
 
 The cooperative primitives are implemented, but existing `Task::cancel`, scheduler shutdown, and scheduler destruction still request destruction of task futures. They can bypass deferred asynchronous cleanup. Callers must currently request cooperative cancellation and await draining before invoking those lifecycle operations.
 
-The executor has no implicit task hierarchy or task-group primitive. Completing or cancelling a task does not cancel independently spawned work. Await individual task handles when their completion matters. Higher-level groups can be implemented above `Spawn`; they are outside the executor for now. Signal integration and cooperative scheduler shutdown remain future work.
+The executor has no implicit task hierarchy or task-group primitive. Completing or cancelling a task does not cancel independently spawned work. Await individual task handles when their completion matters. Higher-level groups can be implemented above `Spawn`; they are outside the executor for now. Cooperative scheduler shutdown remains future work.
 
 ## Scheduler operation interface
 
@@ -684,7 +726,8 @@ Registration does not itself guarantee zero-copy transport. Zero-copy sends can 
 | --- | --- |
 | Executor | Future workers, work stealing, scheduler-owned tasks and primitive `Spawn` dispatch implemented. Higher-level task groups are deferred. |
 | Cancellation | `Cancellation`, `Cancelled`, and `defer_cancel` implemented and re-exported. |
-| Graceful runtime shutdown | Signal installation, cooperative scheduler draining, and cancellation-aware I/O remain pending; existing shutdown destroys task futures. |
+| Signal notifications | `Notify<Value>`, `Signals`, and optional Unix signal registration guards implemented for native and Tokio schedulers; cancellation and unbounded queue targets supported. |
+| Graceful runtime shutdown | Cooperative scheduler draining and cancellation-aware I/O remain pending; existing shutdown destroys task futures. |
 | Capabilities | `File`, `Socket`, `Clock`, and `Spawn` implemented; a common scheduler contract, associated file resources, scheduler-level resource creation, broader hooks and optional extension boundaries remain design work. |
 | Linked operations | Prepared chains and a portable `Linked` capability remain proposed; native SQE linking, whole-chain blocking jobs, and readiness sequencing are not implemented. |
 | File operations | Owned-buffer positioned read/write implemented; stateful I/O, lifecycle, allocation and metadata hooks pending. |

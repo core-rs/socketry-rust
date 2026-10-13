@@ -70,7 +70,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Cancellation expresses intent; task handles confirm completion. Keep the scheduler and I/O services alive while draining. Existing task cancellation and scheduler shutdown still destroy futures; `defer_cancel` cannot protect a future from destruction. Signal handling and cancellation inputs on I/O operations are not yet integrated. There is no signal escalation policy: an external supervisor can enforce SIGTERM followed by SIGKILL.
+Cancellation expresses intent; task handles confirm completion. Keep the scheduler and I/O services alive while draining. Existing task cancellation and scheduler shutdown still destroy futures; `defer_cancel` cannot protect a future from destruction. Cancellation inputs on I/O operations remain pending. There is no signal escalation policy: an external supervisor can enforce SIGTERM followed by SIGKILL.
+
+The optional `signals` feature adds Unix `Signals::signal_notify(&signals, target)` to both scheduler implementations. Targets implement `Notify<Value>`: pass a `Cancellation` for shutdown or an unbounded channel sender for queued events such as reload requests. Keep the returned `SignalRegistration` alive and drop it to unsubscribe; already-admitted callbacks may finish. Callbacks run outside raw signal handlers. See the executor's [signal notification contract](crates/executor/readme.md#signal-notifications) for examples, lifetime rules, and process-wide signal disposition behavior.
 
 ## Portable I/O and runtime selection
 

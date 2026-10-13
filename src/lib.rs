@@ -6,9 +6,15 @@
 
 pub use socketry_executor as executor;
 pub use socketry_executor::{
-    BufferResult, Cancellation, Cancelled, Clock, File, Interest, Scheduler, SchedulerHandle,
-    Socket, Spawn, SpawnError, Task, TaskError, TaskHandle, defer_cancel, yield_now,
+    BufferResult, Cancellation, Cancelled, Clock, File, Interest, Notify, Scheduler,
+    SchedulerHandle, Signals, Socket, Spawn, SpawnError, Task, TaskError, TaskHandle, defer_cancel,
+    yield_now,
 };
+
+#[cfg(all(unix, feature = "signals", any(feature = "native", feature = "tokio")))]
+pub use socketry_executor::SignalRegistration;
+#[cfg(all(unix, feature = "signals"))]
+pub use socketry_executor::signal;
 
 pub use socketry_timers as timers;
 

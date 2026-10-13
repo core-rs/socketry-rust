@@ -4,6 +4,8 @@
 
 - Document the complete timer lifecycle comparison with Tokio across cancellation rates in the timer crate readme.
 
+- Add `Notify<Value>` and the `Signals` scheduler capability with associated signal and registration types. The optional Unix `signals` feature supports cancellation and queued notifications on Socketry and Tokio; dropping the returned guard removes its subscription without waiting for callbacks already in progress.
+
 - Add the independent `socketry-timers` crate and expose it as `socketry::timers`. Include reusable batched queues, optional worker assistance and lazy sleep futures, plus the experimental inbox driver and Tokio lifecycle benchmarks.
 
 - Remove `Barrier`, scheduler barrier factories, and `SpawnError::OwnerClosed` from `socketry-executor` and the facade. Use primitive `spawn(future)` dispatch and await task handles; higher-level task groups are deferred.

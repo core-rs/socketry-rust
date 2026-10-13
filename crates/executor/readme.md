@@ -89,7 +89,39 @@ assert_eq!(output, 42);
 
 Use a root signal for process shutdown and child signals for individual services. Keep the scheduler and runtime alive until task handles confirm draining is complete. The protected work must use cancellation inputs that allow cleanup to continue; the wrapper does not mask signals passed into its operations. Callback panics propagate, and dropping the wrapper still drops its work.
 
-These primitives do not change `Task::cancel` or scheduler shutdown, which still destroy futures. Signal handlers and cancellation-aware I/O signatures remain separate integration work. Cooperative requests have no forced abort or deadline escalation; a process supervisor can enforce SIGTERM followed by SIGKILL.
+These primitives do not change `Task::cancel` or scheduler shutdown, which still destroy futures. Cancellation-aware I/O signatures remain separate integration work. Cooperative requests have no forced abort or deadline escalation; a process supervisor can enforce SIGTERM followed by SIGKILL.
+
+## Signal notifications
+
+Enable the optional `signals` feature on Unix together with `native` (the default) or `tokio` to use `Signals::signal_notify` on Socketry's scheduler or handle, or the Tokio adapter. Registration is explicit, synchronous, and fallible. Scheduler construction installs no signal handlers. The returned `#[must_use]` guard owns one subscription; keep it alive during graceful draining and drop it to unsubscribe.
+
+```rust,no_run
+# #[cfg(all(unix, feature = "signals", feature = "native"))]
+# fn main() -> std::io::Result<()> {
+use socketry_executor::{Cancellation, Scheduler, Signals, signal::{SIGINT, SIGTERM, SIGHUP}};
+
+let scheduler = Scheduler::with_workers(1)?;
+let shutdown = Cancellation::new();
+let shutdown_registration = scheduler.signal_notify(&[SIGINT, SIGTERM], shutdown.clone())?;
+
+let (reload, mut reloads) = futures_channel::mpsc::unbounded();
+let reload_registration = scheduler.signal_notify(&[SIGHUP], reload)?;
+// Receive reloads using StreamExt::next(); shutdown is independent of reloads.
+scheduler.block_on(shutdown.cancelled());
+// Drain application work while the scheduler and registrations remain alive.
+drop(reload_registration);
+drop(shutdown_registration);
+# Ok(())
+# }
+# #[cfg(not(all(unix, feature = "signals", feature = "native")))]
+# fn main() {}
+```
+
+`Notify<Value>::notify(&self, value)` is a synchronous target interface called in ordinary thread context, outside raw signal handlers and scheduler locks. `Cancellation` ignores the value and requests cancellation. Standard unbounded `std::sync::mpsc::Sender` and `futures_channel::mpsc::UnboundedSender` enqueue it; a closed receiver discards it. `Arc<T>` forwards to its target. Bounded channels need an application wrapper with an explicit overflow policy. A target should enqueue or wake work and return promptly. Waiting remains target-specific: `cancelled()` or the channel's receive operation.
+
+Each registration spawns one scheduler task that waits asynchronously on signal-hook's self-pipe using the chosen backend: async-io for native, or the supplied Tokio runtime for the adapter. It creates no dedicated thread. Dropping the guard cancels the task's wait and stops new notification admission; the task exits and releases the subscription. An already-admitted callback may finish, retaining its target until completion. Other subscriptions remain active. A callback panic ends its own task through normal scheduler panic handling. Scheduler/runtime shutdown also ends delivery, so keep those services alive during draining. No repeated-signal escalation is installed.
+
+OS signals and the backend can coalesce repeated occurrences before delivery; the channel retains delivered values but cannot count every occurrence or promise ordering across different signals. Unsubscribing releases the registration asynchronously and does not restore original process signal dispositions, including after partial setup failure. Coordinate process-wide signal ownership with other libraries and existing handlers. Linux signalfd and kqueue-specific delivery remain possible future backends.
 
 ## Implementation costs
 

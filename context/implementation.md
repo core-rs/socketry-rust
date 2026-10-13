@@ -33,7 +33,18 @@ This guide describes the current implementation and its boundaries. Read [the de
 - Register event listeners before checking cancellation to avoid lost notifications. Dropping a wait unregisters its listener. Release all signal locks before invoking wakers so wakeups can reenter cancellation and child registration.
 - defer\_cancel pins the work and its signal wait. Observed cancellation consumes the synchronous callback once, before polling the work again, and the wrapper preserves the work's normal output. Callback panics propagate; dropping the wrapper destroys its future. It does not mask operation signals or intercept task destruction.
 - For graceful shutdown, request cancellation and await task handles before releasing the scheduler or shutting down runtime services. Signals express intent rather than completion. There is no forced abort or escalation in this cooperative contract; a supervisor can enforce SIGTERM followed by SIGKILL.
-- Existing Task cancellation and scheduler shutdown retain their destruction semantics. Signal handlers, cooperative runtime shutdown and cancellation inputs on I/O methods are not yet integrated.
+- Existing Task cancellation and scheduler shutdown retain their destruction semantics. Cooperative runtime shutdown and cancellation inputs on I/O methods are not yet integrated.
+
+## Signal notifications
+
+- `Notify<Value>` is a synchronous destination, independent of waiting. Cancellation ignores the value; standard unbounded mpsc and futures-channel senders queue it and discard values after receiver closure. Arc forwards to a destination. Bounded channels require an explicit application overflow policy.
+- `Signals` is a separate scheduler capability with associated signal and registration types. The optional `signals` feature implements it on Unix for native and Tokio schedulers and their handles, using their respective I/O services. Other platforms lack the implementation at compile time.
+- Signal registration is explicit and fallible. Check the complete signal set for forbidden and out-of-range values before installing handlers; report further platform-specific registration errors from the backend. No signal handlers are installed merely by creating a scheduler. Closed scheduler handles reject new registrations.
+- `SignalRegistration` spawns a task through the chosen scheduler. It uses signal-hook's self-pipe registered with async-io or the supplied Tokio runtime, without a dedicated thread or hidden cross-runtime reactor. Call Notify outside raw signal handlers and all scheduler locks. The task owns its target; callback panics follow normal scheduler handling. Targets should return promptly.
+- Dropping the non-clonable, must-use guard requests cancellation and wakes the task's asynchronous wait without joining it. A notification admitted before removal can finish. Other subscriptions remain active. Scheduler/runtime shutdown also ends delivery and releases the subscription. Keep services alive through graceful draining; no implicit shutdown or escalation is installed.
+- The task checks cancellation before dispatch and yields after each batch to avoid monopolizing a worker under continuous signal traffic. The reader must clear backend readiness through actual asynchronous reads; observing readiness alone can spin. EOF or a terminal read error ends the subscription task.
+- Signals may coalesce in the OS and backend before being queued. Cleanup does not restore original process dispositions, even after a partially successful setup. Coordinate with existing process-wide handlers. signalfd/kqueue optimizations remain future work.
+- Actual signal delivery tests run in a deadline-bounded subprocess to avoid changing the parent test process's signal dispositions.
 
 ## I/O and runtime boundaries
 

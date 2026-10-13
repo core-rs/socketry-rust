@@ -4,6 +4,8 @@
 //! Socketry's work-stealing executor and scheduler context.
 #[cfg(feature = "native")]
 mod operations;
+#[cfg(all(unix, feature = "signals", feature = "native"))]
+mod signals;
 
 use crate::task::{Completion, Runnable, TaskFuture, TaskState, UNASSIGNED_WORKER};
 use crate::worker::{self, WorkerState};

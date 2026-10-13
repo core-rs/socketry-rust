@@ -1,0 +1,47 @@
+[package]
+name = "socketry-timers"
+version.workspace = true
+edition.workspace = true
+description = "Batched monotonic timers with constant-time cancellation"
+license.workspace = true
+repository.workspace = true
+readme = "readme.md"
+include = ["Cargo.toml", "license.md", "readme.md", "context/**", "src/**", "tests/**", "benches/**"]
+
+[features]
+driver = ["dep:crossbeam-queue"]
+sharded = []
+
+[dependencies]
+crossbeam-queue = { version = "0.3.13", optional = true }
+
+[dev-dependencies]
+loom = "0.7.2"
+tokio = { version = "1.53.1", features = ["rt", "time", "test-util"] }
+
+[[bench]]
+name = "timers"
+harness = false
+
+[[bench]]
+name = "allocations"
+harness = false
+
+[[bench]]
+name = "expiry"
+harness = false
+
+[[bench]]
+name = "driver"
+harness = false
+required-features = ["driver"]
+
+[[bench]]
+name = "sharded"
+harness = false
+required-features = ["driver", "sharded"]
+
+[[bench]]
+name = "cancellation"
+harness = false
+required-features = ["driver"]

@@ -1,6 +1,6 @@
 # Future foundation
 
-This document records the direction for Socketry's Rust foundation. The executor now polls futures directly using async-task and Crossbeam queues, with worker threads, work stealing and explicit task owners. The coroutine prototype is preserved in commit `b520f3d` on branch `coroutine`. Portable TCP, file and clock capabilities, native selectors and a Tokio adapter are now implemented. The io-event timer port and further optimizations remain planned.
+This document records the direction for Socketry's Rust foundation. The executor now polls futures directly using async-task and Crossbeam queues, with worker threads, work stealing and explicit task owners. The coroutine prototype is preserved in commit `b520f3d` on branch `coroutine`. Portable TCP, file and clock capabilities, native selectors and a Tokio adapter are now implemented. The independent io-event timer queue is implemented in `socketry-timers`; scheduler integration and further optimizations remain planned.
 
 ## Goals
 
@@ -23,14 +23,16 @@ Prefer generic traits and concrete future types initially. Runtime selection can
 
 ### Candidate package boundaries
 
-The workspace currently contains `socketry` and `socketry-executor`. The other names below describe possible extractions from the executor, not packages to publish before they have code. Split modules into packages when consumers or optional dependencies justify it.
+The workspace currently contains `socketry`, `socketry-executor` and `socketry-timers`. The facade re-exports the component packages as `socketry::executor` and `socketry::timers`. The other names below describe possible extractions from the executor, not packages to publish before they have code. Split modules into packages when consumers or optional dependencies justify it.
+
+All published workspace packages inherit one version from `[workspace.package]` and are released together. Keep internal dependency versions aligned with that workspace version. Component crates provide dependency and implementation isolation within this coordinated release; the private `bake` task package is not published.
 
 | Package | Responsibility |
 | --- | --- |
 | `socketry` | Public facade, common exports, conventions, and agent context. |
 | `socketry-executor` | Future execution, workers, task ownership, barriers, cancellation, and integration with I/O selectors and timers. |
 | `socketry-io` | Portable I/O contracts, resource and buffer ownership, and stream interfaces. |
-| `socketry-timers` | Timer ordering, cancellation, and batching, independent of an executor or OS selector. |
+| `socketry-timers` | Timer ordering, cancellation, batching, lazy sleeps and worker queue assistance, independent of an executor or OS selector. |
 | `socketry-tokio` | Tokio implementations of the portable contracts and focused compatibility adapters. |
 
 Keep protocol parsing and serialization independent of the runtime wherever possible. Higher-level protocol packages need not live in this repository.
@@ -141,6 +143,10 @@ This is a binary min-heap with deferred insertion and lazy cancellation. Preserv
 
 Keep the timer queue independent of a scheduler, OS sleep, or Tokio. Let the selector provide monotonic time and consume expired entries. An executor-facing sleep future registers a waker with the selector, which uses the queue to choose its next wake deadline. Wake callbacks outside queue locks.
 
+Keep the reusable queue, lazy `Sleep` future and worker assistance primitives together in `socketry-timers`. The default queue has no runtime dependencies. Its optional `sharded` feature provides independent worker queues, published deadlines and nonblocking assistance using only the standard library. The optional `driver` feature retains the experimental producer-inbox alternative and adds Crossbeam Queue. Tokio and Loom are development dependencies for comparisons and verification.
+
+The executor owns the `Clock` adapter, worker-to-queue assignment, assistance policy, idle-worker selection and selector wake integration. The timer crate accepts deadlines, wakers and explicit expiry snapshots; it does not choose workers, spawn a thread or depend on `socketry-executor`. A migrated task retains its original timer queue identity. This dependency boundary allows the queue and future to be tested and benchmarked independently.
+
 Use Instant/Duration or an explicit monotonic tick type rather than floating point deadlines. Accept the current time explicitly in queue operations so behavior can be checked without wall-clock sleeps. Record where Rust behavior differs: expired deadlines can use a zero wait duration, and public live counts should be distinguished from retained cancelled entries.
 
 Reusable registration handles must not allow an old cancellation to affect a new timer occupying the same storage. Document reset behavior and whether it reuses an allocation. Preserve MIT attribution for Samuel Williams and Wander Hillen, the source paths, and the revision used for the translated code.
@@ -155,7 +161,7 @@ The algorithm's existing Ruby performance motivates the port. Rust performance c
 4. Establish minimal clock and I/O contracts with concrete consumers (implemented with Network, FileIo, Clock and a portable TCP example).
 5. Implement native readiness and the Tokio adapter, running the same consumers with both (implemented). Native sleep uses async-io until the timer port.
 6. Implement io\_uring's owned-buffer lifecycle, socket/file operations, cancellation and runtime probing (implemented). Improve operation reuse, buffer registration and submission backpressure in subsequent work.
-7. Port the timer queue with upstream attribution and deterministic verification.
+7. Port the timer queue with upstream attribution and deterministic verification (implemented in `socketry-timers`). Integrate a driven sleep future with the scheduler in subsequent work; see the [timer package](../crates/timers/readme.md) and [benchmarks](../crates/timers/context/benchmarks.md).
 8. Measure the executor and complete system. Multiple workers and work stealing are implemented, but performance claims require benchmarks.
 
 When implementation verification is requested, cover timer threshold boundaries, duplicate and late wakeups, cancellation races, parent cleanup, I/O dropped in flight, and backend compatibility. Linux execution is required to establish io\_uring behavior; a build on another platform does not do so.

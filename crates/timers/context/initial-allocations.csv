@@ -1,0 +1,4 @@
+case,calls,bytes
+socketry register + cancel + reclaim,20016,1862144
+tokio runtime setup,13,8392
+tokio register + cancel + reclaim,2,960064

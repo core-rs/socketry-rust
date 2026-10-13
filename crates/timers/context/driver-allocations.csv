@@ -1,0 +1,12 @@
+10000 timers; allocation/reallocation calls and cumulative requested bytes (not peak memory)
+case,calls,bytes
+socketry register + cancel + reclaim,42,4069776
+socketry reserved queue setup,5,1120208
+socketry reserved cancel + reclaim,0,0
+socketry reserved reuse + expire,0,0
+socketry reserved bulk expiry,0,0
+driver bounded pool setup,10008,2161120
+driver reserved cancel + reclaim,0,0
+driver reserved reuse + bulk expire,0,0
+tokio runtime setup,13,8392
+tokio register + cancel + reclaim,2,960064

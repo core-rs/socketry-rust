@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add the independent `socketry-timers` crate and expose it as `socketry::timers`. Include reusable batched queues, optional worker assistance and lazy sleep futures, plus the experimental inbox driver and Tokio lifecycle benchmarks.
+
 - Let Cargo select the dependency version in the installation example.
 
 ## v0.2.0

@@ -1,0 +1,8 @@
+case,socketry_ns,tokio_ns,tokio/socketry,socketry_p95_ns,tokio_p95_ns
+register ascending,50.8,26.8,0.53,77.1,42.5
+register shuffled,49.9,25.9,0.52,51.0,26.5
+cancel before registration/flush,45.7,6.3,0.14,47.0,6.5
+register + cancel + reclaim,52.6,26.7,0.51,53.5,27.8
+replace 75% cancelled batch,51.6,26.1,0.51,52.9,26.4
+register + expire + deliver,106.2,41.4,0.39,107.6,42.2
+20 cancellation batches with live timers,54.2,26.0,0.48,55.0,26.3

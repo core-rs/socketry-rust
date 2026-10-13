@@ -10,4 +10,6 @@ pub use socketry_executor::{
     SpawnError, Task, TaskError, TaskHandle, yield_now,
 };
 
+pub use socketry_timers as timers;
+
 pub use socketry_executor::scheduler;

@@ -171,7 +171,10 @@ impl<Value> State<Value> {
         if self.closed {
             return Err(value);
         }
-        if self.occupied() == self.capacity() {
+        // clear() temporarily owns both queue buffers while dropping values
+        // outside this lock. Reject registration until it restores them, even
+        // when existing handles keep occupied slots above the zero capacity.
+        if self.occupied() >= self.capacity() {
             return Err(value);
         }
         Ok(self.insert(deadline, value))
@@ -615,6 +618,7 @@ impl<Value> Timers<Value> {
     /// Remove all timers and release values outside the shared queue lock.
     ///
     /// Storage capacity is retained; outstanding handles remain queryable.
+    /// Registration through shared producers is rejected until clearing ends.
     pub fn clear(&mut self) {
         let (contents, scheduled) = {
             let mut state = lock(&self.shared);

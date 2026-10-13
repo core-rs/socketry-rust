@@ -185,6 +185,45 @@ fn clear_and_drop_release_values_with_outstanding_handles() {
     assert!(!pending.cancel());
 }
 
+#[cfg(feature = "driver")]
+#[test]
+fn clear_rejects_reentrant_registration_until_buffers_are_restored() {
+    struct RegisterOnDrop(Option<Box<dyn FnOnce() + Send>>);
+    impl Drop for RegisterOnDrop {
+        fn drop(&mut self) {
+            if let Some(register) = self.0.take() {
+                register();
+            }
+        }
+    }
+
+    for flush in [false, true] {
+        let now = Instant::now();
+        let mut timers = Timers::with_capacity(4);
+        let capacity = timers.capacity();
+        let mut producer = timers.shared_producer();
+        let attempted = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&attempted);
+        let value = RegisterOnDrop(Some(Box::new(move || {
+            assert!(producer.try_schedule(now, RegisterOnDrop(None)).is_err());
+            observed.fetch_add(1, AtomicOrdering::Relaxed);
+        })));
+        let handle = timers.try_schedule(now, value).ok().unwrap();
+        if flush {
+            timers.flush();
+        }
+        timers.clear();
+        assert_eq!(attempted.load(AtomicOrdering::Relaxed), 1);
+        assert!(timers.is_empty());
+        assert_eq!(timers.capacity(), capacity);
+        assert!(!handle.cancel());
+        drop(handle);
+        drop(timers.try_schedule(now, RegisterOnDrop(None)).ok().unwrap());
+        assert!(timers.pop_expired(now).is_some());
+        assert!(timers.is_empty());
+    }
+}
+
 #[test]
 fn cancellation_and_expiry_claim_each_value_once_across_threads() {
     fn assert_send_sync<T: Send + Sync>() {}

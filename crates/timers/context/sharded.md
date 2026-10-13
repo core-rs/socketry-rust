@@ -136,7 +136,7 @@ For 10,000 reserved no-op wakers, the allocation benchmark measured 10 setup cal
 
 The suite covers pending visibility, bounded output, pressure reclamation, cloned/migrated handles, Send-only values, cancellation racing assistance, busy queues, poisoned mutex recovery, earlier/empty deadline wakes and shutdown. Lazy-sleep tests cover no locking before first poll, cancellation without waking, changing wakers and callback reentry, full/closed admission and shutdown racing a poll. Direct-slot regressions verify release before reentrant waker destruction, capacity retained until completion is observed, queue reference release on completion and slot reuse while completed futures remain alive. A Loom model checks publication before parking, rather than the full queue or heap algorithm.
 
-The Bake measured-region coverage gate passes for default (579/579), driver-only (1058/1058), sharded-only (1003/1003) and combined features (1476/1476) on local macOS. The combined configuration runs 60 unit tests and four allocation regressions. Clippy passes with warnings denied. Reproduce with:
+The Bake measured-region coverage gate passes for default (579/579), driver-only (1058/1058), sharded-only (1003/1003) and combined features (1476/1476) on local macOS. The combined configuration runs 61 unit tests and four allocation regressions. Clippy passes with warnings denied. Reproduce with:
 
 ```sh
 cargo bench -p socketry-timers --all-features --bench sharded --locked

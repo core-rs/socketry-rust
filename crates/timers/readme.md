@@ -155,6 +155,20 @@ Each sleep owns its slot key directly and keeps one queue reference through regi
 
 ## Benchmarks
 
+The recorded cancellation sweep compares Socketry's lazy worker `Sleep` with Tokio 1.53.2 over the complete future lifecycle:
+
+| Cancelled after registration | Socketry ns/input | Tokio ns/input | Less time than Tokio |
+| ---: | ---: | ---: | ---: |
+| 0% | 28.0 | 40.8 | 31.4% |
+| 10% | 27.3 | 40.1 | 31.9% |
+| 50% | 25.2 | 34.8 | 27.6% |
+| 90% | 24.3 | 28.2 | 13.8% |
+| 100% | 21.4 | 26.9 | 20.4% |
+
+Each row covers 64,000 input timers, including cancellations. Timing includes construction, registration, cancellation, survivor expiry, no-op wakeups, completion polling and future destruction; queue/runtime setup and fixed storage reservation are excluded. Values are the median of three run medians, each from eleven rotating samples. Less time is `1 - Socketry / Tokio`.
+
+This measures single-thread timer bookkeeping with survivors expiring together, using the optional `sharded` implementation and Tokio's paused current-thread runtime. It does not measure executor throughput, contention or real-time wakeup latency. See the [methodology and reproduction command](context/sharded.md#cancellation-sweep) and [raw run medians](context/sharded-cancellation-sweep.csv).
+
 ```sh
 cargo bench -p socketry-timers --bench timers
 cargo bench -p socketry-timers --bench allocations
@@ -165,7 +179,7 @@ cargo bench -p socketry-timers --all-features --bench cancellation -- --cancella
 
 The lifecycle benchmark compares growing and reserved queue variants with registered Tokio `Sleep` values using a current-thread runtime and paused time. Each Tokio sleep is polled to register it, and the complete slice is pinned in one allocation, avoiding a box per sleep. All variants store the same no-op waker. Every timed batch includes queue construction, reservation when applicable, registration, cancellation or expiry when applicable, and destruction; offsets and the Tokio runtime are prepared outside timing. Samples rotate implementation order. Expiry includes driving Tokio's timer service and polling completed sleeps; Socketry's caller explicitly supplies elapsed time and wakes returned values. The bulk expiry case includes allocating its output vector inside timing. The separate `expiry` benchmark excludes setup and destruction to compare sparse and dense expiry batches with individual pops. The allocation benchmark checks that reserved lifecycles, including bulk expiry, make zero allocation calls.
 
-These measurements describe single-thread timer bookkeeping. They do not measure real-time wakeup latency, scheduler throughput, contention, or an implemented Socketry sleep future. See [benchmark results and methodology](context/benchmarks.md).
+The `timers` and `expiry` fixtures measure payload queue bookkeeping, without a Socketry sleep future. They do not measure real-time wakeup latency, scheduler throughput or contention. See [benchmark results and methodology](context/benchmarks.md).
 
 The `cancellation --no-cancel` fixture compares the experimental worker sleep future with Tokio when every timer fires, including registration, bulk expiry, no-op wakeups, completion polling and future destruction. Queue/runtime setup and fixed storage reservation are excluded. See [worker sleep lifecycle results](context/sharded.md#no-cancellation-lifecycle).
 

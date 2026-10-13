@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Document the complete timer lifecycle comparison with Tokio across cancellation rates in the timer crate readme.
+
 - Add the independent `socketry-timers` crate and expose it as `socketry::timers`. Include reusable batched queues, optional worker assistance and lazy sleep futures, plus the experimental inbox driver and Tokio lifecycle benchmarks.
 
 - Let Cargo select the dependency version in the installation example.

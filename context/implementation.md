@@ -42,7 +42,7 @@ This guide describes the current implementation and its boundaries. Read [the de
 
 ## Next boundaries
 
-- The io-event timer port, operation pools, registered buffers, general descriptor/UDP interfaces and overlapped Windows file operations remain planned. Native sleep currently uses async-io; the adapter uses Tokio timers.
+- `socketry-timers`, also available through `socketry::timers`, implements the independent io-event timer queue with batched insertion, constant-time cancellation and lazy compaction. Its optional `sharded` feature adds worker queues, cross-worker assistance and lazy sleep futures; the experimental inbox driver remains optional. The crate has no executor dependency. Scheduler integration, operation pools, registered buffers, general descriptor/UDP interfaces and overlapped Windows file operations remain planned. Native sleep currently uses async-io; the adapter uses Tokio timers.
 - Keep runtime requirements explicit; ordinary Future support does not provide another runtime's I/O or timers.
 - There is no non-Send task executor, public blocking-task API or scoped borrowing.
 - Do not introduce unsafe Send, stack migration or nested blocking waits.

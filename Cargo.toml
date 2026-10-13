@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/executor", "bake"]
+members = ["crates/executor", "crates/timers", "bake"]
 resolver = "3"
 
 [workspace.metadata.bake]
@@ -26,6 +26,7 @@ include = ["Cargo.toml", "readme.md", "license.md", "releases.md", "context/**",
 
 [dependencies]
 socketry-executor = { version = "0.2.0", path = "crates/executor", default-features = false }
+socketry-timers = { version = "0.2.0", path = "crates/timers" }
 
 [features]
 default = ["native"]

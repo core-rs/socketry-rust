@@ -65,7 +65,7 @@ The Tokio adapter needs a live runtime with I/O and time enabled. It preserves e
 
 ## Current scope
 
-TCP connect/accept/read/write/readiness, positioned file reads/writes, and sleep are implemented. Regular files use blocking pools except for Linux io\_uring. Windows socket readiness uses IOCP/AFD; native overlapped file operations are not implemented. Socketry currently uses async-io's shared readiness reactor and timers; the io-event timer port remains planned in the [design guide](context/design.md).
+TCP connect/accept/read/write/readiness, positioned file reads/writes, and sleep are implemented. Regular files use blocking pools except for Linux io\_uring. Windows socket readiness uses IOCP/AFD; native overlapped file operations are not implemented. Socketry currently uses async-io's shared readiness reactor and timers. The independent [socketry-timers package](crates/timers/readme.md), re-exported as `socketry::timers`, provides io-event's batched timer queue plus optional worker assistance and lazy sleep futures; integration with the scheduler clock remains future work.
 
 The io\_uring selector owns a dedicated thread, retains buffers until terminal completions, and drains cancellation during shutdown. Connection setup and readiness waits still use async-io. Kernel support is probed when the selector is first needed; failures are returned without silently falling back. Operation pooling, registered buffers, UDP, arbitrary descriptor APIs, and a local `!Send` task executor remain future work.
 

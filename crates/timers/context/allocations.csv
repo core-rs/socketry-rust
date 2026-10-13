@@ -1,0 +1,8 @@
+case,calls,bytes
+socketry register + cancel + reclaim,42,4069768
+socketry reserved queue setup,5,1120200
+socketry reserved cancel + reclaim,0,0
+socketry reserved reuse + expire,0,0
+socketry reserved bulk expiry,0,0
+tokio runtime setup,13,8392
+tokio register + cancel + reclaim,2,960064

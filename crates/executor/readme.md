@@ -116,7 +116,7 @@ Read/write operations take ownership of a `Vec<u8>` and return the buffer with t
 
 `File::file_read_at` and `file_write_at` accept an `Arc<std::fs::File>` and an explicit offset. The readiness and Tokio implementations use blocking pools. Use ordinary files opened without append mode, and offsets fitting i64. Unix positioned operations leave the shared cursor unchanged; the Windows blocking fallback updates it according to std's seek\_read/seek\_write semantics.
 
-`Clock::sleep` uses async-io timers or Tokio timers. The io-event timer algorithm has not yet been ported. There is no general public blocking-task API yet.
+`Clock::sleep` uses async-io timers or Tokio timers. The independent `socketry-timers` crate implements the io-event timer algorithm; integration with the scheduler clock remains pending. There is no general public blocking-task API yet.
 
 ### Cancellation and shutdown
 
@@ -132,7 +132,7 @@ An unexpected io\_uring selector failure after submission cannot return memory w
 
 Readiness registrations and buffers are reused. io\_uring currently uses a dedicated selector thread, a command channel and one completion channel per operation; it does not pool operation records or register buffers. The Tokio file fallback retains an Arc/Mutex buffer owner to return the buffer even when a queued blocking job is cancelled during runtime shutdown. Neither fallback copies the buffer bytes just to transfer ownership.
 
-Native overlapped Windows file operations, arbitrary descriptor/UDP APIs, operation and buffer pools, and the io-event timer port remain future work. There is no thread-local non-Send task facility. No I/O throughput claim has been established by benchmarks.
+Native overlapped Windows file operations, arbitrary descriptor/UDP APIs, operation and buffer pools, and scheduler integration with `socketry-timers` remain future work. There is no thread-local non-Send task facility. No I/O throughput claim has been established by benchmarks.
 
 The portable example uses the same generic TCP exchange with either runtime:
 

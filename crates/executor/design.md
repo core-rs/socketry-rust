@@ -694,7 +694,7 @@ Registration does not itself guarantee zero-copy transport. Zero-copy sends can 
 | Buffers | Owned `Vec<u8>` implemented; generic owned-buffer traits, fixed registered leases, and provided/software pools remain proposed. |
 | Buffer forwarding | `with_previous_buffer` is hypothetical, with no selected implementation target. |
 | Optimization | Dedicated io_uring selector uses an unbounded command channel and a completion channel per operation; pooling and submission backpressure pending. |
-| Timers | Existing `Clock::sleep(duration)` returns `()` without cancellation. Monotonic `now`, cancellable `sleep_until` and relative sleep, generic deadline composition, and the io-event timer algorithm port remain proposed. |
+| Timers | The independent `socketry-timers` crate implements the io-event timer algorithm; scheduler integration remains pending. Existing `Clock::sleep(duration)` returns `()` without cancellation. Monotonic `now`, cancellable `sleep_until` and relative sleep, and generic deadline composition remain proposed. |
 
 Next design work is to choose the dependable core and extension boundaries, cancellation-aware error and buffer-return contracts, linked-chain continuation rules, resource lifecycle semantics, and owned-buffer trait safety requirements. Then integrate cooperative cancellation into operations and runtime shutdown before expanding optional optimizations.
 

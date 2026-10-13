@@ -170,7 +170,7 @@ The algorithm's existing Ruby performance motivates the port. Rust performance c
 2. Replace stackful execution with async-task and Crossbeam worker queues (implemented). Keep the coroutine prototype in its saved branch.
 3. Implement primitive task dispatch, scheduler ownership, cancellation and shutdown (implemented). Runtime-independent cooperative signals and deferred cancellation are implemented; cooperative scheduler shutdown and cancellation-aware I/O remain future work. Higher-level task groups are outside the executor for now.
 4. Establish minimal clock and I/O contracts with concrete consumers (implemented with Socket, File, Clock and a portable TCP example).
-5. Implement native readiness and the Tokio adapter, running the same consumers with both (implemented). Native sleep uses async-io until the timer port.
+5. Implement native readiness and the Tokio adapter, running the same consumers with both (implemented). Native sleep uses async-io until scheduler integration with `socketry-timers`.
 6. Implement io\_uring's owned-buffer lifecycle, socket/file operations, cancellation and runtime probing (implemented). Improve operation reuse, buffer registration and submission backpressure in subsequent work.
 7. Port the timer queue with upstream attribution and deterministic verification (implemented in `socketry-timers`). Integrate a driven sleep future with the scheduler in subsequent work; see the [timer package](../crates/timers/readme.md) and [benchmarks](../crates/timers/context/benchmarks.md).
 8. Measure the executor and complete system. Multiple workers and work stealing are implemented, but performance claims require benchmarks.

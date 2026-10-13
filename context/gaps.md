@@ -2,7 +2,7 @@
 
 Socketry has a working future executor, owning task handles, portable I/O capabilities, and a Tokio adapter. These four gaps describe the remaining architectural work toward a scheduler inspired by [Zig's `std.Io` model](https://ziglang.org/download/0.16.0/release-notes.html#I-O-as-an-Interface), while retaining ordinary Rust futures and `.await`.
 
-## 1. Graceful cancellation needs runtime integration
+## 1. Graceful shutdown requires explicit coordination
 
 Task cancellation currently drops the future before its next poll. An active poll must return first. Synchronous destructors run, but the remainder of the async body, including asynchronous cleanup, does not execute.
 
@@ -26,6 +26,6 @@ General socket creation/options, DNS, deadlines, randomness, and processes remai
 
 The default selector delegates readiness and timers to async-io's shared reactor. Linux io\_uring uses a dedicated selector thread and retains buffers until original operations complete; cancellation completions alone do not release them.
 
-The io\_uring implementation currently uses an unbounded command channel and a completion channel per operation. Operation records are not pooled, and buffers are not registered with the kernel. Add submission backpressure and measure allocation, contention, throughput, and retained memory before choosing optimizations or making performance claims.
+The io\_uring implementation currently uses an unbounded command channel, a boxed typed request, and a completion channel per operation. Operation records are not pooled, and buffers are not registered with the kernel. Add submission backpressure and measure allocation, contention, throughput, and retained memory before choosing optimizations or making performance claims.
 
 See the [design guide](design.md) and [implementation guide](implementation.md) for the current contracts and implementation sequence.

@@ -642,7 +642,7 @@ Stateful reads and writes use and advance the file's shared cursor. Positioned o
 
 Allocation is distinct from truncation. An allocation interface needs to account for an offset, length, and supported modes. Platform-specific modes may require an extension rather than a universal flags type. See [io\_uring\_prep\_fallocate](https://man7.org/linux/man-pages/man3/io_uring_prep_fallocate.3.html).
 
-Current `File` only provides positioned reads and writes of already-open, non-append regular files, using offsets that fit in `i64`. Its Windows fallback uses `seek_read`/`seek_write`, which update the shared cursor according to [Windows FileExt](https://doc.rust-lang.org/std/os/windows/fs/trait.FileExt.html). Resolving this difference is required before promising uniform cursor-preserving semantics.
+Current `File` opens regular files and provides positioned reads and writes, using offsets that fit in `i64`. `FileOptions` omits append mode so writes respect their supplied offsets. Its Windows fallback uses `seek_read`/`seek_write`, which update the shared cursor according to [Windows FileExt](https://doc.rust-lang.org/std/os/windows/fs/trait.FileExt.html). Resolving this difference is required before promising uniform cursor-preserving semantics.
 
 ### Syscall proximity and messages
 

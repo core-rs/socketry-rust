@@ -174,6 +174,16 @@ cargo run -p socketry-executor --example portable_io --no-default-features --fea
 cargo run -p socketry-executor --example portable_io --features io-uring # Linux
 ```
 
+The [interface experiment](examples/interface_probe.rs) runs generic file-copy and echo-server functions against native, Tokio, and in-memory backends:
+
+```sh
+cargo run -p socketry-executor --example interface_probe --features tokio
+cargo test -p socketry-executor --example interface_probe --features tokio
+cargo run -p socketry-executor --example interface_probe --no-default-features
+```
+
+It uses example-local traits to test associated file resources and scheduler-owned resource creation. These are proposed API changes, not additions to the exported traits. See the [design findings](design.md#executable-interface-experiment) for results and remaining contracts.
+
 ## Preserved prototype
 
 The native coroutine prototype, verbatim CRuby vendor sources and its tests are preserved in commit `b520f3d` on branch `coroutine`.

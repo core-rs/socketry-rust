@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Document the complete timer lifecycle comparison with Tokio across cancellation rates in the timer crate readme.
+- Add an executable scheduler-interface experiment with generic file-copy and echo-server functions running on native, Tokio, and in-memory backends. Record resource creation, buffer-range, blocking execution, and draining requirements in the executor design; public I/O traits remain unchanged.
 
 - Add `Notify<Value>` and the `Signals` scheduler capability with associated signal and registration types. The optional Unix `signals` feature supports cancellation and queued notifications on Socketry and Tokio; dropping the returned guard removes its subscription without waiting for callbacks already in progress.
 

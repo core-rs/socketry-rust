@@ -69,6 +69,10 @@ This guide describes the current implementation and its boundaries. Read [the de
 - Do not introduce unsafe Send, stack migration or nested blocking waits.
 - Native coroutine sources, sanitizer hooks and historical tests belong to the preserved coroutine branch, not the future executor's build.
 
+## Interface experiment
+
+`crates/executor/examples/interface_probe.rs` runs generic file-copy and echo-server functions against native, Tokio, and an in-memory implementation. Its local `File` and `Socket` traits test associated file resources, file opening, listener creation, and address inspection before changing the public API. Real adapters reuse existing I/O operations and choose the corresponding blocking pool for file opening. The simulator exercises short transfers and ordinary resource destruction without native I/O dependencies. It does not implement cancellation, timers, completion tracking, or a simulated task scheduler. Keep these provisional traits separate from claims about the exported capabilities; findings and next changes are recorded in `crates/executor/design.md`.
+
 ## Verification
 
 Public behavior is covered in crates/executor/tests. Deterministic channels force stealing, migration, concurrent wakeups and cancellation during polling. The parking test uses Loom to model the queue-publication/idle-registration handshake. Keep its atomics and fence order aligned with the implementation; this models the handshake, not Crossbeam or async-task internals. When verification is requested, run workspace tests and doctests with `tokio` enabled; on Linux also run all features to exercise io\_uring. Check executor-only and Tokio-only feature combinations. The same TCP/file consumers exercise both implementations; Linux tests cover cancellation batches and shutdown races. CI covers Linux, macOS, Windows and FreeBSD, with separate Linux io\_uring and sanitizer jobs; distinguish configured CI from executed results.

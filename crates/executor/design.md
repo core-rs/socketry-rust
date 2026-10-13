@@ -186,7 +186,7 @@ An optional context pairing a scheduler reference with a cancellation signal cou
 
 `Clock` supplies synchronous monotonic time access and cancellable timer futures, as specified below. Current `Clock::sleep` only accepts a duration and returns `()`; `now`, `sleep_until`, and cancellation-aware waits remain proposed.
 
-Blocking and unblocking a suspended computation should use registration and wakeups with protection against lost notifications. This synchronization interface is separate from running a blocking syscall on a thread pool; its precise API remains open.
+Ordinary async synchronization uses `Future`, `Poll::Pending`, and `Waker`. Channels, locks, and other primitives own their state and protect registration against lost wakeups; they do not need scheduler-specific `block` or `unblock` methods. This is separate from executing synchronous work on a blocking pool, which may warrant an optional scheduler capability.
 
 ## Clock and timer composition
 
@@ -357,7 +357,7 @@ Additional capability shapes follow the same convention:
 | Message receive | `socket_recvmsg(socket, owned_message, flags, cancellation)` | Receive result including address/control/status, together with the owned message |
 | Address resolution | `address_resolve(name, options, cancellation)` | `OperationResult<ResolvedAddresses>` |
 
-These rows identify extension capabilities; they do not require every scheduler to implement every operation. Synchronization wait/wake remains a separate interface to specify, including lost-wakeup protection. `Spawn::spawn(future)` is primitive dispatch with no group or owner argument. It returns an awaitable task handle; dispatch failures are reported before execution. Grouping and group lifecycle belong above this interface.
+These rows identify extension capabilities; they do not require every scheduler to implement every operation. Synchronization builds on ordinary futures and wakers, with lost-wakeup protection inside each primitive. `Spawn::spawn(future)` is primitive dispatch with no group or owner argument. It returns an awaitable task handle; dispatch failures are reported before execution. Grouping and group lifecycle belong above this interface.
 
 ### Completion and explicit submission
 
@@ -719,6 +719,44 @@ A selector-managed continuation or a whole-chain blocking job might eventually i
 ### Zero-copy lifetime
 
 Registration does not itself guarantee zero-copy transport. Zero-copy sends can report a transfer result before a subsequent notification allows buffer reuse, so one result is not necessarily the end of kernel access. See [io\_uring\_prep\_send\_zc](https://man7.org/linux/man-pages/man3/io_uring_prep_send_zc.3.html). The current selector's single-terminal-completion request model must be extended before exposing those operations safely.
+
+## Interface review and validation
+
+The overall architecture covers the intended scheduler boundary, but four contracts need further validation before freezing the interface:
+
+1. **Resource creation and ownership:** specify associated file resources, socket creation/bind/listen, address inspection, and ordinary resource `Drop` alongside explicit close. Generic application code must not construct OS resources or require `Arc`; each backend chooses how to retain resources for pending operations.
+2. **Operation results and buffers:** settle owned-buffer traits, valid ranges, partial transfers, cancellation races, and the point at which buffers are safe to return. Successful progress wins cancellation races; cancellation does not undo side effects. Dropping a waiting future must not release memory still accessed by an operation.
+3. **Blocking execution:** consider an optional capability for submitting synchronous closures through the selected scheduler. Specify asynchronous admission, cancellation before execution, and completion once execution starts. Libraries should not independently choose a blocking pool. This does not require scheduler-specific synchronization wait/wake methods.
+4. **Runtime draining:** account for all accepted work, including `_submit` jobs without application waiters, before stopping workers and I/O services. Application cancellation policy and task groups stay above the primitives. Current runtime shutdown destroys futures and is not this graceful-draining contract.
+
+Process creation/waiting and pipes are useful optional extensions. They do not need to enlarge the initial core. Existing `File`, `Socket`, and `Clock` implementations still lag the proposed resource creation, cancellation, and monotonic clock contracts.
+
+The experiment below exercises a small generic server and file-copy operation with native, Tokio, and in-memory implementations. Its provisional traits stay local to the example while public signatures are refined. It tests partial transfers, errors, buffer ownership, and resource creation without substituting fake OS descriptors or `Unsupported` implementations. The wider proposed syscall set and optional optimizations remain separate work.
+
+### Executable interface experiment
+
+[interface\_probe.rs](examples/interface_probe.rs) now runs the same `copy`, `serve`, and `exchange` application functions with native, Tokio, and in-memory implementations. Run all three with:
+
+```sh
+cargo run -p socketry-executor --example interface_probe --features tokio
+cargo test -p socketry-executor --example interface_probe --features tokio
+```
+
+Using `--no-default-features` runs the simulation without either I/O backend; adding `--features tokio` runs the simulation and Tokio adapter. The native adapter follows the crate's selected native backend, including io\_uring when enabled on Linux. The example-local `File` and `Socket` traits are provisional subsets, not exported APIs. Production I/O traits are unchanged.
+
+The generic code creates files and listeners exclusively through these traits. Real adapters reuse the existing scheduler reads/writes; their file representation remains `Arc<std::fs::File>` internally. File opening runs on the selected backend's blocking pool. The simulator supplies in-memory files and duplex streams, without OS files, sockets, registrations, or `Unsupported` stubs. Its read and write limits differ so both applications must handle partial writes as well as partial reads.
+
+The experiment establishes these concrete requirements:
+
+- **Associated file resources and creation hooks remove the application leak.** Neither application function names a concrete file, socket, runtime, or `Arc`. Moving current file operations to `&Self::File` and adding file opening are the next public changes to make.
+- **Address inspection belongs in the interface.** Binding to port zero requires a generic way to discover the bound address. The probe uses `listener_addr`. Its combined TCP `socket_listen` is sufficient for this experiment; separate socket creation, bind, listen, options, and peer-address hooks still need design before broader use.
+- **Owned buffer views matter for partial transfers.** The probe truncates to the received prefix and drains written prefixes from a `Vec`, reusing its allocation but moving bytes. A future owned subrange view should retain the allocation while exposing only the unwritten suffix; reads need a defined initialized output range. A successful zero-byte write for a nonempty request must terminate the higher-level write loop with `WriteZero`.
+- **Future composition is enough for synchronization.** Client and server run concurrently through `try_zip`, while the simulated accept/read futures use event registration and wakeups. Tests explicitly verify wake delivery. No scheduler-specific `block`/`unblock`, task group, or new dispatch primitive is needed for these consumers; the existing `portable_io` example separately exercises `Spawn`.
+- **Drop and completion remain distinct.** The example's ordinary resource destruction closes connections and releases file handles, including on copy errors. Completed partial writes remain visible on failure. This does not establish the proposed explicit close, admission, cancellation, or runtime-draining contracts.
+
+Tests cover empty files, multiple buffers, short transfers, truncating an existing destination, missing sources, injected open/read/write failures, zero-progress writes, buffer allocation retention on success/error/EOF, accept/read wakeups, connection EOF, and releasing listener addresses. The copy example assumes distinct source and destination resources; it is not a production replacement for a filesystem copy utility and does not promise durability.
+
+This is an ownership and creation experiment, not a complete simulated runtime or kernel model. The simulator has a bounded in-memory file size and unbounded byte queues; it does not model network backpressure, cancellation, timers, task scheduling, or kernel completion after an abandoned future. Real adapters retain the existing Windows positioned-file cursor behavior. Cancellation-aware results, generic buffer safety, separate socket setup, blocking admission, explicit close, and graceful draining remain the next contracts to implement and test. Prepared links and registered pools are still optional later work.
 
 ## Current implementation and remaining work
 

@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     #[cfg(not(any(feature = "native", feature = "tokio")))]
     {
-        return Err("enable the native or tokio feature".into());
+        Err("enable the native or tokio feature".into())
     }
     #[cfg(any(feature = "native", feature = "tokio"))]
     Ok(())

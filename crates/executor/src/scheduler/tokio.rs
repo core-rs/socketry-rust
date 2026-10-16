@@ -12,9 +12,10 @@ mod signals;
 
 use super::operation::cancellable;
 use super::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
+use crate::blocking_pool::BlockingPool;
 use crate::{
-    Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration, Spawn,
-    SpawnError, TaskError,
+    Blocking, BlockingError, BlockingOptions, BlockingTask, Cancellation, FileOptions, IoBuf,
+    IoBufMut, OperationResult, SocketRegistration, Spawn, SpawnError, TaskError,
 };
 use ::tokio::runtime::Handle;
 use ::tokio::task::{AbortHandle, JoinHandle};
@@ -60,6 +61,7 @@ struct Registry {
 }
 
 struct Shared {
+    blocking: BlockingPool,
     runtime: Handle,
     closed: AtomicBool,
     registry: Mutex<Registry>,
@@ -153,6 +155,7 @@ impl Shared {
             })
             .collect();
         drop(registry);
+        self.blocking.close();
         for abort in aborts {
             abort.abort();
         }
@@ -405,11 +408,37 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
+    /// Wait for bounded admission to the dedicated pool; await the returned handle for completion. See [`Blocking::spawn_blocking`] for cancellation and ownership.
+    pub async fn spawn_blocking<F, Output>(
+        &self,
+        operation: F,
+        cancellation: &Cancellation,
+    ) -> Result<BlockingTask<Output>, BlockingError>
+    where
+        F: FnOnce() -> Output + Send + 'static,
+        Output: Send + 'static,
+    {
+        Blocking::spawn_blocking(self, operation, cancellation).await
+    }
+
     /// The runtime must remain alive and driven, with I/O and time enabled.
     pub fn new(runtime: Handle) -> Self {
+        Self::with_pool(runtime, BlockingPool::new(BlockingOptions::default()))
+    }
+
+    /// Configure a dedicated blocking pool, independent of Tokio's global blocking pool.
+    pub fn with_blocking(runtime: Handle, options: BlockingOptions) -> io::Result<Self> {
+        Ok(Self::with_pool(
+            runtime,
+            BlockingPool::new(options.validate()?),
+        ))
+    }
+
+    fn with_pool(runtime: Handle, blocking: BlockingPool) -> Self {
         Self {
             handle: SchedulerHandle {
                 shared: Arc::new(Shared {
+                    blocking,
                     runtime,
                     closed: AtomicBool::new(false),
                     registry: Mutex::new(Registry {
@@ -439,8 +468,9 @@ impl Scheduler {
         self.handle.spawn(future)
     }
 
-    /// Close admission, cancel all owned tasks,
-    /// and wait for their futures to be destroyed.
+    /// Close admission, cancel all owned future tasks, and wait for their futures to be destroyed.
+    ///
+    /// Queued blocking jobs are discarded. Started blocking jobs finish independently; await their handles first for graceful shutdown.
     pub async fn shutdown(self) {
         assert_outside_scheduler(&self.handle.shared);
         self.handle.shared.close();
@@ -461,6 +491,19 @@ pub struct SchedulerHandle {
 }
 
 impl SchedulerHandle {
+    /// Wait for bounded admission to the dedicated pool; await the returned handle for completion. See [`Blocking::spawn_blocking`] for cancellation and ownership.
+    pub async fn spawn_blocking<F, Output>(
+        &self,
+        operation: F,
+        cancellation: &Cancellation,
+    ) -> Result<BlockingTask<Output>, BlockingError>
+    where
+        F: FnOnce() -> Output + Send + 'static,
+        Output: Send + 'static,
+    {
+        Blocking::spawn_blocking(self, operation, cancellation).await
+    }
+
     pub fn spawn<FutureType>(
         &self,
         future: FutureType,
@@ -929,6 +972,48 @@ impl Clock for Scheduler {
         cancellation: &Cancellation,
     ) -> OperationResult<()> {
         self.handle.sleep_until(deadline, cancellation).await
+    }
+}
+
+impl Blocking for Scheduler {
+    type Handle<Output>
+        = BlockingTask<Output>
+    where
+        Output: Send + 'static;
+
+    async fn spawn_blocking<F, Output>(
+        &self,
+        operation: F,
+        cancellation: &Cancellation,
+    ) -> Result<BlockingTask<Output>, BlockingError>
+    where
+        F: FnOnce() -> Output + Send + 'static,
+        Output: Send + 'static,
+    {
+        self.handle
+            .shared
+            .blocking
+            .spawn(operation, cancellation)
+            .await
+    }
+}
+
+impl Blocking for SchedulerHandle {
+    type Handle<Output>
+        = BlockingTask<Output>
+    where
+        Output: Send + 'static;
+
+    async fn spawn_blocking<F, Output>(
+        &self,
+        operation: F,
+        cancellation: &Cancellation,
+    ) -> Result<BlockingTask<Output>, BlockingError>
+    where
+        F: FnOnce() -> Output + Send + 'static,
+        Output: Send + 'static,
+    {
+        self.shared.blocking.spawn(operation, cancellation).await
     }
 }
 

@@ -25,6 +25,15 @@ This guide describes the current implementation and its boundaries. Read [the de
 - Dispatch takes a future and returns a handle without a group or owner argument. There is no implicit task tree: destruction drops handles still owned by a future; transferred handles remain owned elsewhere. Higher-level groups belong above Spawn and are outside the executor for now.
 - Scheduler Drop cancels all tasks, joining threads outside a worker. On a worker it requests shutdown without joining. Surviving handles reject spawn.
 
+## Blocking work
+
+- `Blocking::spawn_blocking` returns a lazy, cancellable admission future and then an owning `BlockingTask`. Generic consumers require the capability; native and Tokio schedulers and handles implement it.
+- `BlockingOptions` configures a dedicated internal pool per scheduler: four threads and 64 admitted jobs by default. Count queued and running jobs, retaining capacity until running closures finish even if their handles are dropped. Threads start on first admission.
+- The pool uses a mutex-protected queue, a condition variable for workers, and event listeners for asynchronous admission. Register listeners before inspecting capacity; never invoke wakers or destroy user captures/results under the queue lock.
+- Check cancellation before admission and again with abandonment before calling the closure. Queued cancellation need not complete until dequeued. Once started, preserve the real output; closures can cooperate explicitly using a captured signal. Catch job panics and release capacity even when abandoned result destructors panic.
+- Close admission and discard queued jobs at scheduler shutdown; started jobs retain their data and finish independently. Do not join pool threads or implicitly drain jobs in `Scheduler::run`. Applications await them before shutting down services. Partial thread startup failure closes the pool and releases already-started workers.
+- Existing file fallbacks stay on their backend pools. The general pool does not yet supply detached `_submit` semantics, public pool sharing, or idle thread retirement.
+
 ## Cooperative cancellation
 
 - `cancellation.rs`, `cancelled.rs`, and `defer_cancel.rs` implement runtime-independent primitives, exported by both `socketry-executor` and the `socketry` facade.
@@ -65,7 +74,7 @@ This guide describes the current implementation and its boundaries. Read [the de
 
 - `socketry-timers`, also available through `socketry::timers`, implements the independent io-event timer queue with batched insertion, constant-time cancellation and lazy compaction. Its optional `sharded` feature adds worker queues, cross-worker assistance and lazy sleep futures; the experimental inbox driver remains optional. The crate has no executor dependency. Scheduler integration, operation pools, registered buffers, general descriptor/UDP interfaces and overlapped Windows file operations remain planned. `Clock::now` and cancellable absolute/relative waits use async-io on native and the selected runtime on Tokio. Relative sleeps start on first poll, and overflow maps to `InvalidInput`. Paused Tokio clocks are preserved; native timer-engine replacement remains separate work.
 - Keep runtime requirements explicit; ordinary Future support does not provide another runtime's I/O or timers.
-- There is no non-Send task executor, public blocking-task API or scoped borrowing.
+- There is no non-Send task executor or scoped borrowing.
 - Do not introduce unsafe Send, stack migration or nested blocking waits.
 - Native coroutine sources, sanitizer hooks and historical tests belong to the preserved coroutine branch, not the future executor's build.
 

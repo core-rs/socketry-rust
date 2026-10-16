@@ -145,7 +145,7 @@ fn scheduler_lifecycle_and_current_context_are_available_to_owned_tasks() {
 
 #[test]
 fn worker_thread_creation_errors_are_returned() {
-    let result = Scheduler::with_worker_spawner(1, |_, _, _| {
+    let result = Scheduler::with_worker_spawner(1, crate::BlockingOptions::default(), |_, _, _| {
         Err(std::io::Error::other("injected thread creation failure"))
     });
 

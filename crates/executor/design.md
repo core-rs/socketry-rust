@@ -20,7 +20,7 @@ Pass the implementation into libraries explicitly. A library should require the 
 
 ## Capability traits and static dispatch
 
-`File`, `Socket`, and `Clock` name scheduler capabilities. `Spawn` provides primitive task dispatch and returns an owning task handle. `File::File`, `Socket::Socket`, and `Socket::Listener` are associated resource types chosen by each implementation. `Socket` replaces the earlier capability name `Network`.
+`File`, `Socket`, and `Clock` name scheduler capabilities. `Spawn` provides primitive task dispatch and returns an owning task handle. `Blocking` adds optional execution of owned synchronous closures with bounded asynchronous admission. `File::File`, `Socket::Socket`, and `Socket::Listener` are associated resource types chosen by each implementation. `Socket` replaces the earlier capability name `Network`.
 
 Prefer generic trait bounds, concrete resource types, and concrete future types. These allow compile-time capability checking, monomorphization, and inlining without requiring a boxed future for each operation. The compiler decides which calls to inline; the interface should make that optimization possible.
 
@@ -199,7 +199,33 @@ An optional context pairing a scheduler reference with a cancellation signal cou
 
 `Clock` supplies synchronous monotonic time access and cancellable timer futures, as specified below. `now`, `sleep_until(deadline, cancellation)`, and `sleep(duration, cancellation)` are implemented. Waits return `OperationResult<()>`.
 
-Ordinary async synchronization uses `Future`, `Poll::Pending`, and `Waker`. Channels, locks, and other primitives own their state and protect registration against lost wakeups; they do not need scheduler-specific `block` or `unblock` methods. This is separate from executing synchronous work on a blocking pool, which may warrant an optional scheduler capability.
+Ordinary async synchronization uses `Future`, `Poll::Pending`, and `Waker`. Channels, locks, and other primitives own their state and protect registration against lost wakeups; they do not need scheduler-specific `block` or `unblock` methods. The separate `Blocking` capability executes synchronous closures on a dedicated pool.
+
+## Blocking execution
+
+`Blocking::spawn_blocking(operation, cancellation)` is an optional scheduler capability implemented by native and Tokio schedulers and their handles. Generic consumers require `S: Blocking`; the scheduler delegates queueing and thread management to a dedicated internal pool. The pool remains inside `socketry-executor` initially, with no public pool injection or separate package.
+
+```rust
+use socketry_executor::{Blocking, Cancellation};
+
+async fn length<S: Blocking>(scheduler: &S, input: String, cancellation: &Cancellation)
+    -> Result<usize, Box<dyn std::error::Error>>
+{
+    let job = scheduler.spawn_blocking(move || input.len(), cancellation).await?;
+    let length = job.await?;
+    Ok(length)
+}
+```
+
+The first await waits for admission; the second waits for completion. The closure and its output must be `Send + 'static`. Admission is lazy: constructing or dropping an unpolled future submits nothing. When full, admission suspends through event listeners and wakers. Dropping a waiting admission returns its captures and unregisters its listeners. Admission errors distinguish cancellation, scheduler closure, and worker startup failure through `BlockingError`; job completion reports `TaskError` or the closure's actual output, which can itself be a `Result`.
+
+`BlockingOptions { threads, capacity }` configures each scheduler's pool. Defaults are four threads and 64 total admitted jobs. Both limits must be nonzero. Capacity counts queued and running work, including running work whose completion handle was dropped. Caller-owned futures waiting for admission are outside that bound; admission has no FIFO fairness guarantee. Threads start on first admission and stay available until pool shutdown. Native construction uses `Scheduler::with_workers_and_blocking`; the Tokio adapter uses `Scheduler::with_blocking`. These pools are separate from future workers, selectors, and Tokio's runtime-wide blocking pool.
+
+Cancellation before admission prevents submission. A worker checks the supplied signal and handle ownership immediately before calling the closure. Observed cancellation or abandonment skips queued work; observing its completion can wait until a worker reaches it. Requests racing the final check may lose to execution. Once started, a job retains its inputs and capacity until the closure finishes, preserving its actual result even if cancellation arrives. A running closure can capture a cancellation clone and check it explicitly. There is no forced interruption and no per-job monitoring task.
+
+The returned `BlockingTask` owns interest in execution. Moving it transfers that ownership; dropping it requests skipping if still queued and discards any eventual result. Pool shutdown closes admission, wakes waiters, and discards queued jobs. Already-started closures finish independently, retaining their owned data even after the scheduler or handle is dropped. Shutdown does not join these threads; graceful callers request cancellation and await their jobs before releasing services those jobs need. `Scheduler::run` tracks future tasks, not independent blocking jobs.
+
+Existing private file-I/O fallbacks keep their current backend pools and resource-return contracts. This API does not implement detached `_submit` I/O: dropping its handle requests skipping work, whereas an accepted future `_submit` operation must retain the promised execution and retirement semantics described below. Pool sharing, file-fallback integration, idle thread retirement, and scheduling policies remain later work driven by consumers and measurements.
 
 ## Clock and timer composition
 
@@ -738,7 +764,7 @@ The initial public contracts now cover associated resources and creation, owned 
 Remaining design work includes:
 
 1. **Resource lifecycle and wider I/O:** separate socket creation/options, stateful files, explicit close/submission, message I/O, and extension boundaries.
-2. **Blocking execution:** an optional public capability for synchronous closures, with bounded asynchronous admission, cancellation before execution, and completion once execution starts. Existing private blocking fallbacks do not expose this capability.
+2. **Blocking pool integration:** the public `Blocking` capability now provides bounded admission and owned completion. Existing file fallbacks still use backend pools; sharing, idle thread retirement, and further scheduling policies remain separate decisions.
 3. **Backend retirement:** account for all accepted work, including future `_submit` jobs without application waiters. Application completion remains explicit through owned task handles; there is no implicit graceful join of all spawned work.
 4. **Timer engine integration:** the monotonic `Clock` and cancellable deadline contract are implemented. Native waits still use async-io, and the adapter uses its selected Tokio runtime, including paused time. Integrating `socketry-timers` into scheduler driving and parking remains separate work.
 
@@ -771,10 +797,11 @@ The simulator has bounded in-memory file sizes and unbounded byte queues. It doe
 | Cancellation | `Cancellation`, `Cancelled`, `defer_cancel`, and cancellation-aware file/socket operations implemented. Application shutdown is cooperative. |
 | Signal notifications | `Notify<Value>`, `Signals`, and optional Unix registration guards implemented for native and Tokio; each guard owns its dispatch task. |
 | Runtime lifetime | Application waits are explicit. Runtime shutdown abandons futures; backend retention protects submitted I/O. Future submission-only jobs need further draining/accounting design. |
-| Capabilities | Public `File`, `Socket`, `SocketRegistration`, `Clock`, and `Spawn`; associated resources and initial file/TCP creation implemented. Broader hooks remain design work. |
+| Capabilities | Public `File`, `Socket`, `SocketRegistration`, `Clock`, `Spawn`, and `Blocking`; associated resources and initial file/TCP creation implemented. Broader hooks remain design work. |
+| Blocking execution | Dedicated native/Tokio pools, configurable worker and admission limits, queued cancellation, and owning completion handles implemented. Started closures finish independently; graceful completion requires awaiting them. |
 | Linked operations | Prepared chains and `Linked` remain proposed; native linking, whole-chain blocking jobs, and readiness sequencing are not implemented. |
 | File operations | `file_open` and generic owned-buffer positioned read/write implemented. Stateful I/O, explicit close, allocation, and metadata hooks pending. |
-| Submission and completion | Close, socket shutdown, and advice pairs remain proposed; bounded admission, `_submit`, and safe CQE suppression pending. |
+| Submission and completion | Close, socket shutdown, and advice pairs remain proposed; their admission, `_submit`, and safe CQE suppression are pending. The public blocking pool has its own bounded admission. |
 | Socket operations | TCP listen, connect, accept, address inspection, generic read/write, readiness, and optional OS registration implemented. General sockets and message I/O pending. |
 | Backends | Native readiness, blocking file fallbacks, Linux io_uring, and an adapter to an existing Tokio runtime implemented; the example simulator implements the public I/O traits. |
 | Buffers | Unsafe `IoBuf`/`IoBufMut`, `Vec<u8>`, `Box<[u8]>`, and owned `BufferSlice` implemented. Registered leases and pools remain proposed. |

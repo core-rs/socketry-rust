@@ -6,8 +6,9 @@
 
 pub use socketry_executor as executor;
 pub use socketry_executor::{
-    BufferResult, BufferSlice, Cancellation, Cancelled, Clock, File, FileOptions, Interest, IoBuf,
-    IoBufMut, Notify, OperationError, OperationResult, Scheduler, SchedulerHandle, Signals, Socket,
+    Blocking, BlockingError, BlockingOptions, BlockingTask, BufferResult, BufferSlice,
+    Cancellation, Cancelled, Clock, File, FileOptions, Interest, IoBuf, IoBufMut, Notify,
+    OperationError, OperationResult, Scheduler, SchedulerHandle, Signals, Socket,
     SocketRegistration, Spawn, SpawnError, Task, TaskError, TaskHandle, defer_cancel, yield_now,
 };
 

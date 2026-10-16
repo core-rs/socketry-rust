@@ -7,9 +7,13 @@ mod operations;
 #[cfg(all(unix, feature = "signals", feature = "native"))]
 mod signals;
 
+use crate::blocking_pool::BlockingPool;
 use crate::task::{Completion, Runnable, TaskFuture, TaskState, UNASSIGNED_WORKER};
 use crate::worker::{self, WorkerState};
-use crate::{Spawn, SpawnError, Task, TaskHandle};
+use crate::{
+    Blocking, BlockingError, BlockingOptions, BlockingTask, Cancellation, Spawn, SpawnError, Task,
+    TaskHandle,
+};
 use crossbeam_deque::{Injector, Worker};
 use event_listener::{Event, Listener};
 use std::cell::RefCell;
@@ -38,6 +42,7 @@ struct Registry {
 }
 
 pub(crate) struct Shared {
+    blocking: BlockingPool,
     #[cfg(feature = "native")]
     selector: std::sync::OnceLock<io::Result<super::selector::DefaultSelector>>,
     registry: Mutex<Registry>,
@@ -162,6 +167,7 @@ impl Shared {
             })
             .collect::<Vec<_>>();
         drop(registry);
+        self.blocking.close();
         for waker in wakers {
             waker.wake();
         }
@@ -212,6 +218,19 @@ pub struct SchedulerHandle {
 }
 
 impl SchedulerHandle {
+    /// Wait for bounded admission to the dedicated pool; await the returned handle for completion. See [`Blocking::spawn_blocking`] for cancellation and ownership.
+    pub async fn spawn_blocking<F, Output>(
+        &self,
+        operation: F,
+        cancellation: &Cancellation,
+    ) -> Result<BlockingTask<Output>, BlockingError>
+    where
+        F: FnOnce() -> Output + Send + 'static,
+        Output: Send + 'static,
+    {
+        Blocking::spawn_blocking(self, operation, cancellation).await
+    }
+
     pub(crate) fn from_shared(shared: Arc<Shared>) -> Self {
         Self { shared }
     }
@@ -287,6 +306,19 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
+    /// Wait for bounded admission to the dedicated pool; await the returned handle for completion. See [`Blocking::spawn_blocking`] for cancellation and ownership.
+    pub async fn spawn_blocking<F, Output>(
+        &self,
+        operation: F,
+        cancellation: &Cancellation,
+    ) -> Result<BlockingTask<Output>, BlockingError>
+    where
+        F: FnOnce() -> Output + Send + 'static,
+        Output: Send + 'static,
+    {
+        Blocking::spawn_blocking(self, operation, cancellation).await
+    }
+
     /// Start one worker per available hardware parallelism unit (at least one).
     pub fn new() -> io::Result<Self> {
         Self::with_workers(thread::available_parallelism().map_or(1, usize::from))
@@ -294,7 +326,15 @@ impl Scheduler {
 
     /// Start a specified, nonzero number of workers.
     pub fn with_workers(worker_count: usize) -> io::Result<Self> {
-        Self::with_worker_spawner(worker_count, |shared, identifier, queue| {
+        Self::with_workers_and_blocking(worker_count, BlockingOptions::default())
+    }
+
+    /// Configure future workers and the separate, lazily started blocking pool.
+    pub fn with_workers_and_blocking(
+        worker_count: usize,
+        blocking: BlockingOptions,
+    ) -> io::Result<Self> {
+        Self::with_worker_spawner(worker_count, blocking, |shared, identifier, queue| {
             thread::Builder::new()
                 .name(format!("socketry-worker-{identifier}"))
                 .spawn(move || worker::run(shared, identifier, queue))
@@ -303,6 +343,7 @@ impl Scheduler {
 
     fn with_worker_spawner(
         worker_count: usize,
+        blocking: BlockingOptions,
         mut spawn_worker: impl FnMut(Arc<Shared>, usize, Worker<Runnable>) -> io::Result<JoinHandle<()>>,
     ) -> io::Result<Self> {
         if worker_count == 0 {
@@ -311,8 +352,10 @@ impl Scheduler {
                 "worker count must be nonzero",
             ));
         }
+        let blocking = blocking.validate()?;
         let queues: Vec<_> = (0..worker_count).map(|_| Worker::new_fifo()).collect();
         let shared = Arc::new(Shared {
+            blocking: BlockingPool::new(blocking),
             #[cfg(feature = "native")]
             selector: std::sync::OnceLock::new(),
             registry: Mutex::new(Registry {
@@ -371,9 +414,7 @@ impl Scheduler {
         self.handle.spawn(future)
     }
 
-    /// Block the caller until all currently owned tasks finish.
-    /// External submissions may extend this wait. The scheduler remains open.
-    /// Task failures are retrieved separately through their join handles.
+    /// Block the caller until all currently owned future tasks finish. External submissions may extend this wait. The scheduler remains open. Task failures are retrieved separately through their join handles. Blocking jobs are independent; await their handles explicitly.
     ///
     /// # Panics
     /// Panics on a Socketry worker, which would block task progress.
@@ -413,8 +454,9 @@ impl Scheduler {
         }
     }
 
-    /// Close admission, cancel all tasks, and join the worker threads.
-    /// In-progress polls must return; this cannot interrupt a blocking call.
+    /// Close admission, cancel all future tasks, and join their worker threads. In-progress polls must return; this cannot interrupt a blocking call.
+    ///
+    /// Queued blocking jobs are discarded. Started blocking jobs finish independently; await their handles first for graceful shutdown.
     ///
     /// # Panics
     /// Panics on a Socketry worker. Dropping a scheduler on a worker instead
@@ -478,6 +520,48 @@ pub(crate) fn enter(shared: &Arc<Shared>) -> SchedulerScope {
 impl Drop for SchedulerScope {
     fn drop(&mut self) {
         CURRENT_SCHEDULER.with(|current| current.replace(std::mem::take(&mut self.0)));
+    }
+}
+
+impl Blocking for Scheduler {
+    type Handle<Output>
+        = BlockingTask<Output>
+    where
+        Output: Send + 'static;
+
+    async fn spawn_blocking<F, Output>(
+        &self,
+        operation: F,
+        cancellation: &Cancellation,
+    ) -> Result<BlockingTask<Output>, BlockingError>
+    where
+        F: FnOnce() -> Output + Send + 'static,
+        Output: Send + 'static,
+    {
+        self.handle
+            .shared
+            .blocking
+            .spawn(operation, cancellation)
+            .await
+    }
+}
+
+impl Blocking for SchedulerHandle {
+    type Handle<Output>
+        = BlockingTask<Output>
+    where
+        Output: Send + 'static;
+
+    async fn spawn_blocking<F, Output>(
+        &self,
+        operation: F,
+        cancellation: &Cancellation,
+    ) -> Result<BlockingTask<Output>, BlockingError>
+    where
+        F: FnOnce() -> Output + Send + 'static,
+        Output: Send + 'static,
+    {
+        self.shared.blocking.spawn(operation, cancellation).await
     }
 }
 

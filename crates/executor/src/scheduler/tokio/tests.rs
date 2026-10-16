@@ -34,6 +34,7 @@ fn expect_error<ResultType>(result: io::Result<ResultType>) -> io::Error {
 
 fn shared(runtime: &::tokio::runtime::Runtime) -> Arc<Shared> {
     Arc::new(Shared {
+        blocking: BlockingPool::new(BlockingOptions::default()),
         runtime: runtime.handle().clone(),
         closed: AtomicBool::new(false),
         registry: Mutex::new(Registry {

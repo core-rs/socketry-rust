@@ -3,8 +3,7 @@
 
 // Bring these types and traits into scope.
 //
-// Traits such as Socket, Signals, and IoBuf provide methods used below.
-// Importing a trait makes its methods available on implementing types.
+// Traits such as `Socket`, `Signals`, and `IoBuf` provide methods used below. Importing a trait makes its methods available on implementing types.
 #[cfg(unix)]
 use socketry::{
     Cancellation, IoBuf, OperationError, OperationResult, Scheduler, Signals, Socket,
@@ -16,54 +15,44 @@ use std::io;
 
 // `async fn` returns a future. Its body runs when that future is polled.
 //
-// `<S: Socket>` means this function works with any scheduler type S
-// implementing the Socket capability.
+// `<S: Socket>` means this function works with any scheduler type `S` implementing the `Socket` capability.
 //
 // `&S` borrows the scheduler instead of taking ownership.
 //
-// `S::Socket` is the socket resource type chosen by that scheduler.
-// We take ownership of this socket; it is released when this function exits.
+// `S::Socket` is the socket resource type chosen by that scheduler. We take ownership of this socket; it is released when this function exits.
 //
 // `&Cancellation` borrows the cancellation handle.
 //
-// OperationResult<()> means:
-//   Ok(())     — succeeded, with no meaningful return value.
-//   Err(error) — failed or was cancelled.
+// `OperationResult<()>` means:
+//
+// - `Ok(())`: succeeded, with no meaningful return value.
+// - `Err(error)`: failed or was cancelled.
 #[cfg(unix)]
 async fn echo<S: Socket>(
     scheduler: &S,
     socket: S::Socket,
     shutdown: &Cancellation,
 ) -> OperationResult<()> {
-    // Allocate 8192 initialized bytes.
-    // `mut` allows us to assign a returned buffer back to this variable.
+    // Allocate 8192 initialized bytes. `mut` allows us to assign a returned buffer back to this variable.
     let mut buffer = vec![0; 8192];
 
-    // This cancellation handle never becomes cancelled.
-    // We use it for writes so a shutdown request doesn't interrupt
-    // echoing a chunk we have already read.
+    // This cancellation handle never becomes cancelled. We use it for writes so a shutdown request doesn't interrupt echoing a chunk we have already read.
     let drain = Cancellation::never();
 
     loop {
-        // Borrow the socket, but transfer ownership of the buffer
-        // into the read operation.
+        // Borrow the socket, but transfer ownership of the buffer into the read operation.
         //
-        // `.await` suspends this future while the operation is pending.
-        // It does not busy-wait or block a scheduler worker.
+        // `.await` suspends this future while the operation is pending. It does not busy-wait or block a scheduler worker.
         //
-        // The operation returns a tuple:
-        //   (success/error result, original buffer)
+        // The operation returns `(success/error result, original buffer)`.
         //
-        // Keeping the buffer outside Result lets us recover it even
-        // when the operation fails or is cancelled.
+        // Keeping the buffer outside `Result` lets us recover it even when the operation fails or is cancelled.
         let (result, returned) = scheduler.io_read(&socket, buffer, shutdown).await;
 
         // Take ownership of the returned buffer for reuse.
         buffer = returned;
 
-        // `?` extracts the successful byte count.
-        // On error, it immediately returns that error from echo().
-        // Cancellation is one such error.
+        // `?` extracts the successful byte count. On error, it immediately returns that error from `echo()`. Cancellation is one such error.
         let count = result?;
 
         // A successful zero-byte read indicates end of stream here.
@@ -71,48 +60,40 @@ async fn echo<S: Socket>(
             return Ok(());
         }
 
-        // A write can send fewer bytes than requested.
-        // Keep writing until this entire received chunk is echoed.
+        // A write can send fewer bytes than requested. Keep writing until this entire received chunk is echoed.
         let mut sent = 0;
 
         while sent < count {
             // `sent..count` is a range excluding the end.
             //
-            // `slice` consumes the buffer and creates an owned view
-            // of that range. It retains the original allocation;
-            // it does not copy the bytes.
+            // `slice` consumes the buffer and creates an owned view of that range. It retains the original allocation; it does not copy the bytes.
             //
             // `&drain` makes these writes ignore shutdown requests.
             let (result, returned) = scheduler
                 .io_write(&socket, buffer.slice(sent..count), &drain)
                 .await;
 
-            // The operation returned our owned range view.
-            // Recover the complete original buffer from it.
+            // The operation returned our owned range view. Recover the complete original buffer from it.
             buffer = returned.into_inner();
 
             let written = result?;
 
-            // Zero progress on a nonempty write would otherwise
-            // cause this loop to repeat forever.
+            // Zero progress on a nonempty write would otherwise cause this loop to repeat forever.
             if written == 0 {
-                // Construct an ordinary I/O error, then convert it
-                // into the OperationError required by this function.
+                // Construct an ordinary I/O error, then convert it into the `OperationError` required by this function.
                 return Err(io::Error::from(io::ErrorKind::WriteZero).into());
             }
 
             sent += written;
         }
 
-        // The next read observes shutdown if cancellation was requested
-        // while we were writing.
+        // The next read observes shutdown if cancellation was requested while we were writing.
     }
 }
 
 // `main` is synchronous.
 //
-// Box<dyn Error> can hold different concrete error types, allowing `?`
-// to propagate scheduler, registration, and I/O errors from this function.
+// `Box<dyn Error>` can hold different concrete error types, allowing `?` to propagate scheduler, registration, and I/O errors from this function.
 #[cfg(unix)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start a scheduler with two worker threads.
@@ -121,38 +102,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create one shared cancellation state for this server.
     let shutdown = Cancellation::new();
 
-    // Subscribe to SIGINT, normally generated by Ctrl-C.
+    // Subscribe to `SIGINT`, normally generated by Ctrl-C.
     //
     // `&[SIGINT]` borrows a slice containing the signal to subscribe to.
     //
-    // The clone shares cancellation state with `shutdown`.
-    // The signal subscription owns that clone and cancels it on SIGINT.
-    // Every other clone then observes the same cancellation request.
+    // The clone shares cancellation state with `shutdown`. The signal subscription owns that clone and cancels it on `SIGINT`. Every other clone then observes the same cancellation request.
     //
-    // Keep the returned registration guard alive.
-    // Dropping it removes the subscription.
+    // Keep the returned registration guard alive. Dropping it removes the subscription.
     //
-    // `_sigint` is a real binding; the underscore prefix merely suppresses
-    // an "unused variable" warning. `let _ = ...` would discard the guard.
+    // `_sigint` is a real binding; the underscore prefix merely suppresses an "unused variable" warning. `let _ = ...` would discard the guard.
     let _sigint = scheduler.signal_notify(&[SIGINT], shutdown.clone())?;
 
-    // Keep ownership of connection task handles.
-    // Rust infers the Vec's element type from the handles pushed below.
+    // Keep ownership of connection task handles. Rust infers the `Vec`'s element type from the handles pushed below.
     //
-    // Dropping an unfinished task handle abandons its task, so retaining
-    // these handles is essential for graceful shutdown.
+    // Dropping an unfinished task handle abandons its task, so retaining these handles is essential for graceful shutdown.
     let mut clients = Vec::new();
 
-    // Drive this async block until it completes, blocking the main thread.
-    // The scheduler's workers can run connection tasks concurrently.
+    // Drive this async block until it completes, blocking the main thread. The scheduler's workers can run connection tasks concurrently.
     //
-    // Save the result rather than using `?` here: even if accepting fails,
-    // we want to cancel and await existing clients before returning.
+    // Save the result rather than using `?` here: even if accepting fails, we want to cancel and await existing clients before returning.
     let result: OperationResult<()> = scheduler.block_on(async {
         let listener = scheduler
             .socket_listen(
-                // Parse the fixed address into a SocketAddr.
-                // `unwrap()` panics on failure; this literal is known valid.
+                // Parse the fixed address into a `SocketAddr`. `unwrap()` panics on failure; this literal is known valid.
                 "127.0.0.1:9000".parse().unwrap(),
                 &shutdown,
             )
@@ -161,8 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             // `match` handles each possible operation result.
             //
-            // `accept` returns (socket, peer_address).
-            // We ignore the address using `_`.
+            // `accept` returns `(socket, peer_address)`. We ignore the address using `_`.
             let (socket, _) = match scheduler.accept(&listener, &shutdown).await {
                 Ok(connection) => connection,
 
@@ -175,27 +146,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(error) => break Err(error),
             };
 
-            // A handle refers to the existing scheduler.
-            // This does not create another scheduler or more workers.
+            // A handle refers to the existing scheduler. This does not create another scheduler or more workers.
             let handle = scheduler.handle();
 
-            // Another handle to the SAME cancellation state.
-            // This connection will observe the server's SIGINT request.
+            // Another handle to the same cancellation state. This connection will observe the server's `SIGINT` request.
             let stopping = shutdown.clone();
 
             clients.push(
                 scheduler
                     .spawn(
-                        // `move` transfers captured values into this future:
-                        // handle, socket, and stopping.
+                        // `move` transfers captured values into this future: `handle`, `socket`, and `stopping`.
                         //
-                        // The task therefore owns what it needs instead of
-                        // borrowing variables from this loop iteration.
+                        // The task therefore owns what it needs instead of borrowing variables from this loop iteration.
                         async move {
-                            // Borrow our owned values while echo runs.
+                            // Borrow our owned values while `echo` runs.
                             //
-                            // `if let` handles only this matching error case.
-                            // Normal completion and cancellation are silent.
+                            // `if let` handles only this matching error case. Normal completion and cancellation are silent.
                             if let Err(OperationError::Io(error)) =
                                 echo(&handle, socket, &stopping).await
                             {
@@ -203,36 +169,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         },
                     )
-                    // Convert a spawn failure into an ordinary I/O error.
-                    // `?` then propagates it from this async block.
+                    // Convert a spawn failure into an ordinary I/O error. `?` then propagates it from this async block.
                     .map_err(io::Error::other)?,
             );
 
             // Keep only unfinished tasks.
             //
-            // `|task| ...` is a closure, similar to a Ruby block.
-            // `!` means logical NOT.
+            // `|task| ...` is a closure, similar to a Ruby block. `!` means logical negation.
             //
-            // Removed handles belong to already-finished tasks, so dropping
-            // them cannot interrupt work. Connection I/O errors were logged
-            // inside their tasks.
+            // Removed handles belong to already-finished tasks, so dropping them cannot interrupt work. Connection I/O errors were logged inside their tasks.
             clients.retain(|task| !task.is_finished());
         }
     });
 
     // Request shutdown of every remaining connection.
     //
-    // SIGINT may already have done this; repeated cancellation is harmless.
-    // This also handles an accept-loop failure.
+    // `SIGINT` may already have done this; repeated cancellation is harmless. This also handles an accept-loop failure.
     shutdown.cancel();
 
     scheduler.block_on(async {
-        // Iterating by value moves each handle out of the Vec.
+        // Iterating by value moves each handle out of the `Vec`.
         for client in clients {
             // Awaiting the handle waits for task completion.
             //
-            // Connection I/O errors were handled inside the task.
-            // This outer error reports task failure, such as a panic.
+            // Connection I/O errors were handled inside the task. This outer error reports task failure, such as a panic.
             if let Err(error) = client.await {
                 eprintln!("Task failed: {error}");
             }
@@ -242,8 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Only propagate the server error after existing clients have drained.
     result?;
 
-    // Returning drops the remaining local values, including the signal
-    // registration and scheduler.
+    // Returning drops the remaining local values, including the signal registration and scheduler.
     Ok(())
 }
 #[cfg(not(unix))]

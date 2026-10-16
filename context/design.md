@@ -67,7 +67,7 @@ The shutdown direction is cooperative: request graceful termination and let the 
 
 `Cancellation` is implemented in `socketry-executor` and re-exported by `socketry`. It works independently of the executor. Clones share a persistent signal; child signals receive ancestor cancellation without propagating it to parents or siblings. This explicit cancellation tree expresses service boundaries without imposing an implicit task hierarchy. Dropping a signal does not cancel it. Rust destructors release retained resources, but asynchronous draining still requires live futures and explicit completion tracking through task handles.
 
-`cancel()` signals intent; `check()` returns `Cancelled` at cooperative cancellation points; `cancelled().await` suspends using wakers. `never()` represents work without cooperative cancellation. File and socket operations now accept explicit signals and return cancellation separately from OS errors. Monotonic, cancellation-aware Clock signatures remain planned.
+`cancel()` signals intent; `check()` returns `Cancelled` at cooperative cancellation points; `cancelled().await` suspends using wakers. `never()` represents work without cooperative cancellation. File and socket operations now accept explicit signals and return cancellation separately from OS errors. `Clock` now supplies monotonic `now`, absolute `sleep_until`, and lazy relative `sleep`, with explicit cancellation and `OperationResult<()>`.
 
 `defer_cancel(&signal, future, on_cancel)` observes the signal, invokes a synchronous shutdown callback once, and keeps awaiting the future's normal output. The callback tells the protected work to stop accepting new work or begin draining. Async cleanup belongs in that future, with cancellation inputs that allow it to finish. The wrapper uses standard future polling, handles pinned futures, and neither busy-waits nor prevents its own destruction.
 
@@ -169,7 +169,7 @@ The algorithm's existing Ruby performance motivates the port. Rust performance c
 
 1. Record boundaries and reusable Rust conventions (implemented).
 2. Replace stackful execution with async-task and Crossbeam worker queues (implemented). Keep the coroutine prototype in its saved branch.
-3. Implement primitive task dispatch, scheduler ownership, cancellation and shutdown (implemented). Runtime-independent cooperative signals and deferred cancellation are implemented; cancellation-aware file/socket operations and transferable task ownership are implemented. Clock cancellation and submission-only cleanup remain future work. Higher-level task groups are outside the executor for now.
+3. Implement primitive task dispatch, scheduler ownership, cancellation and shutdown (implemented). Runtime-independent cooperative signals and deferred cancellation are implemented; cancellation-aware file/socket operations and transferable task ownership are implemented. Clock cancellation is implemented; submission-only cleanup remains future work. Higher-level task groups are outside the executor for now.
 4. Establish minimal clock and I/O contracts with concrete consumers (implemented with Socket, File, Clock and a portable TCP example).
 5. Implement native readiness and the Tokio adapter, running the same consumers with both (implemented). Native sleep uses async-io until scheduler integration with `socketry-timers`.
 6. Implement io\_uring's owned-buffer lifecycle, socket/file operations, cancellation and runtime probing (implemented). Improve operation reuse, buffer registration and submission backpressure in subsequent work.

@@ -31,7 +31,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::Instant;
 
 thread_local! {
     static CURRENT_SCHEDULER: RefCell<Weak<Shared>> = const { RefCell::new(Weak::new()) };
@@ -761,12 +761,28 @@ impl SchedulerHandle {
 }
 
 impl Clock for SchedulerHandle {
-    async fn sleep(&self, duration: Duration) {
-        let future = {
-            let _scope = self.shared.runtime.enter();
-            ::tokio::time::sleep(duration)
-        };
-        future.await;
+    fn now(&self) -> Instant {
+        let _scope = self.shared.runtime.enter();
+        ::tokio::time::Instant::now().into_std()
+    }
+    async fn sleep_until(
+        &self,
+        deadline: Instant,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        super::operation::cancellable(cancellation, async {
+            let future = {
+                let _scope = self.shared.runtime.enter();
+                ::tokio::time::sleep_until(::tokio::time::Instant::from_std(deadline))
+            };
+            InRuntime {
+                runtime: self.shared.runtime.clone(),
+                future,
+            }
+            .await;
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -904,8 +920,15 @@ impl File for Scheduler {
     }
 }
 impl Clock for Scheduler {
-    async fn sleep(&self, duration: Duration) {
-        self.handle.sleep(duration).await;
+    fn now(&self) -> Instant {
+        self.handle.now()
+    }
+    async fn sleep_until(
+        &self,
+        deadline: Instant,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.handle.sleep_until(deadline, cancellation).await
     }
 }
 

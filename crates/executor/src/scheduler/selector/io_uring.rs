@@ -30,7 +30,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{
     future::{Future, poll_fn},
     path::Path,
@@ -693,8 +693,17 @@ impl File for Selector {
     }
 }
 impl Clock for Selector {
-    async fn sleep(&self, duration: Duration) {
-        readiness::Selector.sleep(duration).await;
+    fn now(&self) -> Instant {
+        readiness::Selector.now()
+    }
+    async fn sleep_until(
+        &self,
+        deadline: Instant,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        readiness::Selector
+            .sleep_until(deadline, cancellation)
+            .await
     }
 }
 

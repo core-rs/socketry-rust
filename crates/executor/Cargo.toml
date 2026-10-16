@@ -38,6 +38,7 @@ signals = ["dep:signal-hook"]
 tokio = ["dep:tokio"]
 
 [dev-dependencies]
+tokio = { version = "1.53.1", features = ["test-util"] }
 libc = "0.2.189"
 futures-lite = "2.6.1"
 tempfile = "3"

@@ -17,7 +17,7 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::Instant;
 
 /// A reusable socket registration. Clones share one underlying registration.
 #[derive(Clone)]
@@ -226,8 +226,15 @@ async fn file_operation<B: IoBuf>(
 }
 
 impl Clock for Selector {
-    async fn sleep(&self, duration: Duration) {
-        async_io::Timer::after(duration).await;
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+    async fn sleep_until(
+        &self,
+        deadline: Instant,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        crate::scheduler::clock::native_sleep_until(deadline, cancellation).await
     }
 }
 

@@ -197,7 +197,7 @@ This list includes proposed extensions. The implemented `File` methods are `file
 
 An optional context pairing a scheduler reference with a cancellation signal could reduce repetitive arguments. Such a context should preserve explicit dependency and cancellation boundaries; it is a convenience, not a new computation abstraction.
 
-`Clock` supplies synchronous monotonic time access and cancellable timer futures, as specified below. Current `Clock::sleep` only accepts a duration and returns `()`; `now`, `sleep_until`, and cancellation-aware waits remain proposed.
+`Clock` supplies synchronous monotonic time access and cancellable timer futures, as specified below. `now`, `sleep_until(deadline, cancellation)`, and `sleep(duration, cancellation)` are implemented. Waits return `OperationResult<()>`.
 
 Ordinary async synchronization uses `Future`, `Poll::Pending`, and `Waker`. Channels, locks, and other primitives own their state and protect registration against lost wakeups; they do not need scheduler-specific `block` or `unblock` methods. This is separate from executing synchronous work on a blocking pool, which may warrant an optional scheduler capability.
 
@@ -213,16 +213,16 @@ let started = scheduler.now();
 let elapsed = scheduler.now().duration_since(started);
 ```
 
-Calling `Instant::now()` or an instant's `elapsed()` directly bypasses the scheduler's clock. The standard type permits those calls, so this is an interface convention rather than a type-enforced restriction. Deadline arithmetic should use `checked_add` and handle an unrepresentable deadline rather than relying on overflowing addition. The public error mapping for that case remains to be specified. Do not promise uniform behaviour across system suspend, which Rust leaves platform-dependent. See the [standard Instant contract](https://doc.rust-lang.org/std/time/struct.Instant.html).
+Calling `Instant::now()` or an instant's `elapsed()` directly bypasses the scheduler's clock. The standard type permits those calls, so this is an interface convention rather than a type-enforced restriction. Deadline arithmetic should use `checked_add` and handle an unrepresentable deadline rather than relying on overflowing addition. `sleep` reports an unrepresentable deadline as `OperationError::Io` with `ErrorKind::InvalidInput`; pre-cancellation takes precedence over arithmetic. Do not promise uniform behaviour across system suspend, which Rust leaves platform-dependent. See the [standard Instant contract](https://doc.rust-lang.org/std/time/struct.Instant.html).
 
 A simulated scheduler can choose an initial instant and advance an offset under test control. The Tokio adapter can obtain time from its selected runtime's clock and convert Tokio instants through `into_std` and `from_std`, preserving virtual-time behaviour when that runtime pauses or advances time. These conversions are supported by [Tokio's Instant](https://docs.rs/tokio/latest/tokio/time/struct.Instant.html). Deadlines and observations must belong to the same clock domain; sharing the standard value type does not make independently advancing simulated clocks interchangeable.
 
-`now` and `sleep_until` are the fundamental timer operations. `sleep(duration, cancellation)` is a convenience that can compute a deadline and delegate to `sleep_until`. The proposed timer contract is:
+`now` and `sleep_until` are the fundamental timer operations. `sleep(duration, cancellation)` is a convenience that can compute a deadline and delegate to `sleep_until`. The implemented timer contract is:
 
 - Timer futures are lazy. Relative sleep measures its duration from the first poll; an absolute deadline stays fixed regardless of when its future is first polled.
 - A successful wait completes at or after its deadline. Scheduling can delay resumption, and the interface does not promise precise execution at the deadline.
 - An already-cancelled signal returns `Cancelled` without registering a timer. Otherwise, a deadline already reached can complete immediately. Zero-duration sleep does not promise a scheduler yield.
-- Observed cancellation ends the timer wait with `OperationError::Cancelled`; it does not cancel the surrounding task.
+- Observed cancellation ends the timer wait with `OperationError::Cancelled`; it does not cancel the surrounding task. After registration, successful expiry wins if expiry and cancellation are observed in the same poll.
 - Dropping a timer future abandons the wait and safely releases its registration. Backend reclamation may be deferred, but racing wakeups must not access destroyed future state or a reused registration.
 - Completion returns `OperationResult<()>`; callers measure elapsed time separately through the scheduler.
 
@@ -240,7 +240,7 @@ Timeouts, intervals, retry policies, and callback scheduling are higher-level op
 
 ## High-level interface sketch
 
-The results and owned-buffer contracts below are implemented. The wider capability sketch includes proposed stateful file operations, syscall-oriented socket names and flags, and clock changes; consult the operation list above or the exported traits for the current subset. Pool, close/submission, and prepared-chain examples remain proposals.
+The results, owned-buffer, and clock contracts below are implemented. The wider capability sketch includes proposed stateful file operations and syscall-oriented socket names and flags; consult the operation list above or the exported traits for the current subset. Pool, close/submission, and prepared-chain examples remain proposals.
 
 ### Results and ownership
 
@@ -740,7 +740,7 @@ Remaining design work includes:
 1. **Resource lifecycle and wider I/O:** separate socket creation/options, stateful files, explicit close/submission, message I/O, and extension boundaries.
 2. **Blocking execution:** an optional public capability for synchronous closures, with bounded asynchronous admission, cancellation before execution, and completion once execution starts. Existing private blocking fallbacks do not expose this capability.
 3. **Backend retirement:** account for all accepted work, including future `_submit` jobs without application waiters. Application completion remains explicit through owned task handles; there is no implicit graceful join of all spawned work.
-4. **Clock integration:** implement the monotonic clock and cancellable deadline contract above using the independent timers crate where appropriate.
+4. **Timer engine integration:** the monotonic `Clock` and cancellable deadline contract are implemented. Native waits still use async-io, and the adapter uses its selected Tokio runtime, including paused time. Integrating `socketry-timers` into scheduler driving and parking remains separate work.
 
 Process creation/waiting and pipes remain useful optional extensions. Prepared linking, registered buffers, and pools remain separate later work.
 
@@ -780,6 +780,6 @@ The simulator has bounded in-memory file sizes and unbounded byte queues. It doe
 | Buffers | Unsafe `IoBuf`/`IoBufMut`, `Vec<u8>`, `Box<[u8]>`, and owned `BufferSlice` implemented. Registered leases and pools remain proposed. |
 | Buffer forwarding | `with_previous_buffer` is hypothetical, with no selected implementation target. |
 | Optimization | io_uring uses an unbounded command channel, a boxed request, and a completion channel per operation; pooling/backpressure pending. |
-| Timers | Independent `socketry-timers` implemented; scheduler integration pending. Existing `Clock::sleep(duration)` returns `()` without cancellation. Monotonic `now`, cancellable `sleep_until`/relative sleep, and deadline composition remain proposed. |
+| Timers | Monotonic `now`, cancellable `sleep_until`, and lazy relative `sleep` implemented on native and Tokio schedulers. Generic code can compose cooperative deadlines; no public timeout helper is added. Native timer-engine integration with independent `socketry-timers` remains pending. |
 
 The workspace's [architecture guide](../../context/design.md), [implementation guide](../../context/implementation.md), and [gaps](../../context/gaps.md) provide further context. The executor [README](readme.md) documents existing APIs.

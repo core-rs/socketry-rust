@@ -23,7 +23,7 @@ async fn within<ClockType: Clock, FutureType: Future>(
     future: FutureType,
 ) -> FutureType::Output {
     let mut future = pin!(future);
-    let mut timeout = pin!(clock.sleep(support::TIMEOUT));
+    let mut timeout = pin!(clock.sleep(support::TIMEOUT, &NEVER));
     poll_fn(|context| {
         if let Poll::Ready(output) = future.as_mut().poll(context) {
             return Poll::Ready(output);
@@ -339,7 +339,10 @@ mod native {
                 .io_wait(&client, Interest::Writable, &NEVER)
                 .await
                 .unwrap();
-            scheduler.sleep(std::time::Duration::ZERO).await;
+            scheduler
+                .sleep(std::time::Duration::ZERO, &NEVER)
+                .await
+                .unwrap();
         });
 
         let (registered_socket, _peer) = socket_pair();
@@ -348,7 +351,9 @@ mod native {
 
         let handle = scheduler.handle();
         let selector = handle.selector().unwrap();
-        scheduler.block_on(selector.sleep(std::time::Duration::ZERO));
+        scheduler
+            .block_on(selector.sleep(std::time::Duration::ZERO, &NEVER))
+            .unwrap();
         scheduler.block_on(within(&scheduler, positioned_files(&scheduler)));
     }
 
@@ -507,7 +512,10 @@ mod tokio_adapter {
                 let (result, buffer) = client_scheduler.io_read(&socket, vec![0; 1], &NEVER).await;
                 assert_eq!(result.unwrap(), 1);
                 assert_eq!(buffer, vec![42]);
-                client_scheduler.sleep(std::time::Duration::ZERO).await;
+                client_scheduler
+                    .sleep(std::time::Duration::ZERO, &NEVER)
+                    .await
+                    .unwrap();
                 assert!(tokio::runtime::Handle::try_current().is_err());
             })
             .unwrap();
@@ -626,7 +634,10 @@ mod tokio_adapter {
                 .io_wait(&client, Interest::Writable, &NEVER)
                 .await
                 .unwrap();
-            scheduler.sleep(std::time::Duration::ZERO).await;
+            scheduler
+                .sleep(std::time::Duration::ZERO, &NEVER)
+                .await
+                .unwrap();
 
             let (result, buffer) = scheduler.io_read(&client, Vec::new(), &NEVER).await;
             assert_eq!(result.unwrap(), 0);

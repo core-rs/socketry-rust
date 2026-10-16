@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Extend `Clock` with monotonic `now`, cancellable `sleep_until`, and relative `sleep(duration, cancellation)`. Preserve lazy waits and Tokio virtual time; report deadline overflow as `InvalidInput`.
+
 - Make task handles own execution lifetimes: moving a handle transfers ownership, while dropping it requests destruction after any active poll. Await explicitly for completion. Signal guards retain their subscription task handles.
 
 - Add associated file resources, `file_open`, portable `FileOptions`, TCP listener creation and address inspection. Move OS socket importing to `SocketRegistration`. Add `IoBuf`, `IoBufMut`, owned `BufferSlice` views and explicit file/socket cancellation with `OperationError`; return buffers only after backend access ends. The generic example now uses the public traits across native, Tokio, and simulated I/O.

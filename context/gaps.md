@@ -18,9 +18,9 @@ The executor does not expose a Barrier or require a group/owner argument. Librar
 
 ## 3. The I/O boundary is still narrow
 
-`Socket` covers TCP listener creation, address inspection, connect, accept, reads, writes, and readiness. OS-resource import is a separate `SocketRegistration` capability. `File` opens associated resources and borrows them for positioned I/O. File/socket operations support cancellation and owned buffer views. `Clock` currently supplies relative sleep.
+`Socket` covers TCP listener creation, address inspection, connect, accept, reads, writes, and readiness. OS-resource import is a separate `SocketRegistration` capability. `File` opens associated resources and borrows them for positioned I/O. File/socket operations support cancellation and owned buffer views. `Clock` supplies monotonic time and cancellable absolute and relative waits.
 
-General socket creation/options, DNS, deadlines, randomness, and processes remain outside the portable boundary. Ordinary synchronization uses futures and wakers above scheduler primitives. Expand capabilities as real consumers need them, keeping the application's implementation choice explicit. A broader boundary would also allow more operating-system behavior to be substituted in deterministic tests.
+General socket creation/options, DNS, randomness, and processes remain outside the portable boundary. Deadline policies can now compose `Clock` and cancellation; higher-level timeout helpers remain separate. Ordinary synchronization uses futures and wakers above scheduler primitives. Expand capabilities as real consumers need them, keeping the application's implementation choice explicit. A broader boundary would also allow more operating-system behavior to be substituted in deterministic tests.
 
 ## 4. The backends establish behavior before performance
 

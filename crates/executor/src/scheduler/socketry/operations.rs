@@ -9,7 +9,7 @@ use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketR
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
-use std::time::Duration;
+use std::time::Instant;
 
 fn check_open(closed: bool) -> io::Result<()> {
     if closed {
@@ -195,9 +195,16 @@ impl File for SchedulerHandle {
     }
 }
 impl Clock for SchedulerHandle {
-    async fn sleep(&self, duration: Duration) {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+    async fn sleep_until(
+        &self,
+        deadline: Instant,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
         // Timer progress is independent of selector initialization and ring support.
-        async_io::Timer::after(duration).await;
+        crate::scheduler::clock::native_sleep_until(deadline, cancellation).await
     }
 }
 impl SocketRegistration for Scheduler {
@@ -300,8 +307,15 @@ impl File for Scheduler {
     }
 }
 impl Clock for Scheduler {
-    async fn sleep(&self, duration: Duration) {
-        self.handle.sleep(duration).await;
+    fn now(&self) -> Instant {
+        self.handle.now()
+    }
+    async fn sleep_until(
+        &self,
+        deadline: Instant,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.handle.sleep_until(deadline, cancellation).await
     }
 }
 #[cfg(test)]

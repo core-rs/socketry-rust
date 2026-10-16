@@ -201,7 +201,7 @@ fn scheduler_and_handle_forward_network_file_and_clock_operations() {
         assert_eq!(result.unwrap(), 4);
         assert_eq!(buffer, b"test".to_vec());
 
-        handle.sleep(Duration::ZERO).await;
-        scheduler.sleep(Duration::ZERO).await;
+        handle.sleep(Duration::ZERO, &NEVER).await.unwrap();
+        scheduler.sleep(Duration::ZERO, &NEVER).await.unwrap();
     });
 }

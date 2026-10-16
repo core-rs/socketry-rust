@@ -90,7 +90,7 @@ assert_eq!(output, 42);
 
 Use a root signal for process shutdown and child signals for individual services. Keep the scheduler and runtime alive until task handles confirm draining is complete. The protected work must use cancellation inputs that allow cleanup to continue; the wrapper does not mask signals passed into its operations. Callback panics propagate, and dropping the wrapper still drops its work.
 
-These primitives do not change `Task::cancel` or scheduler shutdown, which still destroy futures. File and socket operations accept explicit cancellation inputs and return `OperationError::Cancelled` separately from OS errors. Clock cancellation remains proposed. Cooperative requests have no forced abort or deadline escalation; a process supervisor can enforce SIGTERM followed by SIGKILL.
+These primitives do not change `Task::cancel` or scheduler shutdown, which still destroy futures. File and socket operations accept explicit cancellation inputs and return `OperationError::Cancelled` separately from OS errors. Clock waits also accept explicit cancellation and return `OperationResult<()>`. Cooperative requests have no forced abort or deadline escalation; a process supervisor can enforce SIGTERM followed by SIGKILL.
 
 ## Signal notifications
 
@@ -149,7 +149,7 @@ Read/write operations take an owned `IoBuf` (`IoBufMut` for reads) and return `B
 
 `File::file_read_at` and `file_write_at` borrow `&Self::File` and take an explicit offset. `file_open(path, FileOptions, cancellation)` creates the associated resource. Current native/Tokio backends internally retain an `Arc<std::fs::File>`; generic callers do not require that representation. The readiness and Tokio implementations use blocking pools. Use ordinary files opened without append mode, and offsets fitting i64. Unix positioned operations leave the shared cursor unchanged; the Windows blocking fallback updates it according to std's seek\_read/seek\_write semantics.
 
-`Clock::sleep` uses async-io timers or Tokio timers. The independent `socketry-timers` crate implements the io-event timer algorithm; integration with the scheduler clock remains pending. There is no general public blocking-task API yet.
+`Clock::now()` returns a monotonic `std::time::Instant` in the selected scheduler's clock domain. `sleep_until(deadline, cancellation)` and `sleep(duration, cancellation)` return `OperationResult<()>`. Relative waits start on first poll; pre-cancelled waits do not register, even for elapsed deadlines. Overflow returns `InvalidInput`. After registration, expiry wins a same-poll cancellation race. Obtain time through the scheduler to preserve simulation and Tokio paused-time behaviour. Native waits use async-io timers; the adapter uses its selected Tokio runtime. The independent `socketry-timers` crate implements the io-event timer algorithm; integration with the scheduler clock remains pending. There is no general public blocking-task API yet.
 
 ### Cancellation and shutdown
 

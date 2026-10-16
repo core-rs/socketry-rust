@@ -34,6 +34,7 @@ fn expect_error<ResultType>(result: io::Result<ResultType>) -> io::Error {
 
 fn shared(runtime: &::tokio::runtime::Runtime) -> Arc<Shared> {
     Arc::new(Shared {
+        blocking: BlockingPool::new(BlockingOptions::default()),
         runtime: runtime.handle().clone(),
         closed: AtomicBool::new(false),
         registry: Mutex::new(Registry {
@@ -432,6 +433,7 @@ fn socket_write_waits_until_the_send_buffer_is_writable() {
 
     let (start_reader, wait_for_start) = mpsc::sync_channel(0);
     let (finish_reader, wait_for_finish) = mpsc::sync_channel(0);
+    let (first_read, wait_for_first_read) = mpsc::channel();
     let reader = thread::spawn(move || {
         wait_for_start.recv().unwrap();
         let mut buffer = [0; 64 * 1024];
@@ -444,7 +446,12 @@ fn socket_write_waits_until_the_send_buffer_is_writable() {
 
             match server.read(&mut buffer) {
                 Ok(0) => break,
-                Ok(count) => total += count,
+                Ok(count) => {
+                    if total == 0 {
+                        first_read.send(()).unwrap();
+                    }
+                    total += count;
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(1));
                 }
@@ -468,6 +475,10 @@ fn socket_write_waits_until_the_send_buffer_is_writable() {
         assert_eq!(buffer, [42]);
     });
 
+    // Kernel buffering can complete the write before the reader gets CPU time. Observe an actual read before asking it to stop.
+    wait_for_first_read
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap();
     finish_reader.send(()).unwrap();
     assert!(reader.join().unwrap() > 0);
 }

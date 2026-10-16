@@ -7,6 +7,11 @@
 //! Task handles own execution lifetimes; dropping one abandons its task.
 #![doc = include_str!("../readme.md")]
 
+mod blocking;
+mod blocking_error;
+mod blocking_options;
+mod blocking_pool;
+mod blocking_task;
 mod buffer_slice;
 mod cancellation;
 mod cancelled;
@@ -23,6 +28,10 @@ mod spawn;
 mod task;
 mod worker;
 
+pub use blocking::Blocking;
+pub use blocking_error::BlockingError;
+pub use blocking_options::BlockingOptions;
+pub use blocking_task::BlockingTask;
 pub use buffer_slice::BufferSlice;
 pub use cancellation::Cancellation;
 pub use cancelled::Cancelled;

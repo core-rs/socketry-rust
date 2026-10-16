@@ -87,9 +87,9 @@ impl Drop for TaskScope {
 /// A task ended without producing its normal output.
 #[derive(Debug)]
 pub enum TaskError {
-    /// Cancellation was observed before a poll, and the future was destroyed.
+    /// The future was destroyed or the blocking closure was skipped before execution.
     Cancelled,
-    /// Polling panicked. The original payload is retained for the caller.
+    /// Polling a future or executing a blocking closure panicked. The original payload is retained for the caller.
     Panicked(Box<dyn Any + Send + 'static>),
 }
 

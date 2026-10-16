@@ -53,6 +53,12 @@ Higher-level groups can be built above dispatch. The executor does not provide a
 
 Use owned, `'static` futures for independently spawned tasks initially. A parent-child relationship alone does not make borrowing a parent's local variables safe. Scoped borrowing requires a separate lifetime design that remains sound when futures or handles are dropped or forgotten.
 
+### Blocking execution
+
+`Blocking` is an optional scheduler capability for synchronous closures, delegating queue and worker management to an internal dedicated pool. Generic libraries still receive a scheduler. `spawn_blocking(operation, cancellation).await` waits for bounded admission and returns an owning handle; awaiting that handle observes completion. Both closure and result are `Send + 'static`.
+
+The pool bounds queued plus running jobs. Cancellation or dropping the handle can skip queued work, but started closures retain their inputs and capacity until they return. Scheduler shutdown closes admission and discards queued jobs without joining running closures. Graceful callers request cooperation and explicitly await jobs before dropping services. There is no forced interruption. Native and Tokio implementations share the pool implementation, with a separately configured pool per scheduler; file-I/O fallbacks stay separate initially.
+
 ### Cleanup in a future executor
 
 Ordinary Drop cannot await asynchronous cleanup. Task handles provide explicit completion tracking while the scheduler remains alive and continues polling. Any higher-level group must define how its caller confirms draining; dropping a group alone cannot promise completion on other workers.

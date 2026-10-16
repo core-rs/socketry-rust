@@ -11,7 +11,7 @@ The [executor design](design.md) records the agreed direction for cooperative ca
 - `scheduler.spawn(future)` registers an owned task and schedules it immediately.
 - `handle.await` returns `Result<Output, TaskError>`.
 - `scheduler.block_on(future)` polls a root future on the calling thread. This root can borrow local data and need not be Send. It is not a spawned task.
-- `scheduler.run()` waits until all owned tasks finish; it leaves admission open.
+- `scheduler.run()` waits until all owned future tasks finish; it leaves admission open. Await blocking jobs explicitly.
 - `scheduler.shutdown()` closes admission, cancels tasks and joins workers.
 
 ```rust
@@ -37,6 +37,36 @@ Workers poll pinned `Send + 'static` futures on ordinary thread stacks. A task m
 `Scheduler::current()` returns a scheduler handle on workers and within a `block_on` root. `Task::current()` returns the task being polled or destroyed; it returns None at the root. `Task` references are thread-safe and support identity and cancellation. They do not keep the task executing.
 
 Blocking scheduler entry points panic on worker threads. Ordinary blocking system calls still block a worker, and CPU-intensive code must yield explicitly.
+
+## Blocking work
+
+Use `Blocking::spawn_blocking` for an owned synchronous closure that should run on a dedicated thread. Both schedulers and their handles implement this optional capability; generic libraries can require `S: Blocking`.
+
+```rust
+use socketry_executor::{BlockingOptions, Cancellation, Scheduler};
+
+let scheduler = Scheduler::with_workers_and_blocking(
+    2,
+    BlockingOptions { threads: 4, capacity: 64 },
+)?;
+let shutdown = Cancellation::new();
+let input = String::from("owned by the blocking job");
+scheduler.block_on(async {
+    // This await suspends until there is room for the job.
+    let job = scheduler.spawn_blocking(move || input.len(), &shutdown).await?;
+    // This await receives the closure's result.
+    let length = job.await?;
+    assert!(length > 0);
+    Ok::<(), Box<dyn std::error::Error>>(())
+})?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Admission is lazy and cancellable. The default pool has four threads and capacity for 64 queued plus running jobs; both configurable limits must be nonzero. Threads start on first admission. Waiters use wakeups, and future workers remain available while synchronous jobs execute. The Tokio adapter configures its dedicated pool through `Scheduler::with_blocking(runtime_handle, options)`.
+
+Moving a job handle transfers ownership. Dropping it requests skipping if still queued; cancellation is checked again immediately before execution. Queued cancellation can wait for a worker to reach the job. Once running, a closure retains its inputs and capacity until it finishes and returns its actual result. For cooperation during execution, capture a clone of `shutdown` and check it inside the closure. Panics become `TaskError::Panicked`.
+
+Scheduler shutdown rejects new admission and discards queued jobs. Started closures finish independently, without a thread join or forced interruption. For graceful shutdown, request cancellation and await job handles before dropping the scheduler or services they use. `Scheduler::run()` does not wait for independent blocking jobs. Existing file-I/O fallbacks retain their backend pools.
 
 ## Queues and affinity
 
@@ -149,7 +179,7 @@ Read/write operations take an owned `IoBuf` (`IoBufMut` for reads) and return `B
 
 `File::file_read_at` and `file_write_at` borrow `&Self::File` and take an explicit offset. `file_open(path, FileOptions, cancellation)` creates the associated resource. Current native/Tokio backends internally retain an `Arc<std::fs::File>`; generic callers do not require that representation. The readiness and Tokio implementations use blocking pools. Use ordinary files opened without append mode, and offsets fitting i64. Unix positioned operations leave the shared cursor unchanged; the Windows blocking fallback updates it according to std's seek\_read/seek\_write semantics.
 
-`Clock::now()` returns a monotonic `std::time::Instant` in the selected scheduler's clock domain. `sleep_until(deadline, cancellation)` and `sleep(duration, cancellation)` return `OperationResult<()>`. Relative waits start on first poll; pre-cancelled waits do not register, even for elapsed deadlines. Overflow returns `InvalidInput`. After registration, expiry wins a same-poll cancellation race. Obtain time through the scheduler to preserve simulation and Tokio paused-time behaviour. Native waits use async-io timers; the adapter uses its selected Tokio runtime. The independent `socketry-timers` crate implements the io-event timer algorithm; integration with the scheduler clock remains pending. There is no general public blocking-task API yet.
+`Clock::now()` returns a monotonic `std::time::Instant` in the selected scheduler's clock domain. `sleep_until(deadline, cancellation)` and `sleep(duration, cancellation)` return `OperationResult<()>`. Relative waits start on first poll; pre-cancelled waits do not register, even for elapsed deadlines. Overflow returns `InvalidInput`. After registration, expiry wins a same-poll cancellation race. Obtain time through the scheduler to preserve simulation and Tokio paused-time behaviour. Native waits use async-io timers; the adapter uses its selected Tokio runtime. The independent `socketry-timers` crate implements the io-event timer algorithm; integration with the scheduler clock remains pending. The independent `Blocking` capability supplies general synchronous jobs as described above.
 
 ### Cancellation and shutdown
 

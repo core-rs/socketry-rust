@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `Blocking::spawn_blocking` with cancellable bounded admission and owning completion handles. Native and Tokio schedulers use configurable dedicated pools; queued work can be cancelled, while started closures retain their inputs and finish independently.
+
 - Extend `Clock` with monotonic `now`, cancellable `sleep_until`, and relative `sleep(duration, cancellation)`. Preserve lazy waits and Tokio virtual time; report deadline overflow as `InvalidInput`.
 
 - Add commented echo client and server examples, demonstrating owned buffers, partial transfers, and cooperative SIGINT shutdown.

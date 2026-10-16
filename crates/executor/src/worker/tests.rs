@@ -5,7 +5,6 @@ use super::{
     IdleSearch, SearchResult, WorkerState, classify_search, finish_idle_search, search_result,
     take_idle_runnable, take_stolen,
 };
-use crate::owner::Owner;
 use crate::task::{Runnable, TaskState, UNASSIGNED_WORKER};
 use crossbeam_deque::{Steal, Worker};
 use std::sync::Arc;
@@ -21,7 +20,6 @@ fn runnable() -> Runnable {
     let state = Arc::new(TaskState {
         identifier: 0,
         scheduler: Weak::new(),
-        owner: Arc::new(Owner::new()),
         cancelled: AtomicBool::new(false),
         finished: AtomicBool::new(false),
         worker: AtomicUsize::new(UNASSIGNED_WORKER),

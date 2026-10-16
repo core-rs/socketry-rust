@@ -1,7 +1,6 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use crate::owner::Owner;
 use crate::scheduler::{SchedulerHandle, Shared};
 use pin_project_lite::pin_project;
 use std::any::Any;
@@ -20,7 +19,6 @@ pub(crate) type Runnable = async_task::Runnable<Arc<TaskState>>;
 pub(crate) struct TaskState {
     pub(crate) identifier: u64,
     pub(crate) scheduler: Weak<Shared>,
-    pub(crate) owner: Arc<Owner>,
     pub(crate) cancelled: AtomicBool,
     pub(crate) finished: AtomicBool,
     pub(crate) worker: AtomicUsize,
@@ -108,9 +106,10 @@ impl std::error::Error for TaskError {}
 
 /// An awaitable result of an owned task.
 ///
-/// Dropping this handle abandons the result; the scheduler or barrier continues
-/// owning the task. Use `cancel().await` to request and wait for cancellation.
-#[must_use = "await the task to observe its result, or explicitly drop the handle"]
+/// The handle owns the task lifetime. Moving it transfers that ownership.
+/// Dropping it requests destruction once any active poll returns; it does not
+/// wait or run asynchronous cleanup. Await the handle to observe completion.
+#[must_use = "await or retain the task; dropping its handle abandons execution"]
 pub struct TaskHandle<Output> {
     pub(crate) inner: Option<async_task::FallibleTask<Result<Output, TaskError>, Arc<TaskState>>>,
     pub(crate) task: Task,
@@ -162,6 +161,8 @@ impl<Output> Future for TaskHandle<Output> {
 impl<Output> Drop for TaskHandle<Output> {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
+            self.task.cancel();
+            // The registry retains execution until cancellation is observed.
             inner.detach();
         }
     }

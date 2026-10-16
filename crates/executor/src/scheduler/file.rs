@@ -1,62 +1,38 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Blocking positioned file operations shared by selector adapters.
-use std::fs::File;
-use std::io;
+use crate::{BufferResult, Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult};
+use std::{future::Future, path::Path};
 
-pub(crate) fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
-    if offset > i64::MAX as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "file offset exceeds i64::MAX",
-        ));
-    }
-    let operation = || {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            file.read_at(buffer, offset)
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::FileExt;
-            file.seek_read(buffer, offset)
-        }
-    };
-    retry_interrupted(operation)
+/// Regular-file creation and positioned operations through the chosen scheduler.
+/// The backend chooses its resource representation and retains resources used
+/// by accepted operations even when the waiting future is destroyed.
+///
+/// Offsets must fit in i64. Unix leaves the shared cursor unchanged; the current
+/// Windows fallback uses std seek_read/seek_write and changes that cursor.
+/// Cancellation before execution prevents I/O. Once a blocking call starts,
+/// completion can win cancellation; buffers are returned only after access ends.
+pub trait File: Send + Sync {
+    type File: Send + Sync;
+
+    fn file_open(
+        &self,
+        path: &Path,
+        options: FileOptions,
+        cancellation: &Cancellation,
+    ) -> impl Future<Output = OperationResult<Self::File>> + Send;
+    fn file_read_at<B: IoBufMut>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        offset: u64,
+        cancellation: &Cancellation,
+    ) -> impl Future<Output = BufferResult<B>> + Send;
+    fn file_write_at<B: IoBuf>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        offset: u64,
+        cancellation: &Cancellation,
+    ) -> impl Future<Output = BufferResult<B>> + Send;
 }
-
-pub(crate) fn write_at(file: &File, buffer: &[u8], offset: u64) -> io::Result<usize> {
-    if offset > i64::MAX as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "file offset exceeds i64::MAX",
-        ));
-    }
-    let operation = || {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            file.write_at(buffer, offset)
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::FileExt;
-            file.seek_write(buffer, offset)
-        }
-    };
-    retry_interrupted(operation)
-}
-
-fn retry_interrupted(mut operation: impl FnMut() -> io::Result<usize>) -> io::Result<usize> {
-    loop {
-        match operation() {
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            result => return result,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests;

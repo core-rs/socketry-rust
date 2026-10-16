@@ -2,7 +2,7 @@
 
 Foundational concurrency APIs for Rust projects in the Socketry ecosystem.
 
-The `socketry` package re-exports `socketry-executor`: owned asynchronous tasks, explicit child barriers, and a futures executor with multiple workers and work stealing. Tasks use ordinary future polling and have no private coroutine stacks.
+The `socketry` package re-exports `socketry-executor`: owned asynchronous tasks and a futures executor with multiple workers and work stealing. Tasks use ordinary future polling and have no private coroutine stacks.
 
 ## Usage
 
@@ -26,9 +26,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Workers start when the scheduler is constructed. `spawn` accepts `Send + 'static` futures and returns an awaitable result handle. Dropping that handle leaves the task owned by its scheduler or barrier. Dropping the scheduler requests cancellation and joins workers when called outside a worker.
+Workers start when the scheduler is constructed. `spawn` accepts `Send + 'static` futures and returns an owning task handle. Moving it transfers ownership; dropping it requests task destruction after any active poll returns. Dropping the scheduler requests cancellation and joins workers when called outside a worker.
 
-Use `scheduler.barrier()` to own children explicitly. Both schedulers and barriers implement `Spawn`. `barrier.wait().await` waits for completion; `barrier.stop().await` closes the barrier, cancels children, and waits for their synchronous destructors. Dropping a barrier requests cancellation without waiting. Observe individual results and panics through task handles.
+Schedulers and their handles implement the primitive `Spawn` contract. Await individual task handles to observe completion, results, and panics. Task groups can be built above dispatch; the executor does not provide a group abstraction.
 
 `Scheduler::current()` and `Task::current()` provide contextual lookup while tasks run. Use `.await` to suspend; synchronous blocking calls occupy a worker.
 
@@ -38,9 +38,59 @@ See the [executor package](crates/executor/readme.md) for scheduling, ownership,
 cargo run --package socketry-executor --example work_stealing
 ```
 
+## Cooperative cancellation
+
+`Cancellation` signals a shutdown request without destroying futures. Clones share the request; `child()` creates a boundary that receives parent cancellation without cancelling its parent or siblings. Use one root for application shutdown and children for independently stoppable services. Dropping a signal does not cancel it.
+
+Work can await `signal.cancelled()` or use `signal.check()` at explicit cancellation points, returning `Cancelled`. Waiting uses wakers and does not busy-wait. `Cancellation::never()` supplies an allocation-free input for work that cannot be cancelled through its signal.
+
+`defer_cancel(&signal, future, on_cancel)` calls the synchronous callback once when cancellation is observed and continues awaiting the future's normal output. The callback requests graceful shutdown; the future performs asynchronous draining. These primitives work with standard futures on Socketry or Tokio, without a runtime dependency.
+
+```rust
+use socketry::{Cancellation, Scheduler, defer_cancel, yield_now};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let scheduler = Scheduler::with_workers(2)?;
+    let shutdown = Cancellation::new();
+    let server_shutdown = shutdown.child();
+    let server = scheduler.spawn(async move {
+        let drain = Cancellation::new();
+        defer_cancel(&server_shutdown, async {
+            drain.cancelled().await;
+            // Finish accepted work while the scheduler remains available.
+            yield_now().await;
+            42
+        }, || { drain.cancel(); }).await
+    })?;
+
+    shutdown.cancel(); // Request shutdown after receiving a process signal.
+    assert_eq!(scheduler.block_on(server)?, 42);
+    scheduler.shutdown();
+    Ok(())
+}
+```
+
+Cancellation expresses intent; task handles confirm completion. Keep the scheduler and I/O services alive while draining. Existing task cancellation and scheduler shutdown still destroy futures; `defer_cancel` cannot protect a future from destruction. File and socket operations take explicit cancellation inputs; clock cancellation remains proposed. There is no signal escalation policy: an external supervisor can enforce SIGTERM followed by SIGKILL.
+
+The optional `signals` feature adds Unix `Signals::signal_notify(&signals, target)` to both scheduler implementations. Targets implement `Notify<Value>`: pass a `Cancellation` for shutdown or an unbounded channel sender for queued events such as reload requests. Keep the returned `SignalRegistration` alive and drop it to unsubscribe; already-admitted callbacks may finish. Callbacks run outside raw signal handlers. See the executor's [signal notification contract](crates/executor/readme.md#signal-notifications) for examples, lifetime rules, and process-wide signal disposition behavior.
+
 ## Portable I/O and runtime selection
 
-Generic code can accept `Network`, `FileIo`, `Clock`, and `Spawn` capabilities. Socketry and the optional Tokio adapter implement these contracts with concrete future and resource types. Import the traits to call their methods.
+Generic code can accept `Socket`, `File`, `Clock`, and `Spawn` capabilities. Socketry and the optional Tokio adapter implement these contracts with concrete future and resource types. Import the traits to call their methods.
+
+`File` is the scheduler capability trait; `File::File` is its associated resource type. Generic code can create and use files without importing OS resource types:
+
+```rust
+use socketry::{Cancellation, File, FileOptions, OperationResult};
+use std::path::Path;
+
+async fn read_prefix<S: File>(scheduler: &S, path: &Path, cancellation: &Cancellation) -> OperationResult<Vec<u8>> {
+    let file = scheduler.file_open(path, FileOptions::READ, cancellation).await?;
+    let (result, mut buffer) = scheduler.file_read_at(&file, vec![0; 4096], 0, cancellation).await;
+    buffer.truncate(result?);
+    Ok(buffer)
+}
+```
 
 | Cargo configuration | Implementation |
 | --- | --- |
@@ -50,7 +100,7 @@ Generic code can accept `Network`, `FileIo`, `Clock`, and `Spawn` capabilities. 
 | `default-features = false, features = ["tokio"]` | Tokio adapter without Socketry's native I/O dependencies. |
 | `default-features = false` | Task executor and portable contracts, without I/O implementations. |
 
-Socket registrations persist across operations and worker migration. Reads and writes take a reusable owned `Vec<u8>` and return `(io::Result<usize>, Vec<u8>)`. Reads fill the buffer's existing length; allocate it with `vec![0; capacity]`. Operations may transfer fewer bytes than requested. Dropping a future can abandon an operation that has already consumed or transmitted bytes.
+Socket registrations persist across operations and worker migration. Reads and writes accept owned `IoBuf`/`IoBufMut` storage and return `(OperationResult<usize>, B)`, preserving buffers on cancellation and errors. `Vec<u8>`, `Box<[u8]>`, and owned slice views are supported. Reads fill the buffer's existing length; allocate it with `vec![0; capacity]`. Operations may transfer fewer bytes than requested. Dropping a future can abandon an operation that has already consumed or transmitted bytes.
 
 Run the same TCP exchange with either runtime:
 
@@ -61,7 +111,7 @@ cargo run -p socketry-executor --example portable_io --no-default-features --fea
 cargo run -p socketry-executor --example portable_io --features io-uring
 ```
 
-The Tokio adapter needs a live runtime with I/O and time enabled. It preserves explicit task/barrier ownership, and its asynchronous `shutdown().await` joins task destruction. Passing its handle explicitly selects Tokio; Socketry's `Scheduler::current()` continues to identify Socketry execution.
+The Tokio adapter needs a live runtime with I/O and time enabled. Its task handles preserve transferable execution ownership, and its asynchronous `shutdown().await` joins task destruction. Passing its handle explicitly selects Tokio; Socketry's `Scheduler::current()` continues to identify Socketry execution.
 
 ## Current scope
 

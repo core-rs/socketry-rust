@@ -1,6 +1,8 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+static NEVER: crate::Cancellation = crate::Cancellation::never();
+
 use super::*;
 use std::future::ready;
 use std::io::Read;
@@ -39,24 +41,23 @@ fn shared(runtime: &::tokio::runtime::Runtime) -> Arc<Shared> {
             next_identifier: 0,
             tasks: HashMap::new(),
         }),
-        root: Arc::new(Owner::new()),
+        remaining: AtomicUsize::new(0),
+        completion: Event::new(),
     })
 }
 
-fn task_state(owner: Arc<Owner>, cancelled: bool) -> Arc<TaskState> {
+fn task_state(cancelled: bool) -> Arc<TaskState> {
     Arc::new(TaskState {
-        owner,
         cancelled: AtomicBool::new(cancelled),
     })
 }
 
 #[test]
-fn completion_removes_registration_and_notifies_owner() {
+fn completion_removes_registration_and_notifies_scheduler() {
     let runtime = runtime();
     let shared = shared(&runtime);
-    let owner = Arc::new(Owner::new());
-    owner.remaining.store(1, Ordering::Release);
-    let state = task_state(Arc::clone(&owner), false);
+    shared.remaining.store(1, Ordering::Release);
+    let state = task_state(false);
     shared.registry.lock().unwrap().tasks.insert(
         7,
         Registration {
@@ -72,39 +73,37 @@ fn completion_removes_registration_and_notifies_owner() {
     });
 
     assert!(shared.registry.lock().unwrap().tasks.is_empty());
-    assert!(owner.is_empty());
+    assert_eq!(shared.remaining.load(Ordering::Acquire), 0);
 }
 
 #[test]
-fn completion_notifies_owner_after_scheduler_is_gone() {
+fn completion_is_safe_after_scheduler_is_gone() {
     let runtime = runtime();
     let shared = shared(&runtime);
-    let owner = Arc::new(Owner::new());
-    owner.remaining.store(1, Ordering::Release);
+    shared.remaining.store(1, Ordering::Release);
     let completion = Completion {
         scheduler: Arc::downgrade(&shared),
         identifier: 7,
-        state: task_state(Arc::clone(&owner), false),
+        state: task_state(false),
     };
     drop(shared);
 
     drop(completion);
-
-    assert!(owner.is_empty());
 }
 
 #[test]
 fn tracked_future_does_not_poll_after_cancellation() {
-    let owner = Arc::new(Owner::new());
-    owner.remaining.store(1, Ordering::Release);
-    let state = task_state(Arc::clone(&owner), true);
+    let runtime = runtime();
+    let shared = shared(&runtime);
+    shared.remaining.store(1, Ordering::Release);
+    let state = task_state(true);
     let mut context = Context::from_waker(Waker::noop());
 
     {
         let mut future = Box::pin(TrackedFuture {
             future: ready(42),
             completion: Completion {
-                scheduler: Weak::new(),
+                scheduler: Arc::downgrade(&shared),
                 identifier: 0,
                 state,
             },
@@ -114,7 +113,7 @@ fn tracked_future_does_not_poll_after_cancellation() {
             Poll::Ready(Err(TaskError::Cancelled))
         ));
     }
-    assert!(owner.is_empty());
+    assert_eq!(shared.remaining.load(Ordering::Acquire), 0);
 }
 
 #[test]
@@ -125,18 +124,6 @@ fn delayed_abort_respects_an_earlier_cancellation_request() {
     abort_if_cancelled(true, || task.abort());
 
     assert!(runtime.block_on(task).is_err());
-}
-
-#[test]
-fn close_without_cancellation_only_closes_admission() {
-    let runtime = runtime();
-    let shared = shared(&runtime);
-    let owner = Arc::new(Owner::new());
-
-    shared.close(Some(&owner), false);
-
-    assert!(owner.closed.load(Ordering::Acquire));
-    assert!(!shared.closed.load(Ordering::Acquire));
 }
 
 #[test]
@@ -200,15 +187,13 @@ fn shutdown_cancels_a_task_registered_before_tokio_spawn() {
     let runtime = runtime();
     let scheduler = Scheduler::new(runtime.handle().clone());
     let shared = Arc::clone(&scheduler.handle.shared);
-    let owner = Arc::new(Owner::new());
     let (registered, wait_for_registration) = mpsc::sync_channel(0);
     let (resume, wait_to_resume) = mpsc::sync_channel(0);
 
     let spawning = {
         let shared = Arc::clone(&shared);
-        let owner = Arc::clone(&owner);
         thread::spawn(move || {
-            shared.spawn_with_registration_hook(&owner, std::future::pending::<()>(), || {
+            shared.spawn_with_registration_hook(std::future::pending::<()>(), || {
                 registered.send(()).unwrap();
                 wait_to_resume.recv().unwrap();
             })
@@ -220,10 +205,12 @@ fn shutdown_cancels_a_task_registered_before_tokio_spawn() {
         let registry = shared.registry.lock().unwrap();
         let registration = registry.tasks.values().next().unwrap();
         assert!(registration.abort.is_none());
-        assert!(!owner.is_empty());
+        assert_eq!(shared.remaining.load(Ordering::Acquire), 1);
     }
 
-    shared.close(None, true);
+    let mut shutdown = Box::pin(scheduler.shutdown());
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(shutdown.as_mut().poll(&mut context).is_pending());
 
     assert!(shared.closed.load(Ordering::Acquire));
     assert!(
@@ -246,8 +233,9 @@ fn shutdown_cancels_a_task_registered_before_tokio_spawn() {
         Err(error) => panic!("task registration failed: {error}"),
     };
 
+    runtime.block_on(shutdown);
     assert!(matches!(runtime.block_on(task), Err(TaskError::Cancelled)));
-    assert!(owner.is_empty());
+    assert_eq!(shared.remaining.load(Ordering::Acquire), 0);
 }
 
 #[test]
@@ -324,7 +312,7 @@ fn poisoned_file_buffers_are_recovered_for_operations_and_return() {
     assert_eq!(
         with_file_buffer(&buffer, |buffer| {
             buffer.push(2);
-            Ok(buffer.len())
+            Ok::<_, io::Error>(buffer.len())
         })
         .unwrap(),
         2
@@ -466,7 +454,7 @@ fn socket_write_waits_until_the_send_buffer_is_writable() {
         total
     });
 
-    let mut write = Box::pin(handle.io_write(&socket, vec![42]));
+    let mut write = Box::pin(handle.io_write(&socket, vec![42], &NEVER));
     runtime.block_on(async {
         std::future::poll_fn(|context| {
             assert!(write.as_mut().poll(context).is_pending());
@@ -509,9 +497,12 @@ fn write_returns_readiness_errors_and_non_retryable_errors() {
 #[test]
 fn file_operation_results_preserve_errors_and_resume_panics() {
     let runtime = runtime();
-    assert_eq!(file_operation_result(Ok(Ok(42))).unwrap(), 42);
     assert_eq!(
-        file_operation_result::<usize>(Ok(Err(io::Error::other("file failed"))))
+        file_operation_result::<_, io::Error>(Ok(Ok(42))).unwrap(),
+        42
+    );
+    assert_eq!(
+        file_operation_result::<usize, io::Error>(Ok(Err(io::Error::other("file failed"))))
             .unwrap_err()
             .to_string(),
         "file failed"
@@ -521,7 +512,7 @@ fn file_operation_results_preserve_errors_and_resume_panics() {
     cancelled.abort();
     let cancelled = runtime.block_on(cancelled).unwrap_err();
     assert_eq!(
-        file_operation_result::<usize>(Err(cancelled))
+        file_operation_result::<usize, io::Error>(Err(cancelled))
             .unwrap_err()
             .kind(),
         io::ErrorKind::Interrupted
@@ -531,8 +522,128 @@ fn file_operation_results_preserve_errors_and_resume_panics() {
     let panicked = runtime.block_on(panicked).unwrap_err();
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            file_operation_result::<usize>(Err(panicked))
+            file_operation_result::<usize, io::Error>(Err(panicked))
         }))
         .is_err()
     );
+}
+
+#[test]
+fn polling_restores_the_previous_scheduler_context() {
+    let runtime = runtime();
+    let previous = shared(&runtime);
+    let current = shared(&runtime);
+    current.remaining.store(1, Ordering::Release);
+    let _scope =
+        SchedulerScope(CURRENT_SCHEDULER.with(|value| value.replace(Arc::downgrade(&previous))));
+    let mut future = Box::pin(TrackedFuture {
+        future: std::future::poll_fn(|_| {
+            assert!(
+                CURRENT_SCHEDULER
+                    .with(|value| Weak::ptr_eq(&value.borrow(), &Arc::downgrade(&current)))
+            );
+            Poll::Ready(42)
+        }),
+        completion: Completion {
+            scheduler: Arc::downgrade(&current),
+            identifier: 0,
+            state: task_state(false),
+        },
+    });
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(matches!(
+        future.as_mut().poll(&mut context),
+        Poll::Ready(Ok(42))
+    ));
+    assert!(
+        CURRENT_SCHEDULER.with(|value| Weak::ptr_eq(&value.borrow(), &Arc::downgrade(&previous)))
+    );
+}
+
+#[test]
+fn shutdown_waits_for_all_task_destructors_even_without_result_handles() {
+    struct CountDrop(Arc<AtomicUsize>);
+    impl Drop for CountDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Release);
+        }
+    }
+    let runtime = runtime();
+    let scheduler = Scheduler::new(runtime.handle().clone());
+    let dropped = Arc::new(AtomicUsize::new(0));
+    for _ in 0..100 {
+        let guard = CountDrop(Arc::clone(&dropped));
+        drop(
+            scheduler
+                .spawn(async move {
+                    let _guard = guard;
+                    std::future::pending::<()>().await;
+                })
+                .unwrap(),
+        );
+    }
+    runtime.block_on(scheduler.shutdown());
+    assert_eq!(dropped.load(Ordering::Acquire), 100);
+}
+
+#[test]
+fn a_task_can_shut_down_another_scheduler_on_the_same_runtime() {
+    let runtime = runtime();
+    let first = Scheduler::new(runtime.handle().clone());
+    let second = Scheduler::new(runtime.handle().clone());
+    let task = first.spawn(async move { second.shutdown().await }).unwrap();
+    runtime.block_on(task).unwrap();
+    runtime.block_on(first.shutdown());
+}
+
+#[test]
+fn cancelling_queued_blocking_work_preserves_buffers_and_prevents_creation() {
+    let runtime = ::tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    let scheduler = Scheduler::new(runtime.handle().clone());
+    let handle = scheduler.handle();
+    let (started, waiting) = std::sync::mpsc::channel();
+    let (release, blocked) = std::sync::mpsc::channel();
+    let blocker = runtime.spawn_blocking(move || {
+        started.send(()).unwrap();
+        blocked
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+    });
+    waiting
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cancelled-open");
+    let file = Arc::new(tempfile::tempfile().unwrap());
+    let cancellation = Cancellation::new();
+    runtime.block_on(async {
+        let buffer = vec![42; 4];
+        let allocation = buffer.as_ptr();
+        let mut write = Box::pin(handle.file_write_at(&file, buffer, 0, &cancellation));
+        let mut open = Box::pin(handle.file_open(&path, FileOptions::CREATE, &cancellation));
+        std::future::poll_fn(|context| {
+            assert!(write.as_mut().poll(context).is_pending());
+            assert!(open.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        cancellation.cancel();
+        release.send(()).unwrap();
+        let (result, buffer) = write.await;
+        assert!(matches!(result, Err(crate::OperationError::Cancelled(_))));
+        assert_eq!(buffer.as_ptr(), allocation);
+        assert_eq!(buffer, vec![42; 4]);
+        assert!(matches!(
+            open.await,
+            Err(crate::OperationError::Cancelled(_))
+        ));
+        blocker.await.unwrap();
+    });
+    assert!(!path.exists());
+    assert_eq!(file.metadata().unwrap().len(), 0);
+    runtime.block_on(scheduler.shutdown());
 }

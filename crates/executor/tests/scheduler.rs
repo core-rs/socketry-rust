@@ -131,22 +131,19 @@ fn wake_during_poll_is_retained_without_concurrent_polling() {
 }
 
 #[test]
-fn dropped_join_handle_leaves_task_owned_by_scheduler() {
+fn dropping_an_unfinished_handle_releases_its_captures() {
     let scheduler = Scheduler::with_workers(1).unwrap();
-    let completed = Arc::new(AtomicUsize::new(0));
-    for _ in 0..100 {
-        let completed = Arc::clone(&completed);
-        drop(
-            scheduler
-                .spawn(async move {
-                    yield_now().await;
-                    completed.fetch_add(1, Ordering::SeqCst);
-                })
-                .unwrap(),
-        );
-    }
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let guard = CountDrop(dropped.clone());
+    let task = scheduler
+        .spawn(async move {
+            let _guard = guard;
+            pending::<()>().await;
+        })
+        .unwrap();
+    drop(task);
     scheduler.run();
-    assert_eq!(completed.load(Ordering::SeqCst), 100);
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -167,10 +164,11 @@ fn shutdown_drops_pending_futures_and_closes_surviving_handles() {
     let scheduler = Scheduler::with_workers(2).unwrap();
     let handle = scheduler.handle();
     let dropped = Arc::new(AtomicUsize::new(0));
+    let mut tasks = Vec::new();
     for _ in 0..100 {
         let guard = CountDrop(Arc::clone(&dropped));
         let retained_handle = handle.clone();
-        drop(
+        tasks.push(
             scheduler
                 .spawn(async move {
                     let _guard = guard;
@@ -190,14 +188,12 @@ fn scheduler_can_be_dropped_by_its_own_task() {
     let scheduler = Scheduler::with_workers(2).unwrap();
     let handle = scheduler.handle();
     let (sender, receiver) = mpsc::channel();
-    drop(
-        handle
-            .spawn(async move {
-                drop(scheduler);
-                sender.send(()).unwrap();
-            })
-            .unwrap(),
-    );
+    let _task = handle
+        .spawn(async move {
+            drop(scheduler);
+            sender.send(()).unwrap();
+        })
+        .unwrap();
     receive(&receiver);
     assert!(handle.spawn(async {}).is_err());
 }
@@ -207,13 +203,11 @@ fn repeated_external_submission_wakes_parked_workers() {
     let scheduler = Scheduler::with_workers(4).unwrap();
     for value in 0..500 {
         let (sender, receiver) = mpsc::channel();
-        drop(
-            scheduler
-                .spawn(async move {
-                    sender.send(value).unwrap();
-                })
-                .unwrap(),
-        );
+        let _task = scheduler
+            .spawn(async move {
+                sender.send(value).unwrap();
+            })
+            .unwrap();
         assert_eq!(receive(&receiver), value);
     }
     scheduler.run();

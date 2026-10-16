@@ -22,18 +22,17 @@ fn idle_worker_steals_work_spawned_on_a_busy_worker() {
         .spawn(async {
             let parent_thread = thread::current().id();
             let (sender, receiver) = mpsc::channel();
-            drop(
-                Scheduler::current()
-                    .unwrap()
-                    .spawn(async move {
-                        sender.send(thread::current().id()).unwrap();
-                    })
-                    .unwrap(),
-            );
+            let child = Scheduler::current()
+                .unwrap()
+                .spawn(async move {
+                    sender.send(thread::current().id()).unwrap();
+                })
+                .unwrap();
             // Deliberately occupy the owner: the child must be stolen from its
             // local queue by the other worker, rather than run on its parent.
             let child_thread = receive(&receiver);
             assert_ne!(parent_thread, child_thread);
+            child.await.unwrap();
         })
         .unwrap();
     scheduler.block_on(parent).unwrap();
@@ -46,6 +45,7 @@ struct MigrationFuture {
     blocker_started: mpsc::Sender<ThreadId>,
     blocker_release: RefCell<Option<mpsc::Receiver<()>>>,
     release_sender: mpsc::Sender<()>,
+    blocker: RefCell<Option<socketry_executor::TaskHandle<()>>>,
     _pinned: PhantomPinned,
 }
 
@@ -64,15 +64,14 @@ impl Future for MigrationFuture {
         this.original.set(Some(thread::current().id()));
         let started = this.blocker_started.clone();
         let release = this.blocker_release.borrow_mut().take().unwrap();
-        drop(
-            Scheduler::current()
-                .unwrap()
-                .spawn(async move {
-                    started.send(thread::current().id()).unwrap();
-                    receive(&release);
-                })
-                .unwrap(),
-        );
+        let blocker = Scheduler::current()
+            .unwrap()
+            .spawn(async move {
+                started.send(thread::current().id()).unwrap();
+                receive(&release);
+            })
+            .unwrap();
+        *this.blocker.borrow_mut() = Some(blocker);
         this.waker_sender.send(context.waker().clone()).unwrap();
         Poll::Pending
     }
@@ -102,6 +101,7 @@ fn pending_future_migrates_without_moving_its_pinned_storage() {
             blocker_started,
             blocker_release: RefCell::new(Some(release_receiver)),
             release_sender,
+            blocker: RefCell::new(None),
             _pinned: PhantomPinned,
         })
         .unwrap();

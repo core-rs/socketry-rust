@@ -4,11 +4,12 @@
 //! Socketry's work-stealing executor and scheduler context.
 #[cfg(feature = "native")]
 mod operations;
+#[cfg(all(unix, feature = "signals", feature = "native"))]
+mod signals;
 
-use crate::owner::Owner;
 use crate::task::{Completion, Runnable, TaskFuture, TaskState, UNASSIGNED_WORKER};
 use crate::worker::{self, WorkerState};
-use crate::{Barrier, Spawn, SpawnError, Task, TaskHandle};
+use crate::{Spawn, SpawnError, Task, TaskHandle};
 use crossbeam_deque::{Injector, Worker};
 use event_listener::{Event, Listener};
 use std::cell::RefCell;
@@ -40,7 +41,6 @@ pub(crate) struct Shared {
     #[cfg(feature = "native")]
     selector: std::sync::OnceLock<io::Result<super::selector::DefaultSelector>>,
     registry: Mutex<Registry>,
-    root: Arc<Owner>,
     pub(crate) ready: Injector<Runnable>,
     pub(crate) workers: Vec<WorkerState>,
     pub(crate) closed: AtomicBool,
@@ -50,12 +50,9 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    fn reserve_identifier(registry: &mut Registry, owner: &Owner) -> Result<u64, SpawnError> {
+    fn reserve_identifier(registry: &mut Registry) -> Result<u64, SpawnError> {
         if registry.closed {
             return Err(SpawnError::SchedulerClosed);
-        }
-        if owner.closed.load(Ordering::Acquire) {
-            return Err(SpawnError::OwnerClosed);
         }
         let identifier = registry.next_identifier;
         registry.next_identifier = identifier
@@ -66,7 +63,6 @@ impl Shared {
 
     pub(crate) fn spawn<FutureType>(
         self: &Arc<Self>,
-        owner: &Arc<Owner>,
         future: FutureType,
     ) -> Result<TaskHandle<FutureType::Output>, SpawnError>
     where
@@ -77,11 +73,10 @@ impl Shared {
             .registry
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let identifier = Self::reserve_identifier(&mut registry, owner)?;
+        let identifier = Self::reserve_identifier(&mut registry)?;
         let state = Arc::new(TaskState {
             identifier,
             scheduler: Arc::downgrade(self),
-            owner: Arc::clone(owner),
             cancelled: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             worker: AtomicUsize::new(UNASSIGNED_WORKER),
@@ -108,7 +103,6 @@ impl Shared {
                 waker: runnable.waker(),
             },
         );
-        owner.remaining.fetch_add(1, Ordering::Release);
         self.remaining.fetch_add(1, Ordering::Release);
         // Publish ownership before execution, and never invoke scheduling under this lock.
         drop(registry);
@@ -128,9 +122,6 @@ impl Shared {
             .remove(&state.identifier);
         // Drop the retained waker outside the registry lock.
         drop(registration);
-        if state.owner.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
-            state.owner.completion.notify(usize::MAX);
-        }
         if self.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.completion.notify(usize::MAX);
             if self.closed.load(Ordering::Acquire) {
@@ -148,29 +139,6 @@ impl Shared {
             .get(&identifier)
             .map(|task| task.waker.clone());
         if let Some(waker) = waker {
-            waker.wake();
-        }
-    }
-
-    pub(crate) fn close_owner(&self, owner: &Arc<Owner>, cancel: bool) {
-        let registry = self
-            .registry
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        owner.closed.store(true, Ordering::Release);
-        let wakers = if cancel {
-            registry
-                .tasks
-                .values()
-                .filter(|task| Arc::ptr_eq(&task.state.owner, owner))
-                .filter(|task| !task.state.cancelled.swap(true, Ordering::AcqRel))
-                .map(|task| task.waker.clone())
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        drop(registry);
-        for waker in wakers {
             waker.wake();
         }
     }
@@ -248,7 +216,7 @@ impl SchedulerHandle {
         Self { shared }
     }
 
-    /// Spawn a task owned by the scheduler.
+    /// Spawn a task whose returned handle owns its execution lifetime.
     pub fn spawn<FutureType>(
         &self,
         future: FutureType,
@@ -258,11 +226,6 @@ impl SchedulerHandle {
         FutureType::Output: Send + 'static,
     {
         Spawn::spawn(self, future)
-    }
-
-    /// Create an explicit owner for child tasks.
-    pub fn barrier(&self) -> Barrier {
-        Barrier::new(self.clone())
     }
 
     /// Number of worker threads configured for this scheduler.
@@ -285,14 +248,14 @@ impl Spawn for SchedulerHandle {
         FutureType: Future + Send + 'static,
         FutureType::Output: Send + 'static,
     {
-        self.shared.spawn(&self.shared.root, future)
+        self.shared.spawn(future)
     }
 }
 
 /// A futures executor with worker queues, remote inboxes and idle work stealing.
 ///
-/// Workers start at construction. Tasks run until completion or cancellation,
-/// even if their join handles are dropped. There are no private task stacks.
+/// Workers start at construction. Tasks run until completion or abandonment.
+/// Dropping an owning task handle requests destruction after an active poll. There are no private task stacks.
 /// Tasks must yield through pending futures; blocking calls block their worker.
 /// The `native` feature supplies I/O selectors and timers. The `io-uring`
 /// feature selects native completion reads/writes on Linux.
@@ -357,7 +320,6 @@ impl Scheduler {
                 next_identifier: 0,
                 tasks: HashMap::new(),
             }),
-            root: Arc::new(Owner::new()),
             ready: Injector::new(),
             workers: queues
                 .iter()
@@ -397,7 +359,7 @@ impl Scheduler {
         self.handle.worker_count()
     }
 
-    /// Spawn a task owned by this scheduler.
+    /// Spawn a task whose returned handle owns its execution lifetime.
     pub fn spawn<FutureType>(
         &self,
         future: FutureType,
@@ -407,11 +369,6 @@ impl Scheduler {
         FutureType::Output: Send + 'static,
     {
         self.handle.spawn(future)
-    }
-
-    /// Create an explicit owner for child tasks.
-    pub fn barrier(&self) -> Barrier {
-        self.handle.barrier()
     }
 
     /// Block the caller until all currently owned tasks finish.
@@ -433,8 +390,8 @@ impl Scheduler {
 
     /// Poll a root future on the calling thread while workers execute tasks.
     /// The root may borrow local data and need not be Send. It is not an owned
-    /// task: `Task::current()` is None, and child ownership must be explicit.
-    /// Returning does not cancel other scheduler tasks.
+    /// task: `Task::current()` is None. Returning drops task handles still owned
+    /// by the root; handles moved elsewhere retain their execution lifetimes.
     ///
     /// # Panics
     /// Panics on a Socketry worker. Use `.await` inside tasks.

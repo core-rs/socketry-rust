@@ -7,37 +7,44 @@
 //! runtime. Dropping it closes admission and requests cancellation. Await
 //! shutdown to join task destruction. Socketry's Task::current and
 //! Scheduler::current describe Socketry execution, not Tokio tasks.
-use super::{BufferResult, Clock, FileIo, Interest, Network};
-use crate::owner::Owner;
-use crate::{Spawn, SpawnError, TaskError};
+#[cfg(all(unix, feature = "signals"))]
+mod signals;
+
+use super::operation::cancellable;
+use super::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
+use crate::{
+    Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration, Spawn,
+    SpawnError, TaskError,
+};
 use ::tokio::runtime::Handle;
 use ::tokio::task::{AbortHandle, JoinHandle};
+use event_listener::Event;
 use pin_project_lite::pin_project;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::File as StdFile;
 use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 thread_local! {
-    static CURRENT_OWNER: RefCell<Option<Arc<Owner>>> = const { RefCell::new(None) };
+    static CURRENT_SCHEDULER: RefCell<Weak<Shared>> = const { RefCell::new(Weak::new()) };
 }
 
-struct OwnerScope(Option<Arc<Owner>>);
-impl Drop for OwnerScope {
+struct SchedulerScope(Weak<Shared>);
+impl Drop for SchedulerScope {
     fn drop(&mut self) {
-        CURRENT_OWNER.with(|current| current.replace(self.0.take()));
+        CURRENT_SCHEDULER.with(|current| current.replace(std::mem::take(&mut self.0)));
     }
 }
 
 struct TaskState {
-    owner: Arc<Owner>,
     cancelled: AtomicBool,
 }
 
@@ -56,25 +63,24 @@ struct Shared {
     runtime: Handle,
     closed: AtomicBool,
     registry: Mutex<Registry>,
-    root: Arc<Owner>,
+    remaining: AtomicUsize,
+    completion: Event,
 }
 
 impl Shared {
     fn spawn<FutureType>(
         self: &Arc<Self>,
-        owner: &Arc<Owner>,
         future: FutureType,
     ) -> Result<TaskHandle<FutureType::Output>, SpawnError>
     where
         FutureType: Future + Send + 'static,
         FutureType::Output: Send + 'static,
     {
-        self.spawn_with_registration_hook(owner, future, || {})
+        self.spawn_with_registration_hook(future, || {})
     }
 
     fn spawn_with_registration_hook<FutureType>(
         self: &Arc<Self>,
-        owner: &Arc<Owner>,
         future: FutureType,
         after_registration: impl FnOnce(),
     ) -> Result<TaskHandle<FutureType::Output>, SpawnError>
@@ -89,15 +95,11 @@ impl Shared {
         if registry.closed {
             return Err(SpawnError::SchedulerClosed);
         }
-        if owner.closed.load(Ordering::Acquire) {
-            return Err(SpawnError::OwnerClosed);
-        }
         let identifier = registry.next_identifier;
         registry.next_identifier = identifier
             .checked_add(1)
             .ok_or(SpawnError::IdentifiersExhausted)?;
         let state = Arc::new(TaskState {
-            owner: Arc::clone(owner),
             cancelled: AtomicBool::new(false),
         });
         registry.tasks.insert(
@@ -107,7 +109,7 @@ impl Shared {
                 abort: None,
             },
         );
-        owner.remaining.fetch_add(1, Ordering::Release);
+        self.remaining.fetch_add(1, Ordering::Release);
         drop(registry);
         after_registration();
         // Publish ownership before spawn, but do not hold the registry lock:
@@ -135,33 +137,34 @@ impl Shared {
         Ok(TaskHandle { inner })
     }
 
-    fn close(&self, owner: Option<&Arc<Owner>>, cancel: bool) {
+    fn close(&self) {
         let mut registry = self
             .registry
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(owner) = owner {
-            owner.closed.store(true, Ordering::Release);
-        } else {
-            registry.closed = true;
-            self.closed.store(true, Ordering::Release);
-        }
-        let aborts: Vec<_> = if cancel {
-            registry
-                .tasks
-                .values()
-                .filter(|task| owner.is_none_or(|owner| Arc::ptr_eq(owner, &task.state.owner)))
-                .filter_map(|task| {
-                    task.state.cancelled.store(true, Ordering::Release);
-                    task.abort.clone()
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        registry.closed = true;
+        self.closed.store(true, Ordering::Release);
+        let aborts: Vec<_> = registry
+            .tasks
+            .values()
+            .filter_map(|task| {
+                task.state.cancelled.store(true, Ordering::Release);
+                task.abort.clone()
+            })
+            .collect();
         drop(registry);
         for abort in aborts {
             abort.abort();
+        }
+    }
+
+    async fn wait(&self) {
+        loop {
+            let listener = self.completion.listen();
+            if self.remaining.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            listener.await;
         }
     }
 
@@ -254,9 +257,9 @@ impl Drop for Completion {
                 .tasks
                 .remove(&self.identifier);
             drop(registration);
-        }
-        if self.state.owner.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.state.owner.completion.notify(usize::MAX);
+            if shared.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+                shared.completion.notify(usize::MAX);
+            }
         }
     }
 }
@@ -277,9 +280,8 @@ impl<FutureType: Future> Future for TrackedFuture<FutureType> {
         if this.completion.state.cancelled.load(Ordering::Acquire) {
             return Poll::Ready(Err(TaskError::Cancelled));
         }
-        let _scope = OwnerScope(
-            CURRENT_OWNER
-                .with(|current| current.replace(Some(Arc::clone(&this.completion.state.owner)))),
+        let _scope = SchedulerScope(
+            CURRENT_SCHEDULER.with(|current| current.replace(this.completion.scheduler.clone())),
         );
         this.future.poll(context).map(Ok)
     }
@@ -337,31 +339,31 @@ where
     }
 }
 
-fn file_operation_result<Output>(
-    result: Result<io::Result<Output>, ::tokio::task::JoinError>,
-) -> io::Result<Output> {
+fn file_operation_result<Output, Error: From<io::Error>>(
+    result: Result<Result<Output, Error>, ::tokio::task::JoinError>,
+) -> Result<Output, Error> {
     match result {
         Ok(result) => result,
         Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-        Err(error) => Err(io::Error::new(io::ErrorKind::Interrupted, error)),
+        Err(error) => Err(io::Error::new(io::ErrorKind::Interrupted, error).into()),
     }
 }
 
-fn with_file_buffer<Output>(
-    buffer: &Mutex<Vec<u8>>,
-    operation: impl FnOnce(&mut Vec<u8>) -> io::Result<Output>,
-) -> io::Result<Output> {
+fn with_file_buffer<B, Output>(
+    buffer: &Mutex<B>,
+    operation: impl FnOnce(&mut B) -> Output,
+) -> Output {
     let mut buffer = buffer.lock().unwrap_or_else(|error| error.into_inner());
     operation(&mut buffer)
 }
 
-fn take_file_buffer(buffer: &Mutex<Vec<u8>>) -> Vec<u8> {
+fn take_file_buffer<B: Default>(buffer: &Mutex<B>) -> B {
     std::mem::take(&mut *buffer.lock().unwrap_or_else(|error| error.into_inner()))
 }
 
-/// An awaitable Tokio task result. Drop abandons the result without cancelling
-/// the task; its scheduler or barrier remains the owner.
-#[must_use = "await the task to observe its result, or explicitly drop the handle"]
+/// An owning Tokio task handle. Drop requests destruction after the current
+/// poll returns. Move the handle to transfer ownership; await it for completion.
+#[must_use = "await or retain the task; dropping its handle abandons execution"]
 pub struct TaskHandle<Output> {
     inner: JoinHandle<Result<Output, TaskError>>,
 }
@@ -374,6 +376,12 @@ impl<Output> TaskHandle<Output> {
     pub async fn cancel(self) -> Result<Output, TaskError> {
         self.inner.abort();
         self.await
+    }
+}
+
+impl<Output> Drop for TaskHandle<Output> {
+    fn drop(&mut self) {
+        self.inner.abort();
     }
 }
 
@@ -409,7 +417,8 @@ impl Scheduler {
                         next_identifier: 0,
                         tasks: HashMap::new(),
                     }),
-                    root: Arc::new(Owner::new()),
+                    remaining: AtomicUsize::new(0),
+                    completion: Event::new(),
                 }),
             },
         }
@@ -430,39 +439,18 @@ impl Scheduler {
         self.handle.spawn(future)
     }
 
-    pub fn barrier(&self) -> Barrier {
-        self.handle.barrier()
-    }
-
-    /// Close admission, cancel all owned tasks (including barrier children),
+    /// Close admission, cancel all owned tasks,
     /// and wait for their futures to be destroyed.
     pub async fn shutdown(self) {
         assert_outside_scheduler(&self.handle.shared);
-        self.handle.shared.close(None, true);
-        loop {
-            let owners: Vec<_> = self
-                .handle
-                .shared
-                .registry
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .tasks
-                .values()
-                .map(|task| Arc::clone(&task.state.owner))
-                .collect();
-            if owners.is_empty() {
-                break;
-            }
-            for owner in owners {
-                owner.wait().await;
-            }
-        }
+        self.handle.shared.close();
+        self.handle.shared.wait().await;
     }
 }
 
 impl Drop for Scheduler {
     fn drop(&mut self) {
-        self.handle.shared.close(None, true);
+        self.handle.shared.close();
     }
 }
 
@@ -481,14 +469,7 @@ impl SchedulerHandle {
         FutureType: Future + Send + 'static,
         FutureType::Output: Send + 'static,
     {
-        self.shared.spawn(&self.shared.root, future)
-    }
-
-    pub fn barrier(&self) -> Barrier {
-        Barrier {
-            scheduler: self.clone(),
-            owner: Arc::new(Owner::new()),
-        }
+        self.shared.spawn(future)
     }
 
     fn check_runtime(&self, runtime: ::tokio::runtime::Id) -> io::Result<()> {
@@ -503,77 +484,11 @@ impl SchedulerHandle {
     }
 }
 
-/// Explicit ownership of a group of Tokio tasks.
-pub struct Barrier {
-    scheduler: SchedulerHandle,
-    owner: Arc<Owner>,
-}
-
-impl Barrier {
-    pub fn spawn<FutureType>(
-        &self,
-        future: FutureType,
-    ) -> Result<TaskHandle<FutureType::Output>, SpawnError>
-    where
-        FutureType: Future + Send + 'static,
-        FutureType::Output: Send + 'static,
-    {
-        self.scheduler.shared.spawn(&self.owner, future)
-    }
-
-    pub fn close(&self) {
-        self.scheduler.shared.close(Some(&self.owner), false);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.owner.is_empty()
-    }
-
-    /// Wait for direct children. Panics if called by one of those children.
-    pub async fn wait(&self) {
-        assert_outside_owner(&self.owner);
-        self.owner.wait().await;
-    }
-
-    /// Cancel direct children and join their destruction.
-    pub async fn stop(&self) {
-        assert_outside_owner(&self.owner);
-        self.scheduler.shared.close(Some(&self.owner), true);
-        self.owner.wait().await;
-    }
-}
-
-impl Drop for Barrier {
-    fn drop(&mut self) {
-        self.scheduler.shared.close(Some(&self.owner), true);
-    }
-}
-
-fn assert_outside_owner(owner: &Arc<Owner>) {
+fn assert_outside_scheduler(shared: &Arc<Shared>) {
     assert!(
-        CURRENT_OWNER.with(|current| current
-            .borrow()
-            .as_ref()
-            .is_none_or(|current| !Arc::ptr_eq(current, owner))),
-        "a task cannot wait for its own owner"
+        CURRENT_SCHEDULER.with(|current| !Weak::ptr_eq(&current.borrow(), &Arc::downgrade(shared))),
+        "a task cannot shut down its own scheduler"
     );
-}
-
-fn assert_outside_scheduler(shared: &Shared) {
-    let current = CURRENT_OWNER.with(|current| current.borrow().clone());
-    if let Some(current) = current {
-        let registry = shared
-            .registry
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        assert!(
-            !registry
-                .tasks
-                .values()
-                .any(|task| Arc::ptr_eq(&task.state.owner, &current)),
-            "a task cannot shut down its own scheduler"
-        );
-    }
 }
 
 /// A Tokio socket registered with the adapter's runtime.
@@ -619,10 +534,7 @@ impl<FutureType: Future> Future for InRuntime<FutureType> {
     }
 }
 
-impl Network for SchedulerHandle {
-    type Socket = Socket;
-    type Listener = Listener;
-
+impl SocketRegistration for SchedulerHandle {
     fn register_socket(&self, socket: TcpStream) -> io::Result<Socket> {
         self.shared.check_open()?;
         register_socket_with(
@@ -642,110 +554,208 @@ impl Network for SchedulerHandle {
             ::tokio::net::TcpListener::from_std,
         )
     }
-
-    async fn connect(&self, address: SocketAddr) -> io::Result<Socket> {
+}
+impl SocketOperations for SchedulerHandle {
+    type Socket = Socket;
+    type Listener = Listener;
+    async fn socket_listen(
+        &self,
+        address: SocketAddr,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Listener> {
+        cancellation.check()?;
         self.shared.check_open()?;
-        connect_with(
-            self.shared.runtime.clone(),
-            self.shared.runtime.id(),
-            ::tokio::net::TcpStream::connect(address),
-        )
-        .await
+        self.register_listener(TcpListener::bind(address)?)
+            .map_err(Into::into)
     }
-
-    async fn accept(&self, listener: &Listener) -> io::Result<(Socket, SocketAddr)> {
+    fn listener_addr(&self, listener: &Listener) -> io::Result<SocketAddr> {
         self.check_runtime(listener.runtime)?;
-        // Accept registers a new stream with Tokio's current runtime. Enter
-        // our runtime for each poll, even when another executor polls us.
-        accept_with(
-            self.shared.runtime.clone(),
-            listener.runtime,
-            listener.inner.accept(),
+        listener.local_addr()
+    }
+    fn socket_local_addr(&self, socket: &Socket) -> io::Result<SocketAddr> {
+        self.check_runtime(socket.runtime)?;
+        socket.local_addr()
+    }
+    fn socket_peer_addr(&self, socket: &Socket) -> io::Result<SocketAddr> {
+        self.check_runtime(socket.runtime)?;
+        socket.peer_addr()
+    }
+    async fn connect(
+        &self,
+        address: SocketAddr,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Socket> {
+        self.shared.check_open()?;
+        cancellable(
+            cancellation,
+            connect_with(
+                self.shared.runtime.clone(),
+                self.shared.runtime.id(),
+                ::tokio::net::TcpStream::connect(address),
+            ),
         )
         .await
     }
-
-    async fn io_read(&self, socket: &Socket, mut buffer: Vec<u8>) -> BufferResult {
-        if let Err(error) = self.check_runtime(socket.runtime) {
-            return (Err(error), buffer);
-        }
-        if buffer.is_empty() {
-            return (Ok(0), buffer);
-        }
-        let result = read_with(
-            &mut buffer,
-            |buffer| socket.inner.try_read(buffer),
-            || socket.inner.readable(),
+    async fn accept(
+        &self,
+        listener: &Listener,
+        cancellation: &Cancellation,
+    ) -> OperationResult<(Socket, SocketAddr)> {
+        self.check_runtime(listener.runtime)?;
+        cancellable(
+            cancellation,
+            accept_with(
+                self.shared.runtime.clone(),
+                listener.runtime,
+                listener.inner.accept(),
+            ),
         )
+        .await
+    }
+    async fn io_read<B: IoBufMut>(
+        &self,
+        socket: &Socket,
+        mut buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        if let Err(error) = self.check_runtime(socket.runtime) {
+            return (Err(error.into()), buffer);
+        }
+        let result = cancellable(cancellation, async {
+            if buffer.as_ref().is_empty() {
+                return Ok(0);
+            }
+            read_with(
+                buffer.as_mut(),
+                |buffer| socket.inner.try_read(buffer),
+                || socket.inner.readable(),
+            )
+            .await
+        })
         .await;
         (result, buffer)
     }
-
-    async fn io_write(&self, socket: &Socket, buffer: Vec<u8>) -> BufferResult {
+    async fn io_write<B: IoBuf>(
+        &self,
+        socket: &Socket,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
         if let Err(error) = self.check_runtime(socket.runtime) {
-            return (Err(error), buffer);
+            return (Err(error.into()), buffer);
         }
-        if buffer.is_empty() {
-            return (Ok(0), buffer);
-        }
-        let result = write_with(
-            &buffer,
-            |buffer| socket.inner.try_write(buffer),
-            || socket.inner.writable(),
-        )
+        let bytes = buffer.as_ref();
+        let result = cancellable(cancellation, async {
+            if bytes.is_empty() {
+                return Ok(0);
+            }
+            write_with(
+                bytes,
+                |buffer| socket.inner.try_write(buffer),
+                || socket.inner.writable(),
+            )
+            .await
+        })
         .await;
         (result, buffer)
     }
-
-    async fn io_wait(&self, socket: &Socket, interest: Interest) -> io::Result<()> {
+    async fn io_wait(
+        &self,
+        socket: &Socket,
+        interest: Interest,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
         self.check_runtime(socket.runtime)?;
-        match interest {
-            Interest::Readable => socket.inner.readable().await,
-            Interest::Writable => socket.inner.writable().await,
-        }
+        cancellable(cancellation, async {
+            match interest {
+                Interest::Readable => socket.inner.readable().await,
+                Interest::Writable => socket.inner.writable().await,
+            }
+        })
+        .await
     }
 }
 
-impl FileIo for SchedulerHandle {
-    async fn file_read_at(&self, file: Arc<File>, buffer: Vec<u8>, offset: u64) -> BufferResult {
-        self.file_operation(file, buffer, offset, false).await
+impl File for SchedulerHandle {
+    type File = Arc<StdFile>;
+    async fn file_open(
+        &self,
+        path: &Path,
+        options: FileOptions,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::File> {
+        cancellation.check()?;
+        self.shared.check_open()?;
+        let path = path.to_owned();
+        let cancellation = cancellation.clone();
+        file_operation_result(
+            self.shared
+                .runtime
+                .spawn_blocking(move || {
+                    super::blocking::run(&cancellation, || options.open(&path).map(Arc::new))
+                })
+                .await,
+        )
     }
-
-    async fn file_write_at(&self, file: Arc<File>, buffer: Vec<u8>, offset: u64) -> BufferResult {
-        self.file_operation(file, buffer, offset, true).await
+    async fn file_read_at<B: IoBufMut>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        offset: u64,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let file = Arc::clone(file);
+        self.file_operation(buffer, cancellation, move |buffer| {
+            super::positioned_file::read_at(&file, buffer.as_mut(), offset)
+        })
+        .await
+    }
+    async fn file_write_at<B: IoBuf>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        offset: u64,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let file = Arc::clone(file);
+        self.file_operation(buffer, cancellation, move |buffer| {
+            super::positioned_file::write_at(&file, buffer.as_ref(), offset)
+        })
+        .await
     }
 }
 
 impl SchedulerHandle {
-    async fn file_operation(
+    async fn file_operation<B: IoBuf>(
         &self,
-        file: Arc<File>,
-        buffer: Vec<u8>,
-        offset: u64,
-        write: bool,
-    ) -> BufferResult {
-        if let Err(error) = self.shared.check_open() {
-            return (Err(error), buffer);
+        buffer: B,
+        cancellation: &Cancellation,
+        operation: impl FnOnce(&mut B) -> io::Result<usize> + Send + 'static,
+    ) -> BufferResult<B> {
+        if let Err(error) = cancellation.check() {
+            return (Err(error.into()), buffer);
         }
-        // Retain a second owner so runtime shutdown before the blocking job
-        // starts can still return the caller's buffer. No byte copy is made.
-        let buffer = Arc::new(Mutex::new(buffer));
+        if let Err(error) = self.shared.check_open() {
+            return (Err(error.into()), buffer);
+        }
+        // A queued job may be destroyed by the external runtime. The waiter
+        // retains the buffer too, and only takes it after the job has ended.
+        let buffer = Arc::new(Mutex::new(Some(buffer)));
         let operation_buffer = Arc::clone(&buffer);
+        let cancellation = cancellation.clone();
         let result = self
             .shared
             .runtime
             .spawn_blocking(move || {
                 with_file_buffer(&operation_buffer, |buffer| {
-                    if write {
-                        super::file::write_at(&file, buffer, offset)
-                    } else {
-                        super::file::read_at(&file, buffer, offset)
-                    }
+                    super::blocking::run(&cancellation, || {
+                        operation(buffer.as_mut().expect("job retains its buffer"))
+                    })
                 })
             })
             .await;
         let result = file_operation_result(result);
-        let buffer = take_file_buffer(&buffer);
+        let buffer = take_file_buffer(&buffer).expect("completed job returns its buffer");
         (result, buffer)
     }
 }
@@ -790,58 +800,107 @@ impl Spawn for SchedulerHandle {
         FutureType: Future + Send + 'static,
         FutureType::Output: Send + 'static,
     {
-        self.shared.spawn(&self.shared.root, future)
+        self.shared.spawn(future)
     }
 }
 
-impl Spawn for Barrier {
-    type Handle<Output>
-        = TaskHandle<Output>
-    where
-        Output: Send + 'static;
-    fn spawn<FutureType>(
-        &self,
-        future: FutureType,
-    ) -> Result<TaskHandle<FutureType::Output>, SpawnError>
-    where
-        FutureType: Future + Send + 'static,
-        FutureType::Output: Send + 'static,
-    {
-        self.scheduler.shared.spawn(&self.owner, future)
-    }
-}
-
-impl Network for Scheduler {
-    type Socket = Socket;
-    type Listener = Listener;
-    fn register_socket(&self, socket: TcpStream) -> io::Result<Socket> {
+impl SocketRegistration for Scheduler {
+    fn register_socket(&self, socket: TcpStream) -> io::Result<Self::Socket> {
         self.handle.register_socket(socket)
     }
-    fn register_listener(&self, listener: TcpListener) -> io::Result<Listener> {
+    fn register_listener(&self, listener: TcpListener) -> io::Result<Self::Listener> {
         self.handle.register_listener(listener)
     }
-    async fn connect(&self, address: SocketAddr) -> io::Result<Socket> {
-        self.handle.connect(address).await
+}
+impl SocketOperations for Scheduler {
+    type Socket = <SchedulerHandle as SocketOperations>::Socket;
+    type Listener = <SchedulerHandle as SocketOperations>::Listener;
+    async fn socket_listen(
+        &self,
+        address: SocketAddr,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Listener> {
+        self.handle.socket_listen(address, cancellation).await
     }
-    async fn accept(&self, listener: &Listener) -> io::Result<(Socket, SocketAddr)> {
-        self.handle.accept(listener).await
+    fn listener_addr(&self, listener: &Self::Listener) -> io::Result<SocketAddr> {
+        self.handle.listener_addr(listener)
     }
-    async fn io_read(&self, socket: &Socket, buffer: Vec<u8>) -> BufferResult {
-        self.handle.io_read(socket, buffer).await
+    fn socket_local_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+        self.handle.socket_local_addr(socket)
     }
-    async fn io_write(&self, socket: &Socket, buffer: Vec<u8>) -> BufferResult {
-        self.handle.io_write(socket, buffer).await
+    fn socket_peer_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+        self.handle.socket_peer_addr(socket)
     }
-    async fn io_wait(&self, socket: &Socket, interest: Interest) -> io::Result<()> {
-        self.handle.io_wait(socket, interest).await
+    async fn connect(
+        &self,
+        address: SocketAddr,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Socket> {
+        self.handle.connect(address, cancellation).await
+    }
+    async fn accept(
+        &self,
+        listener: &Self::Listener,
+        cancellation: &Cancellation,
+    ) -> OperationResult<(Self::Socket, SocketAddr)> {
+        self.handle.accept(listener, cancellation).await
+    }
+    async fn io_read<B: IoBufMut>(
+        &self,
+        socket: &Self::Socket,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        self.handle.io_read(socket, buffer, cancellation).await
+    }
+    async fn io_write<B: IoBuf>(
+        &self,
+        socket: &Self::Socket,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        self.handle.io_write(socket, buffer, cancellation).await
+    }
+    async fn io_wait(
+        &self,
+        socket: &Self::Socket,
+        interest: Interest,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.handle.io_wait(socket, interest, cancellation).await
     }
 }
-impl FileIo for Scheduler {
-    async fn file_read_at(&self, file: Arc<File>, buffer: Vec<u8>, offset: u64) -> BufferResult {
-        self.handle.file_read_at(file, buffer, offset).await
+impl File for Scheduler {
+    type File = <SchedulerHandle as File>::File;
+    async fn file_open(
+        &self,
+        path: &Path,
+        options: FileOptions,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::File> {
+        self.handle.file_open(path, options, cancellation).await
     }
-    async fn file_write_at(&self, file: Arc<File>, buffer: Vec<u8>, offset: u64) -> BufferResult {
-        self.handle.file_write_at(file, buffer, offset).await
+    async fn file_read_at<B: IoBufMut>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        offset: u64,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        self.handle
+            .file_read_at(file, buffer, offset, cancellation)
+            .await
+    }
+    async fn file_write_at<B: IoBuf>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        offset: u64,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        self.handle
+            .file_write_at(file, buffer, offset, cancellation)
+            .await
     }
 }
 impl Clock for Scheduler {

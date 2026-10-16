@@ -225,6 +225,8 @@ Cancellation before admission prevents submission. A worker checks the supplied 
 
 The returned `BlockingTask` owns interest in execution. Moving it transfers that ownership; dropping it requests skipping if still queued and discards any eventual result. Pool shutdown closes admission, wakes waiters, and discards queued jobs. Already-started closures finish independently, retaining their owned data even after the scheduler or handle is dropped. Shutdown does not join these threads; graceful callers request cancellation and await their jobs before releasing services those jobs need. `Scheduler::run` tracks future tasks, not independent blocking jobs.
 
+Blocking workers install no current-task, current-scheduler, or Tokio runtime context. Capture required handles explicitly.
+
 Existing private file-I/O fallbacks keep their current backend pools and resource-return contracts. This API does not implement detached `_submit` I/O: dropping its handle requests skipping work, whereas an accepted future `_submit` operation must retain the promised execution and retirement semantics described below. Pool sharing, file-fallback integration, idle thread retirement, and scheduling policies remain later work driven by consumers and measurements.
 
 ## Clock and timer composition

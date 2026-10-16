@@ -177,7 +177,23 @@ The public `scheduler` module contains portable `Socket`, `File`, and `Clock` tr
 
 Read/write operations take an owned `IoBuf` (`IoBufMut` for reads) and return `BufferResult<B> = (OperationResult<usize>, B)`, including errors and cancellation. `OperationError` distinguishes `Cancelled` and `Io`. `Vec<u8>` and `Box<[u8]>` are supported. `buffer.slice(range)` creates an owned `BufferSlice` without copying; `into_inner()` recovers its original owner for reuse. Read buffers must have an initialized length (`vec![0; capacity]`); capacity alone supplies no writable bytes. Buffer length is unchanged; only the first returned byte count contains new data. Reads and writes can be partial. Each read/write call is one operation, not a read-exact/write-all convenience method.
 
-`File::file_read_at` and `file_write_at` borrow `&Self::File` and take an explicit offset. `file_open(path, FileOptions, cancellation)` creates the associated resource. Current native/Tokio backends internally retain an `Arc<std::fs::File>`; generic callers do not require that representation. The readiness and Tokio implementations use blocking pools. Use ordinary files opened without append mode, and offsets fitting i64. Unix positioned operations leave the shared cursor unchanged; the Windows blocking fallback updates it according to std's seek\_read/seek\_write semantics.
+`File::file_read` and `file_write` borrow `&Self::File` and advance its shared cursor by the transferred byte count. `file_read_at` and `file_write_at` take an explicit offset instead. Await cursor operations sequentially when ordering matters; concurrent calls have no portable ordering or non-overlap guarantee. Dropping an admitted operation can still advance the cursor. Each call can transfer fewer bytes than requested, and a read returns zero at EOF. `file_open(path, FileOptions, cancellation)` creates the associated resource. Current native/Tokio backends internally retain an `Arc<std::fs::File>`; generic callers do not require that representation. The readiness and Tokio implementations use blocking pools; io\_uring uses current-position SQEs for stateful access. There is no scheduler-side cursor or extra per-file locking. Use ordinary files opened without append mode, and offsets fitting i64. Unix positioned operations leave the shared cursor unchanged; the Windows blocking fallback updates it according to std's seek\_read/seek\_write semantics.
+
+Repeated calls to `file_read` continue from the position reached by the previous call. For example, this helper returns one chunk, which can be shorter than 4096 bytes:
+
+```rust
+use socketry_executor::{Cancellation, File, OperationResult};
+
+async fn read_chunk<S: File>(
+    scheduler: &S,
+    file: &S::File,
+    cancellation: &Cancellation,
+) -> OperationResult<Vec<u8>> {
+    let (result, mut buffer) = scheduler.file_read(file, vec![0; 4096], cancellation).await;
+    buffer.truncate(result?);
+    Ok(buffer)
+}
+```
 
 `Clock::now()` returns a monotonic `std::time::Instant` in the selected scheduler's clock domain. `sleep_until(deadline, cancellation)` and `sleep(duration, cancellation)` return `OperationResult<()>`. Relative waits start on first poll; pre-cancelled waits do not register, even for elapsed deadlines. Overflow returns `InvalidInput`. After registration, expiry wins a same-poll cancellation race. Obtain time through the scheduler to preserve simulation and Tokio paused-time behaviour. Native waits use async-io timers; the adapter uses its selected Tokio runtime. The independent `socketry-timers` crate implements the io-event timer algorithm; integration with the scheduler clock remains pending. The independent `Blocking` capability supplies general synchronous jobs as described above.
 

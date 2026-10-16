@@ -28,6 +28,7 @@ pub struct Scheduler {
 }
 
 pub struct FileHandle {
+    position: Mutex<u64>,
     bytes: Bytes,
     writable: bool,
     readable: bool,
@@ -133,42 +134,48 @@ impl File for Scheduler {
             bytes.lock().unwrap().clear();
         }
         Ok(FileHandle {
+            position: Mutex::new(0),
             bytes,
             writable: options.write,
             readable: options.read,
         })
     }
 
+    async fn file_read<B: IoBufMut>(
+        &self,
+        file: &FileHandle,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let mut position = file.position.lock().unwrap();
+        let (result, buffer) = self.read_file_at(file, buffer, *position, cancellation);
+        if let Ok(count) = &result {
+            *position += *count as u64;
+        }
+        (result, buffer)
+    }
+
     async fn file_read_at<B: IoBufMut>(
         &self,
         file: &FileHandle,
-        mut buffer: B,
+        buffer: B,
         offset: u64,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        if let Err(error) = cancellation.check() {
-            return (Err(error.into()), buffer);
+        self.read_file_at(file, buffer, offset, cancellation)
+    }
+    async fn file_write<B: IoBuf>(
+        &self,
+        file: &FileHandle,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let mut position = file.position.lock().unwrap();
+        let (result, buffer) = self.write_file_at(file, buffer, *position, cancellation);
+        if let Ok(count) = &result {
+            *position += *count as u64;
         }
-        if !file.readable {
-            return (
-                Err(io::Error::from(io::ErrorKind::PermissionDenied).into()),
-                buffer,
-            );
-        }
-        let bytes = file.bytes.lock().unwrap();
-        let count = if offset >= bytes.len() as u64 {
-            0
-        } else {
-            let offset = offset as usize;
-            let count = buffer
-                .as_ref()
-                .len()
-                .min(self.read_limit)
-                .min(bytes.len() - offset);
-            buffer.as_mut()[..count].copy_from_slice(&bytes[offset..offset + count]);
-            count
-        };
-        (Ok(count), buffer)
+        (result, buffer)
     }
 
     async fn file_write_at<B: IoBuf>(
@@ -178,34 +185,7 @@ impl File for Scheduler {
         offset: u64,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        if let Err(error) = cancellation.check() {
-            return (Err(error.into()), buffer);
-        }
-        if !file.writable {
-            return (
-                Err(io::Error::from(io::ErrorKind::PermissionDenied).into()),
-                buffer,
-            );
-        }
-        let count = buffer.as_ref().len().min(self.write_limit);
-        // Keep the model's filesystem bounded so malformed offsets cannot
-        // turn a test error into an unbounded allocation.
-        let end = offset
-            .checked_add(count as u64)
-            .filter(|end| *end <= 1024 * 1024);
-        let Some(end) = end else {
-            return (
-                Err(io::Error::from(io::ErrorKind::InvalidInput).into()),
-                buffer,
-            );
-        };
-        if count > 0 {
-            let mut bytes = file.bytes.lock().unwrap();
-            let length = bytes.len().max(end as usize);
-            bytes.resize(length, 0);
-            bytes[offset as usize..end as usize].copy_from_slice(&buffer.as_ref()[..count]);
-        }
-        (Ok(count), buffer)
+        self.write_file_at(file, buffer, offset, cancellation)
     }
 }
 
@@ -393,4 +373,74 @@ async fn wait(
             .map(|()| Err(socketry_executor::Cancelled.into()))
     })
     .await
+}
+
+impl Scheduler {
+    fn read_file_at<B: IoBufMut>(
+        &self,
+        file: &FileHandle,
+        mut buffer: B,
+        offset: u64,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        if let Err(error) = cancellation.check() {
+            return (Err(error.into()), buffer);
+        }
+        if !file.readable {
+            return (
+                Err(io::Error::from(io::ErrorKind::PermissionDenied).into()),
+                buffer,
+            );
+        }
+        let bytes = file.bytes.lock().unwrap();
+        let count = if offset >= bytes.len() as u64 {
+            0
+        } else {
+            let offset = offset as usize;
+            let count = buffer
+                .as_ref()
+                .len()
+                .min(self.read_limit)
+                .min(bytes.len() - offset);
+            buffer.as_mut()[..count].copy_from_slice(&bytes[offset..offset + count]);
+            count
+        };
+        (Ok(count), buffer)
+    }
+
+    fn write_file_at<B: IoBuf>(
+        &self,
+        file: &FileHandle,
+        buffer: B,
+        offset: u64,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        if let Err(error) = cancellation.check() {
+            return (Err(error.into()), buffer);
+        }
+        if !file.writable {
+            return (
+                Err(io::Error::from(io::ErrorKind::PermissionDenied).into()),
+                buffer,
+            );
+        }
+        let count = buffer.as_ref().len().min(self.write_limit);
+        // Keep the model's filesystem bounded so malformed offsets cannot turn a test error into an unbounded allocation.
+        let end = offset
+            .checked_add(count as u64)
+            .filter(|end| *end <= 1024 * 1024);
+        let Some(end) = end else {
+            return (
+                Err(io::Error::from(io::ErrorKind::InvalidInput).into()),
+                buffer,
+            );
+        };
+        if count > 0 {
+            let mut bytes = file.bytes.lock().unwrap();
+            let length = bytes.len().max(end as usize);
+            bytes.resize(length, 0);
+            bytes[offset as usize..end as usize].copy_from_slice(&buffer.as_ref()[..count]);
+        }
+        (Ok(count), buffer)
+    }
 }

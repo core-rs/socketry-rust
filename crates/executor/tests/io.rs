@@ -210,6 +210,19 @@ async fn positioned_files<SchedulerType: File>(scheduler: &SchedulerType) {
         .await;
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
     assert_eq!(buffer.as_ptr(), allocation);
+    for write in [false, true] {
+        let (result, empty) = if write {
+            scheduler
+                .file_write_at(&file, Vec::new(), u64::MAX, &NEVER)
+                .await
+        } else {
+            scheduler
+                .file_read_at(&file, Vec::new(), u64::MAX, &NEVER)
+                .await
+        };
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert!(empty.is_empty());
+    }
     let read_only = scheduler
         .file_open(&path, socketry_executor::FileOptions::READ, &cancellation)
         .await
@@ -454,6 +467,19 @@ mod native {
                 .await;
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
             assert_eq!(buffer, vec![6]);
+
+            for write in [false, true] {
+                let buffer = vec![11];
+                let allocation = buffer.as_ptr();
+                let (result, buffer) = if write {
+                    handle.file_write(&file, buffer, &NEVER).await
+                } else {
+                    handle.file_read(&file, buffer, &NEVER).await
+                };
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+                assert_eq!(buffer, [11]);
+                assert_eq!(buffer.as_ptr(), allocation);
+            }
         });
     }
 }
@@ -763,6 +789,19 @@ mod tokio_adapter {
                 .await;
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
             assert_eq!(buffer, vec![4]);
+
+            for write in [false, true] {
+                let buffer = vec![11];
+                let allocation = buffer.as_ptr();
+                let (result, buffer) = if write {
+                    handle.file_write(&file, buffer, &NEVER).await
+                } else {
+                    handle.file_read(&file, buffer, &NEVER).await
+                };
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+                assert_eq!(buffer, [11]);
+                assert_eq!(buffer.as_ptr(), allocation);
+            }
         });
     }
 

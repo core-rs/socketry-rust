@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add shared-cursor `File::file_read` and `file_write` with owned buffers and cancellation across native, Tokio, io\_uring, and simulated files. Implementers of `File` must now provide both methods; callers await operations sequentially when cursor ordering matters.
+
 - Add `Blocking::spawn_blocking` with cancellable bounded admission and owning completion handles. Native and Tokio schedulers use configurable dedicated pools; queued work can be cancelled, while started closures retain their inputs and finish independently.
 
 - Extend `Clock` with monotonic `now`, cancellable `sleep_until`, and relative `sleep(duration, cancellation)`. Preserve lazy waits and Tokio virtual time; report deadline overflow as `InvalidInput`.

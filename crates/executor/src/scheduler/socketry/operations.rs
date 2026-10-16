@@ -161,6 +161,28 @@ impl File for SchedulerHandle {
             .file_open(path, options, cancellation)
             .await
     }
+    async fn file_read<B: IoBufMut>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        match self.selector() {
+            Ok(selector) => selector.file_read(file, buffer, cancellation).await,
+            Err(error) => (Err(error.into()), buffer),
+        }
+    }
+    async fn file_write<B: IoBuf>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        match self.selector() {
+            Ok(selector) => selector.file_write(file, buffer, cancellation).await,
+            Err(error) => (Err(error.into()), buffer),
+        }
+    }
     async fn file_read_at<B: IoBufMut>(
         &self,
         file: &Self::File,
@@ -282,6 +304,22 @@ impl File for Scheduler {
         cancellation: &Cancellation,
     ) -> OperationResult<Self::File> {
         self.handle.file_open(path, options, cancellation).await
+    }
+    async fn file_read<B: IoBufMut>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        self.handle.file_read(file, buffer, cancellation).await
+    }
+    async fn file_write<B: IoBuf>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        self.handle.file_write(file, buffer, cancellation).await
     }
     async fn file_read_at<B: IoBufMut>(
         &self,

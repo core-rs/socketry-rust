@@ -16,7 +16,11 @@ use std::{
 #[path = "../examples/interface_probe/simulated.rs"]
 mod simulated;
 
+#[path = "support/stateful_file.rs"]
+mod stateful_file;
+
 async fn resources<S: File + Socket>(scheduler: &S, root: &Path) {
+    stateful_file::check(scheduler, root).await;
     let never = Cancellation::never();
     let cancelled = Cancellation::new();
     cancelled.cancel();
@@ -217,6 +221,13 @@ fn public_contracts_work_without_native_resources() {
     );
 }
 
+#[test]
+fn simulated_stateful_files_preserve_short_transfer_and_cursor_semantics() {
+    let scheduler = simulated::Scheduler::new(2, 1);
+    futures_lite::future::block_on(stateful_file::check(&scheduler, Path::new("fixture")));
+    assert_eq!(scheduler.open_files(), 0);
+}
+
 #[cfg(feature = "native")]
 #[test]
 fn native_resources() {
@@ -225,6 +236,10 @@ fn native_resources() {
     let second = tempfile::tempdir().unwrap();
     scheduler.block_on(resources(&scheduler, first.path()));
     scheduler.block_on(resources(&scheduler.handle(), second.path()));
+    // Exercise the readiness fallback even when the native scheduler selects io_uring.
+    let third = tempfile::tempdir().unwrap();
+    let readiness = socketry_executor::scheduler::selector::readiness::Selector::new().unwrap();
+    scheduler.block_on(resources(&readiness, third.path()));
 }
 
 #[test]

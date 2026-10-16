@@ -22,7 +22,17 @@ description = "Foundational concurrency APIs for Socketry"
 license.workspace = true
 repository.workspace = true
 readme = "readme.md"
-include = ["Cargo.toml", "readme.md", "license.md", "releases.md", "context/**", "src/**"]
+include = ["Cargo.toml", "readme.md", "license.md", "releases.md", "context/**", "src/**", "examples/**"]
+
+[[example]]
+name = "echo-server"
+path = "examples/echo/server.rs"
+required-features = ["native", "signals"]
+
+[[example]]
+name = "echo-client"
+path = "examples/echo/client.rs"
+required-features = ["native"]
 
 [dependencies]
 socketry-executor = { version = "0.2.0", path = "crates/executor", default-features = false }

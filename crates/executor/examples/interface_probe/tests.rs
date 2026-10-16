@@ -12,7 +12,7 @@ use std::sync::{
 };
 use std::task::{Context, Wake, Waker};
 
-#[path = "../../tests/support/stateful_file.rs"]
+#[path = "tests/stateful_file.rs"]
 mod stateful_file;
 
 #[test]

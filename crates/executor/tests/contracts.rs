@@ -16,7 +16,7 @@ use std::{
 #[path = "../examples/interface_probe/simulated.rs"]
 mod simulated;
 
-#[path = "support/stateful_file.rs"]
+#[path = "../examples/interface_probe/tests/stateful_file.rs"]
 mod stateful_file;
 
 async fn resources<S: File + Socket>(scheduler: &S, root: &Path) {

@@ -16,15 +16,24 @@ pub(crate) fn close(socket: Socket) -> io::Result<()> {
         // SAFETY: The socket is exclusively owned and deregistered, and transferring the raw descriptor prevents a second close in Drop.
         unsafe { libc::close(socket.into_raw_fd()) }
     };
+    #[cfg(unix)]
+    return close_result(result);
+
     #[cfg(windows)]
-    let result = {
-        use std::os::windows::io::IntoRawSocket;
-        // Winsock cannot close a nonblocking socket with positive linger reliably. The cleanup worker may block, and no operation or readiness registration still uses this socket.
-        socket.set_nonblocking(false)?;
-        // SAFETY: Ownership is transferred out of Socket; no other backend operation retains this socket, and Drop must not close it again.
-        unsafe {
-            windows_sys::Win32::Networking::WinSock::closesocket(socket.into_raw_socket() as _)
-        }
+    close_with(socket, |socket| socket.set_nonblocking(false))
+}
+
+#[cfg(windows)]
+fn close_with(
+    socket: Socket,
+    set_blocking: impl FnOnce(&Socket) -> io::Result<()>,
+) -> io::Result<()> {
+    use std::os::windows::io::IntoRawSocket;
+    // Winsock cannot close a nonblocking socket with positive linger reliably. The cleanup worker may block, and no operation or readiness registration still uses this socket.
+    set_blocking(&socket)?;
+    // SAFETY: Ownership is transferred out of Socket; no other backend operation retains this socket, and Drop must not close it again.
+    let result = unsafe {
+        windows_sys::Win32::Networking::WinSock::closesocket(socket.into_raw_socket() as _)
     };
     close_result(result)
 }
@@ -185,6 +194,69 @@ mod tests {
     fn explicit_close_consumes_socket_and_preserves_error_results() {
         close(Socket::new(Domain::IPV4, Type::STREAM, None).unwrap()).unwrap();
         assert!(close_result(-1).is_err());
+    }
+
+    #[test]
+    fn explicit_close_preserves_positive_linger_and_queued_data() {
+        use std::{io::Read, net::TcpListener, thread, time::Duration};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        socket
+            .connect(&listener.local_addr().unwrap().into())
+            .unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket2::SockRef::from(&peer)
+            .set_recv_buffer_size(8192)
+            .unwrap();
+        socket.set_send_buffer_size(4096).unwrap();
+        socket.set_linger(Some(Duration::from_secs(5))).unwrap();
+        socket.set_nonblocking(true).unwrap();
+
+        // Fill the send queue before the peer starts reading. Bound the payload as socket buffer limits vary by platform.
+        let mut sent = 0;
+        while sent < 1024 * 1024 {
+            match socket.send(&[0x5a; 4096]) {
+                Ok(length) => {
+                    assert_ne!(length, 0);
+                    sent += length;
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("send failed: {error}"),
+            }
+        }
+        assert!(sent > 0);
+        let reader = thread::spawn(move || {
+            let mut received = Vec::new();
+            peer.read_to_end(&mut received).unwrap();
+            received
+        });
+
+        close(socket).unwrap();
+        assert_eq!(reader.join().unwrap(), vec![0x5a; sent]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn close_configuration_errors_are_returned_and_ownership_is_released() {
+        use std::{
+            io::Read,
+            net::{TcpListener, TcpStream},
+            time::Duration,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = Socket::from(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket.set_nonblocking(true).unwrap();
+
+        let error =
+            close_with(socket, |_| Err(io::ErrorKind::PermissionDenied.into())).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
     }
 
     #[test]

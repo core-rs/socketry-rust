@@ -6,7 +6,7 @@
 use super::{Cancellation, File, FileOptions, OperationResult, Socket};
 use event_listener::Event;
 use socketry_executor::{AllocationMode, BufferResult, FileAllocate, SyncMode};
-use socketry_executor::{Interest, IoBuf, IoBufMut};
+use socketry_executor::{Interest, IoBuf, IoBufMut, SocketDomain, SocketProtocol, SocketType};
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, SeekFrom};
 use std::net::SocketAddr;
@@ -20,6 +20,18 @@ use std::{
 
 type Bytes = Arc<Mutex<Vec<u8>>>;
 
+fn available_port(
+    listeners: &HashMap<SocketAddr, Weak<Incoming>>,
+    mut address: SocketAddr,
+) -> io::Result<u16> {
+    (10000..=u16::MAX)
+        .find(|port| {
+            address.set_port(*port);
+            !listeners.contains_key(&address)
+        })
+        .ok_or_else(|| io::Error::from(io::ErrorKind::AddrNotAvailable))
+}
+
 pub struct Scheduler {
     files: Mutex<HashMap<PathBuf, Bytes>>,
     listeners: Mutex<HashMap<SocketAddr, Weak<Incoming>>>,
@@ -27,7 +39,7 @@ pub struct Scheduler {
     write_limit: usize,
 }
 
-pub struct FileHandle {
+pub struct FileDescriptor {
     position: Mutex<u64>,
     bytes: Bytes,
     writable: bool,
@@ -36,13 +48,25 @@ pub struct FileHandle {
 
 #[derive(Default)]
 struct Incoming {
-    sockets: Mutex<VecDeque<Connection>>,
+    sockets: Mutex<VecDeque<SocketDescriptor>>,
     ready: Event,
 }
 
-pub struct Listener {
-    address: SocketAddr,
-    incoming: Arc<Incoming>,
+pub struct SocketDescriptor {
+    state: Mutex<SocketState>,
+}
+
+enum SocketState {
+    Open {
+        domain: SocketDomain,
+        kind: SocketType,
+        local: SocketAddr,
+    },
+    Listening {
+        address: SocketAddr,
+        incoming: Arc<Incoming>,
+    },
+    Connected(Connection),
 }
 
 #[derive(Default)]
@@ -58,19 +82,22 @@ struct Pipe {
     ready: Event,
 }
 
-pub struct Connection {
+struct Connection {
     input: Arc<Pipe>,
     output: Arc<Pipe>,
     local: SocketAddr,
     peer: SocketAddr,
 }
 
-impl Drop for Connection {
+impl Drop for SocketDescriptor {
     fn drop(&mut self) {
-        self.input.state.lock().unwrap().reader_closed = true;
-        self.output.state.lock().unwrap().writer_closed = true;
-        self.input.ready.notify(usize::MAX);
-        self.output.ready.notify(usize::MAX);
+        let state = self.state.get_mut().unwrap();
+        if let SocketState::Connected(socket) = state {
+            socket.input.state.lock().unwrap().reader_closed = true;
+            socket.output.state.lock().unwrap().writer_closed = true;
+            socket.input.ready.notify(usize::MAX);
+            socket.output.ready.notify(usize::MAX);
+        }
     }
 }
 
@@ -138,7 +165,7 @@ impl FileAllocate for Scheduler {
 }
 
 impl File for Scheduler {
-    type File = FileHandle;
+    type File = FileDescriptor;
 
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
         drop(file);
@@ -151,7 +178,7 @@ impl File for Scheduler {
 
     async fn file_truncate(
         &self,
-        file: &FileHandle,
+        file: &FileDescriptor,
         length: u64,
         cancellation: &Cancellation,
     ) -> OperationResult<()> {
@@ -182,7 +209,7 @@ impl File for Scheduler {
 
     async fn file_seek(
         &self,
-        file: &FileHandle,
+        file: &FileDescriptor,
         position: SeekFrom,
         cancellation: &Cancellation,
     ) -> OperationResult<u64> {
@@ -205,7 +232,7 @@ impl File for Scheduler {
         path: &Path,
         options: FileOptions,
         cancellation: &Cancellation,
-    ) -> OperationResult<FileHandle> {
+    ) -> OperationResult<FileDescriptor> {
         cancellation.check()?;
         if (!options.read && !options.write)
             || ((options.create || options.create_new || options.truncate) && !options.write)
@@ -223,7 +250,7 @@ impl File for Scheduler {
         if options.truncate {
             bytes.lock().unwrap().clear();
         }
-        Ok(FileHandle {
+        Ok(FileDescriptor {
             position: Mutex::new(0),
             bytes,
             writable: options.write,
@@ -233,7 +260,7 @@ impl File for Scheduler {
 
     async fn file_read<B: IoBufMut>(
         &self,
-        file: &FileHandle,
+        file: &FileDescriptor,
         buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
@@ -247,7 +274,7 @@ impl File for Scheduler {
 
     async fn file_read_at<B: IoBufMut>(
         &self,
-        file: &FileHandle,
+        file: &FileDescriptor,
         buffer: B,
         offset: u64,
         cancellation: &Cancellation,
@@ -256,7 +283,7 @@ impl File for Scheduler {
     }
     async fn file_write<B: IoBuf>(
         &self,
-        file: &FileHandle,
+        file: &FileDescriptor,
         buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
@@ -270,7 +297,7 @@ impl File for Scheduler {
 
     async fn file_write_at<B: IoBuf>(
         &self,
-        file: &FileHandle,
+        file: &FileDescriptor,
         buffer: B,
         offset: u64,
         cancellation: &Cancellation,
@@ -280,89 +307,123 @@ impl File for Scheduler {
 }
 
 impl Socket for Scheduler {
-    type Socket = Connection;
-    type Listener = Listener;
+    type Socket = SocketDescriptor;
 
-    async fn socket_listen(
+    async fn socket_open(
         &self,
-        mut address: SocketAddr,
+        domain: SocketDomain,
+        kind: SocketType,
+        protocol: Option<SocketProtocol>,
         cancellation: &Cancellation,
-    ) -> OperationResult<Listener> {
+    ) -> OperationResult<SocketDescriptor> {
         cancellation.check()?;
-        let mut listeners = self.listeners.lock().unwrap();
-        listeners.retain(|_, incoming| incoming.strong_count() > 0);
-        if address.port() == 0 {
-            let port = (10000..=u16::MAX)
-                .find(|port| {
-                    let mut candidate = address;
-                    candidate.set_port(*port);
-                    !listeners.contains_key(&candidate)
-                })
-                .ok_or_else(|| io::Error::from(io::ErrorKind::AddrNotAvailable))?;
-            address.set_port(port);
+        match (kind, protocol) {
+            (SocketType::Stream, None | Some(SocketProtocol::Tcp)) => {}
+            (SocketType::Datagram, None | Some(SocketProtocol::Udp)) => {
+                return Err(io::Error::from(io::ErrorKind::Unsupported).into());
+            }
+            _ => return Err(io::Error::from(io::ErrorKind::InvalidInput).into()),
         }
-        if listeners.contains_key(&address) {
-            return Err(io::Error::from(io::ErrorKind::AddrInUse).into());
-        }
-        let incoming = Arc::new(Incoming::default());
-        listeners.insert(address, Arc::downgrade(&incoming));
-        Ok(Listener { address, incoming })
+        let local = match domain {
+            SocketDomain::Ipv4 => SocketAddr::from(([0, 0, 0, 0], 0)),
+            SocketDomain::Ipv6 => SocketAddr::from(([0; 16], 0)),
+        };
+        Ok(SocketDescriptor {
+            state: Mutex::new(SocketState::Open {
+                domain,
+                kind,
+                local,
+            }),
+        })
     }
 
-    fn listener_addr(&self, listener: &Listener) -> io::Result<SocketAddr> {
-        Ok(listener.address)
-    }
-
-    fn socket_local_addr(&self, socket: &Connection) -> io::Result<SocketAddr> {
-        Ok(socket.local)
-    }
-    fn socket_peer_addr(&self, socket: &Connection) -> io::Result<SocketAddr> {
-        Ok(socket.peer)
-    }
-    async fn io_wait(
+    async fn socket_bind(
         &self,
-        socket: &Connection,
-        interest: Interest,
+        socket: &SocketDescriptor,
+        mut address: SocketAddr,
         cancellation: &Cancellation,
     ) -> OperationResult<()> {
         cancellation.check()?;
-        if matches!(interest, Interest::Writable) {
-            return Ok(());
+        let mut state = socket.state.lock().unwrap();
+        let SocketState::Open {
+            domain,
+            kind: SocketType::Stream,
+            local,
+        } = &mut *state
+        else {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
+        };
+        if SocketDomain::from(address) != *domain {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
         }
-        loop {
-            let ready = socket.input.ready.listen();
-            {
-                let state = socket.input.state.lock().unwrap();
-                if !state.bytes.is_empty() || state.writer_closed {
-                    return Ok(());
-                }
-            }
-            wait(ready, cancellation).await?;
+        if local.port() != 0 {
+            return Err(io::Error::from(io::ErrorKind::AddrInUse).into());
         }
+        let mut listeners = self.listeners.lock().unwrap();
+        // Expired weak registrations do not reserve their former addresses.
+        listeners.retain(|_, incoming| incoming.strong_count() > 0);
+        if address.port() == 0 {
+            address.set_port(available_port(&listeners, address)?);
+        } else if listeners.contains_key(&address) {
+            return Err(io::Error::from(io::ErrorKind::AddrInUse).into());
+        }
+        *local = address;
+        Ok(())
     }
-    async fn accept(
+
+    async fn socket_listen(
         &self,
-        listener: &Listener,
+        socket: &SocketDescriptor,
+        _backlog: i32,
         cancellation: &Cancellation,
-    ) -> OperationResult<(Connection, SocketAddr)> {
+    ) -> OperationResult<()> {
         cancellation.check()?;
-        loop {
-            // Register before checking state; await and notify outside locks.
-            let ready = listener.incoming.ready.listen();
-            let socket = listener.incoming.sockets.lock().unwrap().pop_front();
-            if let Some(socket) = socket {
-                let peer = socket.peer;
-                return Ok((socket, peer));
-            }
-            wait(ready, cancellation).await?;
+        let mut state = socket.state.lock().unwrap();
+        let (kind, mut local) = match &*state {
+            SocketState::Open { kind, local, .. } => (*kind, *local),
+            _ => return Err(io::Error::from(io::ErrorKind::InvalidInput).into()),
+        };
+        if kind != SocketType::Stream {
+            return Err(io::Error::from(io::ErrorKind::Unsupported).into());
+        }
+        let mut listeners = self.listeners.lock().unwrap();
+        listeners.retain(|_, incoming| incoming.strong_count() > 0);
+        if local.port() == 0 {
+            local.set_port(available_port(&listeners, local)?);
+        }
+        if listeners.contains_key(&local) {
+            return Err(io::Error::from(io::ErrorKind::AddrInUse).into());
+        }
+        let incoming = Arc::new(Incoming::default());
+        listeners.insert(local, Arc::downgrade(&incoming));
+        *state = SocketState::Listening {
+            address: local,
+            incoming,
+        };
+        Ok(())
+    }
+
+    fn socket_local_addr(&self, socket: &SocketDescriptor) -> io::Result<SocketAddr> {
+        match &*socket.state.lock().unwrap() {
+            SocketState::Open { local, .. } => Ok(*local),
+            SocketState::Listening { address, .. } => Ok(*address),
+            SocketState::Connected(connection) => Ok(connection.local),
         }
     }
 
-    async fn connect(
+    fn socket_peer_addr(&self, socket: &SocketDescriptor) -> io::Result<SocketAddr> {
+        match &*socket.state.lock().unwrap() {
+            SocketState::Connected(connection) => Ok(connection.peer),
+            _ => Err(io::Error::from(io::ErrorKind::NotConnected)),
+        }
+    }
+
+    async fn socket_connect(
         &self,
+        socket: &SocketDescriptor,
         address: SocketAddr,
         cancellation: &Cancellation,
-    ) -> OperationResult<Connection> {
+    ) -> OperationResult<()> {
         cancellation.check()?;
         let incoming = self
             .listeners
@@ -371,39 +432,137 @@ impl Socket for Scheduler {
             .get(&address)
             .and_then(Weak::upgrade)
             .ok_or_else(|| io::Error::from(io::ErrorKind::ConnectionRefused))?;
+
+        let mut state = socket.state.lock().unwrap();
+        let (domain, kind, mut local) = match &*state {
+            SocketState::Open {
+                domain,
+                kind,
+                local,
+            } => (*domain, *kind, *local),
+            _ => return Err(io::Error::from(io::ErrorKind::InvalidInput).into()),
+        };
+        if kind != SocketType::Stream {
+            return Err(io::Error::from(io::ErrorKind::Unsupported).into());
+        }
+        if SocketDomain::from(address) != domain {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
+        }
+        if local.port() == 0 {
+            local = match domain {
+                SocketDomain::Ipv4 => SocketAddr::from(([127, 0, 0, 1], 40000)),
+                SocketDomain::Ipv6 => {
+                    SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 40000))
+                }
+            };
+        }
         let input = Arc::new(Pipe::default());
         let output = Arc::new(Pipe::default());
-        let mut client_address = address;
-        client_address.set_port(40000);
-        let server = Connection {
-            local: address,
-            peer: client_address,
-            input: output.clone(),
-            output: input.clone(),
+        let server = SocketDescriptor {
+            state: Mutex::new(SocketState::Connected(Connection {
+                local: address,
+                peer: local,
+                input: output.clone(),
+                output: input.clone(),
+            })),
         };
         incoming.sockets.lock().unwrap().push_back(server);
         incoming.ready.notify(usize::MAX);
-        Ok(Connection {
+        *state = SocketState::Connected(Connection {
             input,
             output,
-            local: client_address,
+            local,
             peer: address,
-        })
+        });
+        Ok(())
     }
 
-    async fn io_read<B: IoBufMut>(
+    async fn socket_accept(
         &self,
-        socket: &Connection,
+        socket: &SocketDescriptor,
+        cancellation: &Cancellation,
+    ) -> OperationResult<(SocketDescriptor, SocketAddr)> {
+        cancellation.check()?;
+        let incoming = match &*socket.state.lock().unwrap() {
+            SocketState::Listening { incoming, .. } => Arc::clone(incoming),
+            _ => return Err(io::Error::from(io::ErrorKind::InvalidInput).into()),
+        };
+        loop {
+            let ready = incoming.ready.listen();
+            let accepted = incoming.sockets.lock().unwrap().pop_front();
+            if let Some(socket) = accepted {
+                let peer = self.socket_peer_addr(&socket)?;
+                return Ok((socket, peer));
+            }
+            wait(ready, cancellation).await?;
+        }
+    }
+
+    async fn socket_wait(
+        &self,
+        socket: &SocketDescriptor,
+        interest: Interest,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        match interest {
+            Interest::Writable => Ok(()),
+            Interest::Readable => {
+                let (input, incoming) = match &*socket.state.lock().unwrap() {
+                    SocketState::Connected(connection) => {
+                        (Some(Arc::clone(&connection.input)), None)
+                    }
+                    SocketState::Listening { incoming, .. } => (None, Some(Arc::clone(incoming))),
+                    SocketState::Open { .. } => {
+                        return Err(io::Error::from(io::ErrorKind::NotConnected).into());
+                    }
+                };
+                if let Some(input) = input {
+                    loop {
+                        let ready = input.ready.listen();
+                        {
+                            let state = input.state.lock().unwrap();
+                            if !state.bytes.is_empty() || state.writer_closed {
+                                return Ok(());
+                            }
+                        }
+                        wait(ready, cancellation).await?;
+                    }
+                }
+                let incoming = incoming.unwrap();
+                loop {
+                    let ready = incoming.ready.listen();
+                    if !incoming.sockets.lock().unwrap().is_empty() {
+                        return Ok(());
+                    }
+                    wait(ready, cancellation).await?;
+                }
+            }
+        }
+    }
+
+    async fn socket_read<B: IoBufMut>(
+        &self,
+        socket: &SocketDescriptor,
         mut buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
         if let Err(error) = cancellation.check() {
             return (Err(error.into()), buffer);
         }
+        let input = match &*socket.state.lock().unwrap() {
+            SocketState::Connected(connection) => Arc::clone(&connection.input),
+            _ => {
+                return (
+                    Err(io::Error::from(io::ErrorKind::NotConnected).into()),
+                    buffer,
+                );
+            }
+        };
         loop {
-            let ready = socket.input.ready.listen();
+            let ready = input.ready.listen();
             {
-                let mut state = socket.input.state.lock().unwrap();
+                let mut state = input.state.lock().unwrap();
                 let count = buffer
                     .as_ref()
                     .len()
@@ -422,18 +581,27 @@ impl Socket for Scheduler {
         }
     }
 
-    async fn io_write<B: IoBuf>(
+    async fn socket_write<B: IoBuf>(
         &self,
-        socket: &Connection,
+        socket: &SocketDescriptor,
         buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
         if let Err(error) = cancellation.check() {
             return (Err(error.into()), buffer);
         }
+        let output = match &*socket.state.lock().unwrap() {
+            SocketState::Connected(connection) => Arc::clone(&connection.output),
+            _ => {
+                return (
+                    Err(io::Error::from(io::ErrorKind::NotConnected).into()),
+                    buffer,
+                );
+            }
+        };
         let count = buffer.as_ref().len().min(self.write_limit);
         {
-            let mut state = socket.output.state.lock().unwrap();
+            let mut state = output.state.lock().unwrap();
             if state.reader_closed {
                 return (
                     Err(io::Error::from(io::ErrorKind::BrokenPipe).into()),
@@ -442,7 +610,7 @@ impl Socket for Scheduler {
             }
             state.bytes.extend(&buffer.as_ref()[..count]);
         }
-        socket.output.ready.notify(usize::MAX);
+        output.ready.notify(usize::MAX);
         (Ok(count), buffer)
     }
 }
@@ -468,7 +636,7 @@ async fn wait(
 impl Scheduler {
     fn read_file_at<B: IoBufMut>(
         &self,
-        file: &FileHandle,
+        file: &FileDescriptor,
         mut buffer: B,
         offset: u64,
         cancellation: &Cancellation,
@@ -500,7 +668,7 @@ impl Scheduler {
 
     fn write_file_at<B: IoBuf>(
         &self,
-        file: &FileHandle,
+        file: &FileDescriptor,
         buffer: B,
         offset: u64,
         cancellation: &Cancellation,

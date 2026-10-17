@@ -82,22 +82,43 @@ impl SocketRegistration for SchedulerHandle {
     fn register_socket(&self, socket: TcpStream) -> io::Result<Self::Socket> {
         self.selector()?.register_socket(socket)
     }
-    fn register_listener(&self, listener: TcpListener) -> io::Result<Self::Listener> {
+    fn register_listener(&self, listener: TcpListener) -> io::Result<Self::Socket> {
         self.selector()?.register_listener(listener)
     }
 }
 impl Socket for SchedulerHandle {
     type Socket = <DefaultSelector as Socket>::Socket;
-    type Listener = <DefaultSelector as Socket>::Listener;
-    async fn socket_listen(
+
+    async fn socket_open(
         &self,
+        domain: crate::SocketDomain,
+        kind: crate::SocketType,
+        protocol: Option<crate::SocketProtocol>,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Socket> {
+        self.selector()?
+            .socket_open(domain, kind, protocol, cancellation)
+            .await
+    }
+    async fn socket_bind(
+        &self,
+        socket: &Self::Socket,
         address: SocketAddr,
         cancellation: &Cancellation,
-    ) -> OperationResult<Self::Listener> {
-        self.selector()?.socket_listen(address, cancellation).await
+    ) -> OperationResult<()> {
+        self.selector()?
+            .socket_bind(socket, address, cancellation)
+            .await
     }
-    fn listener_addr(&self, listener: &Self::Listener) -> io::Result<SocketAddr> {
-        self.selector()?.listener_addr(listener)
+    async fn socket_listen(
+        &self,
+        socket: &Self::Socket,
+        backlog: i32,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.selector()?
+            .socket_listen(socket, backlog, cancellation)
+            .await
     }
     fn socket_local_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
         self.selector()?.socket_local_addr(socket)
@@ -105,50 +126,53 @@ impl Socket for SchedulerHandle {
     fn socket_peer_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
         self.selector()?.socket_peer_addr(socket)
     }
-    async fn connect(
+    async fn socket_connect(
         &self,
+        socket: &Self::Socket,
         address: SocketAddr,
         cancellation: &Cancellation,
-    ) -> OperationResult<Self::Socket> {
-        self.selector()?.connect(address, cancellation).await
+    ) -> OperationResult<()> {
+        self.selector()?
+            .socket_connect(socket, address, cancellation)
+            .await
     }
-    async fn accept(
+    async fn socket_accept(
         &self,
-        listener: &Self::Listener,
+        socket: &Self::Socket,
         cancellation: &Cancellation,
     ) -> OperationResult<(Self::Socket, SocketAddr)> {
-        self.selector()?.accept(listener, cancellation).await
+        self.selector()?.socket_accept(socket, cancellation).await
     }
-    async fn io_read<B: IoBufMut>(
+    async fn socket_read<B: IoBufMut>(
         &self,
         socket: &Self::Socket,
         buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
         match self.selector() {
-            Ok(selector) => selector.io_read(socket, buffer, cancellation).await,
+            Ok(selector) => selector.socket_read(socket, buffer, cancellation).await,
             Err(error) => (Err(error.into()), buffer),
         }
     }
-    async fn io_write<B: IoBuf>(
+    async fn socket_write<B: IoBuf>(
         &self,
         socket: &Self::Socket,
         buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
         match self.selector() {
-            Ok(selector) => selector.io_write(socket, buffer, cancellation).await,
+            Ok(selector) => selector.socket_write(socket, buffer, cancellation).await,
             Err(error) => (Err(error.into()), buffer),
         }
     }
-    async fn io_wait(
+    async fn socket_wait(
         &self,
         socket: &Self::Socket,
         interest: Interest,
         cancellation: &Cancellation,
     ) -> OperationResult<()> {
         self.selector()?
-            .io_wait(socket, interest, cancellation)
+            .socket_wait(socket, interest, cancellation)
             .await
     }
 }
@@ -301,22 +325,41 @@ impl SocketRegistration for Scheduler {
     fn register_socket(&self, socket: TcpStream) -> io::Result<Self::Socket> {
         self.handle.register_socket(socket)
     }
-    fn register_listener(&self, listener: TcpListener) -> io::Result<Self::Listener> {
+    fn register_listener(&self, listener: TcpListener) -> io::Result<Self::Socket> {
         self.handle.register_listener(listener)
     }
 }
 impl Socket for Scheduler {
     type Socket = <SchedulerHandle as Socket>::Socket;
-    type Listener = <SchedulerHandle as Socket>::Listener;
-    async fn socket_listen(
+
+    async fn socket_open(
         &self,
+        domain: crate::SocketDomain,
+        kind: crate::SocketType,
+        protocol: Option<crate::SocketProtocol>,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Socket> {
+        self.handle
+            .socket_open(domain, kind, protocol, cancellation)
+            .await
+    }
+    async fn socket_bind(
+        &self,
+        socket: &Self::Socket,
         address: SocketAddr,
         cancellation: &Cancellation,
-    ) -> OperationResult<Self::Listener> {
-        self.handle.socket_listen(address, cancellation).await
+    ) -> OperationResult<()> {
+        self.handle.socket_bind(socket, address, cancellation).await
     }
-    fn listener_addr(&self, listener: &Self::Listener) -> io::Result<SocketAddr> {
-        self.handle.listener_addr(listener)
+    async fn socket_listen(
+        &self,
+        socket: &Self::Socket,
+        backlog: i32,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.handle
+            .socket_listen(socket, backlog, cancellation)
+            .await
     }
     fn socket_local_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
         self.handle.socket_local_addr(socket)
@@ -324,43 +367,48 @@ impl Socket for Scheduler {
     fn socket_peer_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
         self.handle.socket_peer_addr(socket)
     }
-    async fn connect(
+    async fn socket_connect(
         &self,
+        socket: &Self::Socket,
         address: SocketAddr,
         cancellation: &Cancellation,
-    ) -> OperationResult<Self::Socket> {
-        self.handle.connect(address, cancellation).await
+    ) -> OperationResult<()> {
+        self.handle
+            .socket_connect(socket, address, cancellation)
+            .await
     }
-    async fn accept(
+    async fn socket_accept(
         &self,
-        listener: &Self::Listener,
+        socket: &Self::Socket,
         cancellation: &Cancellation,
     ) -> OperationResult<(Self::Socket, SocketAddr)> {
-        self.handle.accept(listener, cancellation).await
+        self.handle.socket_accept(socket, cancellation).await
     }
-    async fn io_read<B: IoBufMut>(
+    async fn socket_read<B: IoBufMut>(
         &self,
         socket: &Self::Socket,
         buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        self.handle.io_read(socket, buffer, cancellation).await
+        self.handle.socket_read(socket, buffer, cancellation).await
     }
-    async fn io_write<B: IoBuf>(
+    async fn socket_write<B: IoBuf>(
         &self,
         socket: &Self::Socket,
         buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        self.handle.io_write(socket, buffer, cancellation).await
+        self.handle.socket_write(socket, buffer, cancellation).await
     }
-    async fn io_wait(
+    async fn socket_wait(
         &self,
         socket: &Self::Socket,
         interest: Interest,
         cancellation: &Cancellation,
     ) -> OperationResult<()> {
-        self.handle.io_wait(socket, interest, cancellation).await
+        self.handle
+            .socket_wait(socket, interest, cancellation)
+            .await
     }
 }
 #[cfg(target_os = "linux")]

@@ -49,3 +49,6 @@ pub use clock::Clock;
 
 mod signals;
 pub use signals::Signals;
+
+#[cfg(any(feature = "native", feature = "tokio"))]
+mod socket_io;

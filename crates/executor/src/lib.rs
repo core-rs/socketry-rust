@@ -17,7 +17,7 @@ mod buffer_slice;
 mod cancellation;
 mod cancelled;
 mod defer_cancel;
-mod file_handle;
+mod file_descriptor;
 mod file_options;
 mod io_buf;
 mod io_buf_mut;
@@ -26,6 +26,9 @@ mod operation_error;
 pub mod scheduler;
 #[cfg(all(unix, feature = "signals", any(feature = "native", feature = "tokio")))]
 mod signal_registration;
+mod socket_domain;
+mod socket_protocol;
+mod socket_type;
 mod spawn;
 mod sync_mode;
 mod task;
@@ -40,7 +43,7 @@ pub use buffer_slice::BufferSlice;
 pub use cancellation::Cancellation;
 pub use cancelled::Cancelled;
 pub use defer_cancel::defer_cancel;
-pub use file_handle::FileHandle;
+pub use file_descriptor::FileDescriptor;
 pub use file_options::FileOptions;
 pub use io_buf::IoBuf;
 pub use io_buf_mut::IoBufMut;
@@ -54,6 +57,12 @@ pub use scheduler::{
 pub use signal_hook::consts::signal;
 #[cfg(all(unix, feature = "signals", any(feature = "native", feature = "tokio")))]
 pub use signal_registration::SignalRegistration;
+pub use socket_domain::SocketDomain;
+pub use socket_protocol::SocketProtocol;
+pub use socket_type::SocketType;
 pub use spawn::{Spawn, SpawnError};
 pub use sync_mode::SyncMode;
 pub use task::{Task, TaskError, TaskHandle, yield_now};
+
+#[cfg(feature = "native")]
+pub use scheduler::selector::readiness::SocketDescriptor;

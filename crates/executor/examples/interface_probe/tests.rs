@@ -3,7 +3,7 @@
 
 use super::*;
 use futures_lite::future::block_on;
-use socketry_executor::{IoBufMut, SyncMode};
+use socketry_executor::{IoBufMut, SocketDomain, SocketProtocol, SocketType, SyncMode};
 use std::future::Future;
 use std::pin::pin;
 use std::sync::{
@@ -11,6 +11,39 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::task::{Context, Wake, Waker};
+
+async fn open_listener(
+    scheduler: &simulated::Scheduler,
+    address: std::net::SocketAddr,
+) -> OperationResult<simulated::SocketDescriptor> {
+    let socket = scheduler
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Stream,
+            Some(SocketProtocol::Tcp),
+            &NEVER,
+        )
+        .await?;
+    scheduler.socket_bind(&socket, address, &NEVER).await?;
+    scheduler.socket_listen(&socket, 128, &NEVER).await?;
+    Ok(socket)
+}
+
+async fn open_client(
+    scheduler: &simulated::Scheduler,
+    address: std::net::SocketAddr,
+) -> OperationResult<simulated::SocketDescriptor> {
+    let socket = scheduler
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Stream,
+            Some(SocketProtocol::Tcp),
+            &NEVER,
+        )
+        .await?;
+    scheduler.socket_connect(&socket, address, &NEVER).await?;
+    Ok(socket)
+}
 
 #[path = "tests/stateful_file.rs"]
 mod stateful_file;
@@ -304,32 +337,33 @@ fn pending_accept_and_receive_wake_and_drop_produces_eof() {
         let waker = Waker::from(wakes.clone());
         let mut context = Context::from_waker(&waker);
         let scheduler = simulated::Scheduler::new(2, 2);
-        let listener = scheduler
-            .socket_listen("127.0.0.1:0".parse().unwrap(), &NEVER)
+        let listener = open_listener(&scheduler, "127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
-        let address = scheduler.listener_addr(&listener).unwrap();
-        let mut accept = pin!(scheduler.accept(&listener, &NEVER));
+        let address = scheduler.socket_local_addr(&listener).unwrap();
+        let mut accept = pin!(scheduler.socket_accept(&listener, &NEVER));
         assert!(accept.as_mut().poll(&mut context).is_pending());
-        let client = scheduler.connect(address, &NEVER).await.unwrap();
+        let client = open_client(&scheduler, address).await.unwrap();
         assert!(wakes.0.swap(0, Ordering::Relaxed) > 0);
         let (server, _) = accept.await.unwrap();
-        let mut read = pin!(scheduler.io_read(&server, vec![0; 8], &NEVER));
+        let mut read = pin!(scheduler.socket_read(&server, vec![0; 8], &NEVER));
         assert!(read.as_mut().poll(&mut context).is_pending());
-        let (result, _) = scheduler.io_write(&client, b"abc".to_vec(), &NEVER).await;
+        let (result, _) = scheduler
+            .socket_write(&client, b"abc".to_vec(), &NEVER)
+            .await;
         assert_eq!(result.unwrap(), 2);
         assert!(wakes.0.swap(0, Ordering::Relaxed) > 0);
         let (result, buffer) = read.await;
         assert_eq!(result.unwrap(), 2);
         assert_eq!(&buffer[..2], b"ab");
-        let mut read = pin!(scheduler.io_read(&server, buffer, &NEVER));
+        let mut read = pin!(scheduler.socket_read(&server, buffer, &NEVER));
         assert!(read.as_mut().poll(&mut context).is_pending());
         drop(client);
         assert!(wakes.0.swap(0, Ordering::Relaxed) > 0);
         let (result, buffer) = read.await;
         assert_eq!(result.unwrap(), 0);
         let allocation = buffer.as_ptr();
-        let (result, buffer) = scheduler.io_write(&server, buffer, &NEVER).await;
+        let (result, buffer) = scheduler.socket_write(&server, buffer, &NEVER).await;
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
         assert_eq!(buffer.as_ptr(), allocation);
     });
@@ -339,22 +373,31 @@ fn pending_accept_and_receive_wake_and_drop_produces_eof() {
 fn listener_drop_releases_address_and_pending_connections() {
     block_on(async {
         let scheduler = simulated::Scheduler::new(2, 2);
-        let listener = scheduler
-            .socket_listen("127.0.0.1:12345".parse().unwrap(), &NEVER)
+        let listener = open_listener(&scheduler, "127.0.0.1:12345".parse().unwrap())
             .await
             .unwrap();
-        let address = scheduler.listener_addr(&listener).unwrap();
+        let address = scheduler.socket_local_addr(&listener).unwrap();
+        let duplicate = scheduler
+            .socket_open(
+                SocketDomain::Ipv4,
+                SocketType::Stream,
+                Some(SocketProtocol::Tcp),
+                &NEVER,
+            )
+            .await
+            .unwrap();
         assert!(
-            matches!(scheduler.socket_listen(address, &NEVER).await, Err(error) if error.kind() == io::ErrorKind::AddrInUse)
+            matches!(scheduler.socket_bind(&duplicate, address, &NEVER).await, Err(error) if error.kind() == io::ErrorKind::AddrInUse)
         );
-        let client = scheduler.connect(address, &NEVER).await.unwrap();
+        let client = open_client(&scheduler, address).await.unwrap();
         drop(listener);
         assert!(
-            matches!(scheduler.connect(address, &NEVER).await, Err(error) if error.kind() == io::ErrorKind::ConnectionRefused)
+            matches!(open_client(&scheduler, address).await, Err(error) if error.kind() == io::ErrorKind::ConnectionRefused)
         );
-        let (result, _) = scheduler.io_read(&client, vec![0; 1], &NEVER).await;
+        let (result, _) = scheduler.socket_read(&client, vec![0; 1], &NEVER).await;
         assert_eq!(result.unwrap(), 0);
-        scheduler.socket_listen(address, &NEVER).await.unwrap();
+        let listener = open_listener(&scheduler, address).await.unwrap();
+        assert_eq!(scheduler.socket_local_addr(&listener).unwrap(), address);
     });
 }
 

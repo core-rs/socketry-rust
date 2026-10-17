@@ -7,10 +7,10 @@ use std::{
     net::{TcpListener, TcpStream},
 };
 
-/// Optional interoperability with existing standard-library TCP resources.
+/// Optional interoperability with existing standard-library TCP resources. Streams and listeners become the same backend socket descriptor.
 /// Register once; the backend sets the nonblocking mode it needs. Do not change
 /// that mode through another handle. Simulated schedulers need not implement it.
 pub trait SocketRegistration: Socket {
     fn register_socket(&self, socket: TcpStream) -> io::Result<Self::Socket>;
-    fn register_listener(&self, listener: TcpListener) -> io::Result<Self::Listener>;
+    fn register_listener(&self, listener: TcpListener) -> io::Result<Self::Socket>;
 }

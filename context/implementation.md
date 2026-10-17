@@ -83,7 +83,7 @@ This guide describes the current implementation and its boundaries. Read [the de
 
 ## Interface experiment
 
-`crates/executor/examples/interface_probe.rs` runs generic file-copy and echo-server functions against native, Tokio, and an in-memory implementation. It uses the exported `File` and `Socket` traits for associated resources, creation, cancellation and address inspection. It uses scheduler implementations directly and retries partial writes through owned buffer views. The simulator exercises short transfers and ordinary resource destruction without native I/O dependencies. It supports cancellation but does not model timers, kernel completion tracking, or a simulated task scheduler; findings and next changes are recorded in `crates/executor/design.md`.
+`crates/executor/examples/interface_probe.rs` runs generic file-copy and echo-server functions against native, Tokio, and an in-memory implementation. It uses the exported `File` and `Socket` traits for associated resources, creation, cancellation and address inspection. Socket setup follows open, bind, and listen/connect steps; no listener-specific resource type is required. It uses scheduler implementations directly and retries partial writes through owned buffer views. The simulator exercises short transfers and ordinary resource destruction without native I/O dependencies. It supports cancellation but does not model timers, kernel completion tracking, or a simulated task scheduler; findings and next changes are recorded in `crates/executor/design.md`.
 
 ## Verification
 
@@ -95,7 +95,7 @@ Coverage measures source regions for native and Tokio schedulers on each support
 
 ## Explicit file closure
 
-- Native and Tokio `File::File` is an owned, non-`Clone` `FileHandle`. Backend retention uses a private `Arc<std::fs::File>`; consuming it for close uses `Arc::try_unwrap` and panics on outstanding use. Do not cancel or wait for other operations during close.
+- Native and Tokio `File::File` is an owned, non-`Clone` `FileDescriptor`. Backend retention uses a private `Arc<std::fs::File>`; consuming it for close uses `Arc::try_unwrap` and panics on outstanding use. Do not cancel or wait for other operations during close.
 - `file_close` awaits bounded admission and execution; `file_close_submit` awaits only admission. Neither accepts cancellation. Accepted close jobs survive waiter destruction and run on a dedicated cleanup pool independent of user blocking closures. Native shutdown outside future and blocking-pool workers and awaited Tokio shutdown drain them. Completion and capacity wakeups run in blocking-pool worker context, so reentrant scheduler destruction requests shutdown without waiting on its own cleanup queue.
 - All operation result notifications must follow release of backend file references, including cancellation and requests discarded before submission. io_uring still retains published requests until original terminal CQEs; cancellation CQEs cannot release them.
 - `examples/file_close.rs` explains cancellation clones, keeping the operation future alive through cancellation, completion races, and explicit close before propagating an I/O result. Dropping an operation future abandons completion and may leave backend work running; io_uring requests cancellation, but immediate close can still panic until backend access ends.

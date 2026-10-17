@@ -2,7 +2,10 @@
 // Copyright, 2026, by Samuel Williams.
 
 // `Socket` and `IoBuf` are traits: importing them makes their methods available.
-use socketry::{Cancellation, IoBuf, OperationResult, Scheduler, Socket};
+use socketry::{
+    Cancellation, IoBuf, OperationResult, Scheduler, Socket, SocketDomain, SocketProtocol,
+    SocketType,
+};
 use std::io;
 
 // This function works with any scheduler implementing the `Socket` trait. `&S` and `&Cancellation` borrow values owned by `main()`. The `Vec` is owned by this future and returned with the echoed bytes.
@@ -11,9 +14,17 @@ async fn echo<S: Socket>(
     mut buffer: Vec<u8>,
     cancellation: &Cancellation,
 ) -> OperationResult<Vec<u8>> {
-    // This is the address used by `server.rs`. `.await` suspends the future until connecting finishes.
+    // This is the address used by `server.rs`. Open the socket first, then await the nonblocking connect operation.
     let socket = scheduler
-        .connect("127.0.0.1:9000".parse().unwrap(), cancellation)
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Stream,
+            Some(SocketProtocol::Tcp),
+            cancellation,
+        )
+        .await?;
+    scheduler
+        .socket_connect(&socket, "127.0.0.1:9000".parse().unwrap(), cancellation)
         .await?;
 
     let length = buffer.len();
@@ -25,7 +36,7 @@ async fn echo<S: Socket>(
 
         // `slice` moves the buffer into an owned range view without copying. The operation returns `(result, view)`, even when it fails.
         let (result, returned) = scheduler
-            .io_write(&socket, buffer.slice(offset..end), cancellation)
+            .socket_write(&socket, buffer.slice(offset..end), cancellation)
             .await;
         buffer = returned.into_inner();
 
@@ -41,7 +52,7 @@ async fn echo<S: Socket>(
         while received < end {
             // Reuse the part of the buffer we have already sent, replacing it with the reply. Bytes not yet sent remain untouched.
             let (result, returned) = scheduler
-                .io_read(&socket, buffer.slice(received..end), cancellation)
+                .socket_read(&socket, buffer.slice(received..end), cancellation)
                 .await;
             buffer = returned.into_inner();
 

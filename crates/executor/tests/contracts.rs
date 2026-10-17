@@ -3,7 +3,7 @@
 
 use socketry_executor::{
     Cancellation, File, FileOptions, Interest, IoBuf, OperationError, OperationResult, Socket,
-    Spawn,
+    SocketDomain, SocketProtocol, SocketType, Spawn,
 };
 use std::{
     future::{Future, poll_fn},
@@ -100,27 +100,69 @@ async fn resources<S: File + Socket>(scheduler: &S, root: &Path) {
 
     let address = "127.0.0.1:0".parse().unwrap();
     assert!(matches!(
-        scheduler.socket_listen(address, &cancelled).await,
+        scheduler
+            .socket_open(
+                SocketDomain::Ipv4,
+                SocketType::Stream,
+                Some(SocketProtocol::Tcp),
+                &cancelled
+            )
+            .await,
         Err(OperationError::Cancelled(_))
     ));
-    let listener = scheduler.socket_listen(address, &never).await.unwrap();
-    let address = scheduler.listener_addr(&listener).unwrap();
+    let listener = scheduler
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Stream,
+            Some(SocketProtocol::Tcp),
+            &never,
+        )
+        .await
+        .unwrap();
+    scheduler
+        .socket_bind(&listener, address, &never)
+        .await
+        .unwrap();
+    scheduler
+        .socket_listen(&listener, 128, &never)
+        .await
+        .unwrap();
+    let address = scheduler.socket_local_addr(&listener).unwrap();
     assert_ne!(address.port(), 0);
+    let duplicate = scheduler
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Stream,
+            Some(SocketProtocol::Tcp),
+            &never,
+        )
+        .await
+        .unwrap();
     assert_eq!(
         scheduler
-            .socket_listen(address, &never)
+            .socket_bind(&duplicate, address, &never)
             .await
-            .err()
-            .unwrap()
+            .unwrap_err()
             .kind(),
         io::ErrorKind::AddrInUse
     );
+    let cancelled_client = scheduler
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Stream,
+            Some(SocketProtocol::Tcp),
+            &never,
+        )
+        .await
+        .unwrap();
     assert!(matches!(
-        scheduler.connect(address, &cancelled).await,
+        scheduler
+            .socket_connect(&cancelled_client, address, &cancelled)
+            .await,
         Err(OperationError::Cancelled(_))
     ));
     let stopping = Cancellation::new();
-    let mut accept = pin!(scheduler.accept(&listener, &stopping));
+    let mut accept = pin!(scheduler.socket_accept(&listener, &stopping));
     poll_fn(|context| {
         assert!(accept.as_mut().poll(context).is_pending());
         Poll::Ready(())
@@ -129,26 +171,38 @@ async fn resources<S: File + Socket>(scheduler: &S, root: &Path) {
     stopping.cancel();
     assert!(matches!(accept.await, Err(OperationError::Cancelled(_))));
 
-    let client = scheduler.connect(address, &never).await.unwrap();
-    let (server, peer) = scheduler.accept(&listener, &never).await.unwrap();
+    let client = scheduler
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Stream,
+            Some(SocketProtocol::Tcp),
+            &never,
+        )
+        .await
+        .unwrap();
+    scheduler
+        .socket_connect(&client, address, &never)
+        .await
+        .unwrap();
+    let (server, peer) = scheduler.socket_accept(&listener, &never).await.unwrap();
     assert_eq!(scheduler.socket_local_addr(&server).unwrap(), address);
     assert_eq!(scheduler.socket_peer_addr(&client).unwrap(), address);
     assert_eq!(scheduler.socket_local_addr(&client).unwrap(), peer);
     assert_eq!(scheduler.socket_peer_addr(&server).unwrap(), peer);
     scheduler
-        .io_wait(&client, Interest::Writable, &never)
+        .socket_wait(&client, Interest::Writable, &never)
         .await
         .unwrap();
     assert!(matches!(
         scheduler
-            .io_wait(&server, Interest::Readable, &cancelled)
+            .socket_wait(&server, Interest::Readable, &cancelled)
             .await,
         Err(OperationError::Cancelled(_))
     ));
     let buffer = vec![9; 4];
     let allocation = buffer.as_ptr();
     let stopping = Cancellation::new();
-    let mut read = pin!(scheduler.io_read(&server, buffer, &stopping));
+    let mut read = pin!(scheduler.socket_read(&server, buffer, &stopping));
     poll_fn(|context| {
         assert!(read.as_mut().poll(context).is_pending());
         Poll::Ready(())
@@ -159,17 +213,19 @@ async fn resources<S: File + Socket>(scheduler: &S, root: &Path) {
     assert!(matches!(result, Err(OperationError::Cancelled(_))));
     assert_eq!(buffer.as_ptr(), allocation);
     assert_eq!(buffer, vec![9; 4]);
-    let (result, _) = scheduler.io_write(&client, vec![0], &cancelled).await;
+    let (result, _) = scheduler.socket_write(&client, vec![0], &cancelled).await;
     assert!(matches!(result, Err(OperationError::Cancelled(_))));
     let (result, _) = scheduler
-        .io_write(&client, b"-ok-".to_vec().slice(1..3), &never)
+        .socket_write(&client, b"-ok-".to_vec().slice(1..3), &never)
         .await;
     assert_eq!(result.unwrap(), 2);
     scheduler
-        .io_wait(&server, Interest::Readable, &never)
+        .socket_wait(&server, Interest::Readable, &never)
         .await
         .unwrap();
-    let (result, buffer) = scheduler.io_read(&server, buffer.slice(1..3), &never).await;
+    let (result, buffer) = scheduler
+        .socket_read(&server, buffer.slice(1..3), &never)
+        .await;
     assert_eq!(result.unwrap(), 2);
     assert_eq!(buffer.into_inner(), vec![9, b'o', b'k', 9]);
 }

@@ -7,7 +7,9 @@ mod support;
 
 static NEVER: socketry_executor::Cancellation = socketry_executor::Cancellation::never();
 
-use socketry_executor::{Clock, File, Interest, Socket, Spawn};
+use socketry_executor::{
+    Clock, File, Interest, OperationResult, Socket, SocketDomain, SocketProtocol, SocketType, Spawn,
+};
 use socketry_executor::{SocketRegistration, SyncMode};
 use std::fs::File as StdFile;
 use std::future::{Future, poll_fn};
@@ -50,6 +52,25 @@ fn socket_pair() -> (TcpStream, TcpStream) {
     (client, server)
 }
 
+async fn connect<S: Socket>(
+    scheduler: &S,
+    address: SocketAddr,
+    cancellation: &socketry_executor::Cancellation,
+) -> OperationResult<S::Socket> {
+    let socket = scheduler
+        .socket_open(
+            SocketDomain::from(address),
+            SocketType::Stream,
+            Some(SocketProtocol::Tcp),
+            cancellation,
+        )
+        .await?;
+    scheduler
+        .socket_connect(&socket, address, cancellation)
+        .await?;
+    Ok(socket)
+}
+
 #[cfg(feature = "tokio")]
 fn error_kind<ResultType, Error: Into<io::Error>>(
     result: Result<ResultType, Error>,
@@ -69,16 +90,16 @@ where
     let server = scheduler.clone();
     let server = scheduler
         .spawn(async move {
-            let (socket, _) = server.accept(&listener, &NEVER).await.unwrap();
+            let (socket, _) = server.socket_accept(&listener, &NEVER).await.unwrap();
             let mut buffer = vec![0; 1];
             let allocation = buffer.as_ptr() as usize;
             for expected in 0..64u8 {
-                let (result, returned) = server.io_read(&socket, buffer, &NEVER).await;
+                let (result, returned) = server.socket_read(&socket, buffer, &NEVER).await;
                 buffer = returned;
                 assert_eq!(result.unwrap(), 1);
                 assert_eq!(buffer[0], expected);
                 assert_eq!(buffer.as_ptr() as usize, allocation);
-                let (result, returned) = server.io_write(&socket, buffer, &NEVER).await;
+                let (result, returned) = server.socket_write(&socket, buffer, &NEVER).await;
                 buffer = returned;
                 assert_eq!(result.unwrap(), 1);
                 assert_eq!(buffer.as_ptr() as usize, allocation);
@@ -86,26 +107,26 @@ where
         })
         .unwrap();
 
-    let socket = scheduler.connect(address, &NEVER).await.unwrap();
+    let socket = connect(&scheduler, address, &NEVER).await.unwrap();
     let mut buffer = vec![0; 1];
     let allocation = buffer.as_ptr() as usize;
     for value in 0..64u8 {
         buffer[0] = value;
-        let (result, returned) = scheduler.io_write(&socket, buffer, &NEVER).await;
+        let (result, returned) = scheduler.socket_write(&socket, buffer, &NEVER).await;
         buffer = returned;
         assert_eq!(result.unwrap(), 1);
         scheduler
-            .io_wait(&socket, Interest::Readable, &NEVER)
+            .socket_wait(&socket, Interest::Readable, &NEVER)
             .await
             .unwrap();
-        let (result, returned) = scheduler.io_read(&socket, buffer, &NEVER).await;
+        let (result, returned) = scheduler.socket_read(&socket, buffer, &NEVER).await;
         buffer = returned;
         assert_eq!(result.unwrap(), 1);
         assert_eq!(buffer[0], value);
         assert_eq!(buffer.as_ptr() as usize, allocation);
     }
     server.await.unwrap();
-    let (result, _) = scheduler.io_read(&socket, vec![0; 1], &NEVER).await;
+    let (result, _) = scheduler.socket_read(&socket, vec![0; 1], &NEVER).await;
     assert_eq!(result.unwrap(), 0, "peer closure must report EOF");
 }
 
@@ -116,7 +137,7 @@ where
     let (client, server) = socket_pair();
     let socket = scheduler.register_socket(client).unwrap();
     {
-        let mut read = pin!(scheduler.io_read(&socket, vec![0; 1024], &NEVER));
+        let mut read = pin!(scheduler.socket_read(&socket, vec![0; 1024], &NEVER));
         poll_fn(|context| {
             assert!(read.as_mut().poll(context).is_pending());
             Poll::Ready(())
@@ -126,7 +147,7 @@ where
     // Cancellation must not prevent later use of the same registration.
     // Close the peer: both the abandoned read and any later read can finish.
     drop(server);
-    let (result, buffer) = scheduler.io_read(&socket, vec![0; 1], &NEVER).await;
+    let (result, buffer) = scheduler.socket_read(&socket, vec![0; 1], &NEVER).await;
     assert_eq!(result.unwrap(), 0);
     assert_eq!(buffer.len(), 1);
 }
@@ -144,7 +165,7 @@ where
         let handle = scheduler
             .clone()
             .spawn(async move {
-                let (result, buffer) = scheduler.io_read(&socket, vec![0; 1], &NEVER).await;
+                let (result, buffer) = scheduler.socket_read(&socket, vec![0; 1], &NEVER).await;
                 assert_eq!(result.unwrap(), 1);
                 buffer[0]
             })
@@ -288,7 +309,7 @@ mod native {
         let (started, waiting) = std::sync::mpsc::channel();
         let task = scheduler
             .spawn(async move {
-                let mut read = pin!(handle.io_read(&socket, vec![0; 1024], &NEVER));
+                let mut read = pin!(handle.socket_read(&socket, vec![0; 1024], &NEVER));
                 let mut started = Some(started);
                 poll_fn(|context| -> Poll<()> {
                     assert!(read.as_mut().poll(context).is_pending());
@@ -325,9 +346,9 @@ mod native {
         assert_eq!(listener.local_addr().unwrap(), address);
 
         let (accepted, client) = std::thread::scope(|scope| {
-            let connect = scope.spawn(|| scheduler.block_on(scheduler.connect(address, &NEVER)));
+            let connect = scope.spawn(|| scheduler.block_on(connect(&scheduler, address, &NEVER)));
             let accepted = scheduler
-                .block_on(scheduler.accept(&listener, &NEVER))
+                .block_on(scheduler.socket_accept(&listener, &NEVER))
                 .expect("accept connected socket");
             let client = connect.join().unwrap().expect("connect to listener");
             (accepted, client)
@@ -338,18 +359,18 @@ mod native {
         assert_eq!(server.peer_addr().unwrap(), peer_address);
 
         scheduler.block_on(async {
-            let (result, buffer) = scheduler.io_write(&client, vec![42], &NEVER).await;
+            let (result, buffer) = scheduler.socket_write(&client, vec![42], &NEVER).await;
             assert_eq!(result.unwrap(), 1);
             assert_eq!(buffer, vec![42]);
             scheduler
-                .io_wait(&server, Interest::Readable, &NEVER)
+                .socket_wait(&server, Interest::Readable, &NEVER)
                 .await
                 .unwrap();
-            let (result, buffer) = scheduler.io_read(&server, vec![0], &NEVER).await;
+            let (result, buffer) = scheduler.socket_read(&server, vec![0], &NEVER).await;
             assert_eq!(result.unwrap(), 1);
             assert_eq!(buffer, vec![42]);
             scheduler
-                .io_wait(&client, Interest::Writable, &NEVER)
+                .socket_wait(&client, Interest::Writable, &NEVER)
                 .await
                 .unwrap();
             scheduler
@@ -378,17 +399,17 @@ mod native {
         let socket = handle.register_socket(client).unwrap();
         let (raw_listener, address) = listening_socket();
         let registered_listener = handle.register_listener(raw_listener).unwrap();
-        let file = socketry_executor::FileHandle::from(
+        let file = socketry_executor::FileDescriptor::from(
             StdFile::open(std::env::current_exe().unwrap()).unwrap(),
         );
         scheduler.shutdown();
         futures_lite::future::block_on(async {
-            let close_file = socketry_executor::FileHandle::from(tempfile::tempfile().unwrap());
+            let close_file = socketry_executor::FileDescriptor::from(tempfile::tempfile().unwrap());
             assert_eq!(
                 handle.file_close(close_file).await.unwrap_err().kind(),
                 io::ErrorKind::BrokenPipe
             );
-            let close_file = socketry_executor::FileHandle::from(tempfile::tempfile().unwrap());
+            let close_file = socketry_executor::FileDescriptor::from(tempfile::tempfile().unwrap());
             assert_eq!(
                 handle
                     .file_close_submit(close_file)
@@ -412,7 +433,7 @@ mod native {
 
         assert_eq!(
             handle
-                .listener_addr(&registered_listener)
+                .socket_local_addr(&registered_listener)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::BrokenPipe
@@ -429,7 +450,12 @@ mod native {
         executor.block_on(async {
             assert_eq!(
                 handle
-                    .socket_listen(address, &NEVER)
+                    .socket_open(
+                        SocketDomain::from(address),
+                        SocketType::Stream,
+                        Some(SocketProtocol::Tcp),
+                        &NEVER,
+                    )
                     .await
                     .err()
                     .unwrap()
@@ -449,30 +475,30 @@ mod native {
                     .kind(),
                 io::ErrorKind::BrokenPipe
             );
-            let error = match handle.connect(address, &NEVER).await {
+            let error = match connect(&handle, address, &NEVER).await {
                 Ok(_) => panic!("closed scheduler accepted a connection"),
                 Err(error) => error,
             };
             assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
 
-            let error = match handle.accept(&registered_listener, &NEVER).await {
+            let error = match handle.socket_accept(&registered_listener, &NEVER).await {
                 Ok(_) => panic!("closed scheduler accepted a listener"),
                 Err(error) => error,
             };
             assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
             assert_eq!(
                 handle
-                    .io_wait(&socket, Interest::Readable, &NEVER)
+                    .socket_wait(&socket, Interest::Readable, &NEVER)
                     .await
                     .unwrap_err()
                     .kind(),
                 io::ErrorKind::BrokenPipe
             );
 
-            let (result, buffer) = handle.io_read(&socket, vec![1, 2], &NEVER).await;
+            let (result, buffer) = handle.socket_read(&socket, vec![1, 2], &NEVER).await;
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
             assert_eq!(buffer, vec![1, 2]);
-            let (result, buffer) = handle.io_write(&socket, vec![3, 4], &NEVER).await;
+            let (result, buffer) = handle.socket_write(&socket, vec![3, 4], &NEVER).await;
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
             assert_eq!(buffer, vec![3, 4]);
             let (result, buffer) = handle.file_read_at(&file, vec![5], 0, &NEVER).await;
@@ -491,7 +517,8 @@ mod native {
                 io::ErrorKind::BrokenPipe
             );
 
-            let resize_file = socketry_executor::FileHandle::from(tempfile::tempfile().unwrap());
+            let resize_file =
+                socketry_executor::FileDescriptor::from(tempfile::tempfile().unwrap());
             assert_eq!(
                 handle
                     .file_truncate(&resize_file, 13, &NEVER)
@@ -577,8 +604,13 @@ mod tokio_adapter {
         let server = executor
             .spawn(async move {
                 assert!(tokio::runtime::Handle::try_current().is_err());
-                let (socket, _) = server_scheduler.accept(&listener, &NEVER).await.unwrap();
-                let (result, _) = server_scheduler.io_write(&socket, vec![42], &NEVER).await;
+                let (socket, _) = server_scheduler
+                    .socket_accept(&listener, &NEVER)
+                    .await
+                    .unwrap();
+                let (result, _) = server_scheduler
+                    .socket_write(&socket, vec![42], &NEVER)
+                    .await;
                 assert_eq!(result.unwrap(), 1);
                 assert!(tokio::runtime::Handle::try_current().is_err());
             })
@@ -588,12 +620,14 @@ mod tokio_adapter {
         let client = executor
             .spawn(async move {
                 assert!(tokio::runtime::Handle::try_current().is_err());
-                let socket = client_scheduler.connect(address, &NEVER).await.unwrap();
+                let socket = connect(&client_scheduler, address, &NEVER).await.unwrap();
                 client_scheduler
-                    .io_wait(&socket, Interest::Readable, &NEVER)
+                    .socket_wait(&socket, Interest::Readable, &NEVER)
                     .await
                     .unwrap();
-                let (result, buffer) = client_scheduler.io_read(&socket, vec![0; 1], &NEVER).await;
+                let (result, buffer) = client_scheduler
+                    .socket_read(&socket, vec![0; 1], &NEVER)
+                    .await;
                 assert_eq!(result.unwrap(), 1);
                 assert_eq!(buffer, vec![42]);
                 client_scheduler
@@ -689,33 +723,38 @@ mod tokio_adapter {
         let server_scheduler = Arc::clone(&scheduler);
         let server = scheduler
             .spawn(async move {
-                let (socket, _) = server_scheduler.accept(&listener, &NEVER).await.unwrap();
+                let (socket, _) = server_scheduler
+                    .socket_accept(&listener, &NEVER)
+                    .await
+                    .unwrap();
                 assert_eq!(socket.local_addr().unwrap(), address);
                 assert!(socket.peer_addr().is_ok());
-                let (result, buffer) = server_scheduler.io_read(&socket, vec![0], &NEVER).await;
+                let (result, buffer) = server_scheduler.socket_read(&socket, vec![0], &NEVER).await;
                 assert_eq!(result.unwrap(), 1);
                 assert_eq!(buffer, vec![42]);
-                let (result, _) = server_scheduler.io_write(&socket, vec![24], &NEVER).await;
+                let (result, _) = server_scheduler
+                    .socket_write(&socket, vec![24], &NEVER)
+                    .await;
                 assert_eq!(result.unwrap(), 1);
             })
             .unwrap();
 
         runtime.block_on(async {
-            let client = scheduler.connect(address, &NEVER).await.unwrap();
+            let client = connect(scheduler.as_ref(), address, &NEVER).await.unwrap();
             assert!(client.local_addr().is_ok());
             assert_eq!(client.peer_addr().unwrap(), address);
-            let (result, buffer) = scheduler.io_write(&client, vec![42], &NEVER).await;
+            let (result, buffer) = scheduler.socket_write(&client, vec![42], &NEVER).await;
             assert_eq!(result.unwrap(), 1);
             assert_eq!(buffer, vec![42]);
             scheduler
-                .io_wait(&client, Interest::Readable, &NEVER)
+                .socket_wait(&client, Interest::Readable, &NEVER)
                 .await
                 .unwrap();
-            let (result, buffer) = scheduler.io_read(&client, vec![0], &NEVER).await;
+            let (result, buffer) = scheduler.socket_read(&client, vec![0], &NEVER).await;
             assert_eq!(result.unwrap(), 1);
             assert_eq!(buffer, vec![24]);
             scheduler
-                .io_wait(&client, Interest::Writable, &NEVER)
+                .socket_wait(&client, Interest::Writable, &NEVER)
                 .await
                 .unwrap();
             scheduler
@@ -723,10 +762,10 @@ mod tokio_adapter {
                 .await
                 .unwrap();
 
-            let (result, buffer) = scheduler.io_read(&client, Vec::new(), &NEVER).await;
+            let (result, buffer) = scheduler.socket_read(&client, Vec::new(), &NEVER).await;
             assert_eq!(result.unwrap(), 0);
             assert!(buffer.is_empty());
-            let (result, buffer) = scheduler.io_write(&client, Vec::new(), &NEVER).await;
+            let (result, buffer) = scheduler.socket_write(&client, Vec::new(), &NEVER).await;
             assert_eq!(result.unwrap(), 0);
             assert!(buffer.is_empty());
 
@@ -766,7 +805,7 @@ mod tokio_adapter {
         let socket = handle.register_socket(client).unwrap();
         let (listener, address) = listening_socket();
         let listener = handle.register_listener(listener).unwrap();
-        let file = socketry_executor::FileHandle::from(
+        let file = socketry_executor::FileDescriptor::from(
             StdFile::open(std::env::current_exe().unwrap()).unwrap(),
         );
         runtime.block_on(scheduler.shutdown());
@@ -801,7 +840,7 @@ mod tokio_adapter {
         );
 
         assert_eq!(
-            handle.listener_addr(&listener).unwrap_err().kind(),
+            handle.socket_local_addr(&listener).unwrap_err().kind(),
             io::ErrorKind::BrokenPipe
         );
         assert_eq!(
@@ -815,7 +854,12 @@ mod tokio_adapter {
         runtime.block_on(async {
             assert_eq!(
                 handle
-                    .socket_listen(address, &NEVER)
+                    .socket_open(
+                        SocketDomain::from(address),
+                        SocketType::Stream,
+                        Some(SocketProtocol::Tcp),
+                        &NEVER,
+                    )
                     .await
                     .err()
                     .unwrap()
@@ -836,25 +880,25 @@ mod tokio_adapter {
                 io::ErrorKind::BrokenPipe
             );
             assert_eq!(
-                error_kind(handle.connect(address, &NEVER).await),
+                error_kind(connect(&handle, address, &NEVER).await),
                 io::ErrorKind::BrokenPipe
             );
             assert_eq!(
-                error_kind(handle.accept(&listener, &NEVER).await),
+                error_kind(handle.socket_accept(&listener, &NEVER).await),
                 io::ErrorKind::BrokenPipe
             );
             assert_eq!(
                 handle
-                    .io_wait(&socket, Interest::Readable, &NEVER)
+                    .socket_wait(&socket, Interest::Readable, &NEVER)
                     .await
                     .unwrap_err()
                     .kind(),
                 io::ErrorKind::BrokenPipe
             );
-            let (result, buffer) = handle.io_read(&socket, vec![1], &NEVER).await;
+            let (result, buffer) = handle.socket_read(&socket, vec![1], &NEVER).await;
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
             assert_eq!(buffer, vec![1]);
-            let (result, buffer) = handle.io_write(&socket, vec![2], &NEVER).await;
+            let (result, buffer) = handle.socket_write(&socket, vec![2], &NEVER).await;
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
             assert_eq!(buffer, vec![2]);
             let (result, buffer) = handle.file_read_at(&file, vec![3], 0, &NEVER).await;
@@ -873,7 +917,8 @@ mod tokio_adapter {
                 io::ErrorKind::BrokenPipe
             );
 
-            let resize_file = socketry_executor::FileHandle::from(tempfile::tempfile().unwrap());
+            let resize_file =
+                socketry_executor::FileDescriptor::from(tempfile::tempfile().unwrap());
             assert_eq!(
                 handle
                     .file_truncate(&resize_file, 13, &NEVER)
@@ -962,7 +1007,8 @@ mod tokio_adapter {
         let second = Scheduler::new(second_runtime.handle().clone());
         let (client, _server) = socket_pair();
         let socket = first.register_socket(client).unwrap();
-        let (result, buffer) = second_runtime.block_on(second.io_read(&socket, vec![0; 7], &NEVER));
+        let (result, buffer) =
+            second_runtime.block_on(second.socket_read(&socket, vec![0; 7], &NEVER));
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
         assert_eq!(buffer.len(), 7);
     }
@@ -971,7 +1017,7 @@ mod tokio_adapter {
     fn handles_and_resources_are_send_and_sync() {
         fn assert_send_sync<Value: Send + Sync>() {}
         assert_send_sync::<SchedulerHandle>();
-        assert_send_sync::<socketry_executor::scheduler::tokio::Socket>();
+        assert_send_sync::<socketry_executor::scheduler::tokio::SocketDescriptor>();
     }
 }
 
@@ -985,7 +1031,7 @@ fn ring_drains_more_than_one_submission_batch_after_cancellation() {
         let (client, _server) = socket_pair();
         let socket = selector.register_socket(client).unwrap();
         let mut reads: Vec<_> = (0..1024)
-            .map(|_| Box::pin(selector.io_read(&socket, vec![0; 16], &NEVER)))
+            .map(|_| Box::pin(selector.socket_read(&socket, vec![0; 16], &NEVER)))
             .collect();
         poll_fn(|context| {
             for read in &mut reads {
@@ -1008,16 +1054,16 @@ fn ring_shutdown_racing_submissions_returns_owned_buffers() {
         for _ in 0..16 {
             let selector = Selector::new().unwrap();
             let (client, _server) = socket_pair();
-            let socket = selector.register_socket(client).unwrap();
+            let socket = Arc::new(selector.register_socket(client).unwrap());
             let mut tasks = Vec::new();
             for _ in 0..64 {
                 let selector = selector.clone();
-                let socket = socket.clone();
+                let socket = Arc::clone(&socket);
                 tasks.push(
                     executor
                         .spawn(async move {
                             let (result, buffer) =
-                                selector.io_read(&socket, vec![42; 32], &NEVER).await;
+                                selector.socket_read(&socket, vec![42; 32], &NEVER).await;
                             assert!(result.is_err());
                             assert_eq!(buffer, vec![42; 32]);
                         })
@@ -1033,10 +1079,10 @@ fn ring_shutdown_racing_submissions_returns_owned_buffers() {
 }
 
 #[cfg(unix)]
-async fn sync_errors<S: File<File = socketry_executor::FileHandle>>(scheduler: &S) {
+async fn sync_errors<S: File<File = socketry_executor::FileDescriptor>>(scheduler: &S) {
     use std::os::{fd::OwnedFd, unix::net::UnixStream};
     let (socket, _peer) = UnixStream::pair().unwrap();
-    let file = socketry_executor::FileHandle::from(StdFile::from(OwnedFd::from(socket)));
+    let file = socketry_executor::FileDescriptor::from(StdFile::from(OwnedFd::from(socket)));
     for mode in [SyncMode::All, SyncMode::Data] {
         let expected = match mode {
             SyncMode::All => file.as_ref().sync_all(),

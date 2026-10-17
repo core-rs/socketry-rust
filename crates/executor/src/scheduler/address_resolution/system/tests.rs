@@ -97,8 +97,9 @@ fn lazy_admission_and_queued_cancellation_do_not_lookup() {
 
 #[test]
 fn running_lookup_preserves_success_and_failure_after_cancellation() {
-    let pool = pool(1);
     for fail in [false, true] {
+        // A fresh pool guarantees that the first poll admits this lookup. Completion notification can precede release of a previous job's capacity, so reusing one here could instead park admission before the synchronous start handshake.
+        let pool = pool(1);
         let (started, starting) = mpsc::channel();
         let (release, released) = mpsc::channel();
         let gate = Gate(release);

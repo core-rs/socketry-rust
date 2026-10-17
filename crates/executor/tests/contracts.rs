@@ -25,6 +25,9 @@ mod file_sync;
 #[path = "../examples/interface_probe/tests/file_truncate.rs"]
 mod file_truncate;
 
+#[path = "../examples/interface_probe/tests/file_allocate.rs"]
+mod file_allocate;
+
 async fn resources<S: File + Socket>(scheduler: &S, root: &Path) {
     stateful_file::check(scheduler, root).await;
     file_sync::check(scheduler, root).await;
@@ -270,4 +273,34 @@ fn tokio_resources_and_transferable_task_ownership() {
     runtime.block_on(resources(&scheduler.handle(), second.path()));
     runtime.block_on(ownership(scheduler.handle()));
     runtime.block_on(scheduler.shutdown());
+}
+
+#[test]
+fn simulated_allocation_contract() {
+    let scheduler = simulated::Scheduler::new(2, 1);
+    futures_lite::future::block_on(file_allocate::check(&scheduler, Path::new("fixture")));
+}
+
+#[cfg(all(target_os = "linux", feature = "native"))]
+#[test]
+fn native_allocation_contract() {
+    let scheduler = socketry_executor::Scheduler::with_workers(2).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    scheduler.block_on(file_allocate::check(&scheduler, directory.path()));
+    scheduler.block_on(file_allocate::check(&scheduler.handle(), directory.path()));
+    let readiness = socketry_executor::scheduler::selector::readiness::Selector::new().unwrap();
+    scheduler.block_on(file_allocate::check(&readiness, directory.path()));
+}
+
+#[cfg(all(target_os = "linux", feature = "tokio"))]
+#[test]
+fn tokio_allocation_contract() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let scheduler = socketry_executor::scheduler::tokio::Scheduler::new(runtime.handle().clone());
+    let directory = tempfile::tempdir().unwrap();
+    runtime.block_on(file_allocate::check(&scheduler, directory.path()));
+    runtime.block_on(file_allocate::check(&scheduler.handle(), directory.path()));
 }

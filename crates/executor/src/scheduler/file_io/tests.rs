@@ -67,3 +67,25 @@ impl Drop for Cleanup {
         let _ = std::fs::remove_file(&self.0);
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn allocation_reserves_blocks_instead_of_only_resizing() {
+    use crate::AllocationMode;
+    use std::os::unix::fs::MetadataExt;
+    for mode in [AllocationMode::Extend, AllocationMode::KeepSize] {
+        let file = tempfile::tempfile().unwrap();
+        let before = file.metadata().unwrap().blocks();
+        super::allocate(&file, 4096, 128 * 1024, mode).unwrap();
+        let metadata = file.metadata().unwrap();
+        assert!(metadata.blocks() > before);
+        assert_eq!(
+            metadata.len(),
+            if mode == AllocationMode::Extend {
+                4096 + 128 * 1024
+            } else {
+                0
+            }
+        );
+    }
+}

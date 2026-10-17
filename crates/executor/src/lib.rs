@@ -7,6 +7,7 @@
 //! Task handles own execution lifetimes; dropping one abandons its task.
 #![doc = include_str!("../readme.md")]
 
+mod allocation_mode;
 mod blocking;
 mod blocking_error;
 mod blocking_options;
@@ -29,6 +30,7 @@ mod sync_mode;
 mod task;
 mod worker;
 
+pub use allocation_mode::AllocationMode;
 pub use blocking::Blocking;
 pub use blocking_error::BlockingError;
 pub use blocking_options::BlockingOptions;
@@ -43,7 +45,7 @@ pub use io_buf_mut::IoBufMut;
 pub use notify::Notify;
 pub use operation_error::{OperationError, OperationResult};
 pub use scheduler::{
-    BufferResult, Clock, File, Interest, Scheduler, SchedulerHandle, Signals, Socket,
+    BufferResult, Clock, File, FileAllocate, Interest, Scheduler, SchedulerHandle, Signals, Socket,
     SocketRegistration,
 };
 #[cfg(all(unix, feature = "signals"))]

@@ -39,6 +39,9 @@ pub use socket::Socket;
 mod file;
 pub use file::File;
 
+mod file_allocate;
+pub use file_allocate::FileAllocate;
+
 mod clock;
 pub use clock::Clock;
 

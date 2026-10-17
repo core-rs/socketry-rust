@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Linux completion reads, writes, synchronization, and truncation using a ring owned by a dedicated selector thread. Tasks communicate through owned requests and standard wakers, so operation futures remain Send and can migrate between executor workers.
+//! Linux completion reads, writes, allocation, synchronization, and truncation using a ring owned by a dedicated selector thread. Tasks communicate through owned requests and standard wakers, so operation futures remain Send and can migrate between executor workers.
 //!
 //! Socket setup, accept, readiness waits and timers currently reuse async-io.
 //! Initialization probes the required opcodes and returns an error rather than
@@ -13,10 +13,10 @@
 //! channel per operation. It does not yet pool operation records or register
 //! buffers with the kernel.
 //!
-//! Truncation uses a native request when its opcode is available, otherwise the blocking file fallback preserves the same public contract.
+//! Allocation and truncation use native requests when their opcodes are available, otherwise the blocking file fallback preserves the same public contract.
 use super::readiness::{self, Listener, Socket};
-use crate::SyncMode;
 use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
+use crate::{AllocationMode, FileAllocate, SyncMode};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
 use event_listener::{Event as CompletionEvent, Listener as _};
 use futures_channel::oneshot;
@@ -236,6 +236,11 @@ impl<B: IoBuf> PendingRequest for Request<B> {
 enum FileOperation {
     Sync(SyncMode),
     Truncate(u64),
+    Allocate {
+        offset: u64,
+        length: u64,
+        mode: AllocationMode,
+    },
 }
 
 // Buffer-free file operations retain the file until the original completion exactly like transfer requests.
@@ -263,6 +268,14 @@ impl PendingRequest for FileRequest {
                 opcode::Fsync::new(descriptor).flags(flags).build()
             }
             FileOperation::Truncate(length) => opcode::Ftruncate::new(descriptor, length).build(),
+            FileOperation::Allocate {
+                offset,
+                length,
+                mode,
+            } => opcode::Fallocate::new(descriptor, length)
+                .offset(offset)
+                .mode(crate::scheduler::file_io::allocation_flags(mode))
+                .build(),
         };
         entry.user_data(self.identifier)
     }
@@ -401,6 +414,7 @@ impl Drop for CancelOnDrop {
 pub struct Selector {
     controller: Arc<Controller>,
     supports_file_truncate: bool,
+    supports_file_allocate: bool,
 }
 
 impl Selector {
@@ -437,6 +451,7 @@ impl Selector {
         })?;
         Ok(Self {
             supports_file_truncate: probe.is_supported(opcode::Ftruncate::CODE),
+            supports_file_allocate: probe.is_supported(opcode::Fallocate::CODE),
             controller: Arc::new(Controller {
                 commands,
                 notification,
@@ -746,6 +761,37 @@ impl SocketOperations for Selector {
             .await
     }
 }
+impl FileAllocate for Selector {
+    async fn file_allocate(
+        &self,
+        file: &Self::File,
+        offset: u64,
+        length: u64,
+        mode: AllocationMode,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        self.check_open()?;
+        crate::scheduler::file_io::validate_allocation(offset, length)?;
+        if self.supports_file_allocate {
+            self.file_operation(
+                file,
+                FileOperation::Allocate {
+                    offset,
+                    length,
+                    mode,
+                },
+                cancellation,
+            )
+            .await
+        } else {
+            readiness::Selector
+                .file_allocate(file, offset, length, mode, cancellation)
+                .await
+        }
+    }
+}
+
 impl File for Selector {
     type File = Arc<StdFile>;
     async fn file_truncate(

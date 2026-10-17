@@ -21,6 +21,9 @@ mod file_sync;
 #[path = "tests/file_truncate.rs"]
 mod file_truncate;
 
+#[path = "tests/file_allocate.rs"]
+mod file_allocate;
+
 #[test]
 fn stateful_operations_forward_and_preserve_short_transfers() {
     let scheduler = FailingFiles {
@@ -381,4 +384,34 @@ fn simulated_truncate_rejects_excessive_storage_without_changing_file_or_cursor(
         scheduler.file_truncate(&file, 0, &NEVER).await.unwrap();
         assert!(scheduler.contents(path).is_empty());
     });
+}
+
+#[test]
+fn simulated_allocation_reserves_space_and_preserves_file_contracts() {
+    use socketry_executor::{AllocationMode, FileAllocate};
+    let scheduler = simulated::Scheduler::new(2, 1);
+    block_on(async {
+        file_allocate::check(&scheduler, Path::new("fixture")).await;
+        let file = scheduler
+            .file_open(Path::new("bounded-allocation"), FileOptions::CREATE, &NEVER)
+            .await
+            .unwrap();
+        for mode in [AllocationMode::Extend, AllocationMode::KeepSize] {
+            assert_eq!(
+                scheduler
+                    .file_allocate(&file, 0, 1024 * 1024 + 1, mode, &NEVER)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::FileTooLarge
+            );
+        }
+        assert_eq!(scheduler.contents(Path::new("bounded-allocation")), b"");
+        scheduler
+            .file_allocate(&file, 0, 1024 * 1024, AllocationMode::KeepSize, &NEVER)
+            .await
+            .unwrap();
+        assert_eq!(scheduler.contents(Path::new("bounded-allocation")), b"");
+    });
+    assert_eq!(scheduler.open_files(), 0);
 }

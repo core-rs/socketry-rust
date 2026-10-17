@@ -78,6 +78,8 @@ The optional `signals` feature adds Unix `Signals::signal_notify(&signals, targe
 
 Generic code can accept `Socket`, `File`, `Clock`, and `Spawn` capabilities. Socketry and the optional Tokio adapter implement these contracts with concrete future and resource types. Import the traits to call their methods.
 
+`FileAllocate` adds optional range allocation with `AllocationMode::Extend` or `KeepSize`. Native and Tokio implementations currently provide it on Linux; unsupported targets omit the trait implementation. See the [executor I/O documentation](crates/executor/readme.md#io-and-selectors) for allocation and filesystem guarantees.
+
 `File` is the scheduler capability trait; `File::File` is its associated resource type. Generic code can create and use files without importing OS resource types:
 
 ```rust

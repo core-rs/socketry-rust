@@ -14,6 +14,8 @@ use super::operation::cancellable;
 use super::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
 use crate::SyncMode;
 use crate::blocking_pool::BlockingPool;
+#[cfg(target_os = "linux")]
+use crate::{AllocationMode, FileAllocate};
 use crate::{
     Blocking, BlockingError, BlockingOptions, BlockingTask, Cancellation, FileOptions, IoBuf,
     IoBufMut, OperationResult, SocketRegistration, Spawn, SpawnError, TaskError,
@@ -720,6 +722,33 @@ impl SocketOperations for SchedulerHandle {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl FileAllocate for SchedulerHandle {
+    async fn file_allocate(
+        &self,
+        file: &Self::File,
+        offset: u64,
+        length: u64,
+        mode: AllocationMode,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        self.shared.check_open()?;
+        let file = Arc::clone(file);
+        let cancellation = cancellation.clone();
+        file_operation_result(
+            self.shared
+                .runtime
+                .spawn_blocking(move || {
+                    super::blocking::run(&cancellation, || {
+                        super::file_io::allocate(&file, offset, length, mode)
+                    })
+                })
+                .await,
+        )
+    }
+}
+
 impl File for SchedulerHandle {
     type File = Arc<StdFile>;
     async fn file_truncate(
@@ -1014,6 +1043,22 @@ impl SocketOperations for Scheduler {
         self.handle.io_wait(socket, interest, cancellation).await
     }
 }
+#[cfg(target_os = "linux")]
+impl FileAllocate for Scheduler {
+    async fn file_allocate(
+        &self,
+        file: &Self::File,
+        offset: u64,
+        length: u64,
+        mode: AllocationMode,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.handle
+            .file_allocate(file, offset, length, mode, cancellation)
+            .await
+    }
+}
+
 impl File for Scheduler {
     type File = <SchedulerHandle as File>::File;
     async fn file_truncate(

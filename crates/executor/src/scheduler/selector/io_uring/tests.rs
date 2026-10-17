@@ -91,6 +91,7 @@ fn disconnected_selector() -> (Selector, UnixStream) {
     (
         Selector {
             supports_file_truncate: true,
+            supports_file_allocate: true,
             controller: Arc::new(Controller {
                 commands,
                 notification,
@@ -509,6 +510,7 @@ fn cooperative_cancellation_waits_for_original_completion_and_preserves_progress
             let (notification, _peer) = UnixStream::pair().unwrap();
             let selector = Selector {
                 supports_file_truncate: true,
+                supports_file_allocate: true,
                 controller: Arc::new(Controller {
                     commands,
                     notification,
@@ -708,6 +710,16 @@ fn buffer_free_file_operations_are_lazy_and_retain_the_file_until_original_compl
             FileOperation::Sync(SyncMode::All),
             FileOperation::Sync(SyncMode::Data),
             FileOperation::Truncate(7),
+            FileOperation::Allocate {
+                offset: 3,
+                length: 7,
+                mode: AllocationMode::Extend,
+            },
+            FileOperation::Allocate {
+                offset: 3,
+                length: 7,
+                mode: AllocationMode::KeepSize,
+            },
         ] {
             for abandon in [false, true] {
                 for complete in [false, true] {
@@ -715,6 +727,7 @@ fn buffer_free_file_operations_are_lazy_and_retain_the_file_until_original_compl
                     let (notification, _peer) = UnixStream::pair().unwrap();
                     let selector = Selector {
                         supports_file_truncate: true,
+                        supports_file_allocate: true,
                         controller: Arc::new(Controller {
                             commands,
                             notification,
@@ -787,6 +800,15 @@ async fn run_file_operation(
     match operation {
         FileOperation::Sync(mode) => selector.file_sync(file, mode, cancellation).await,
         FileOperation::Truncate(length) => selector.file_truncate(file, length, cancellation).await,
+        FileOperation::Allocate {
+            offset,
+            length,
+            mode,
+        } => {
+            selector
+                .file_allocate(file, offset, length, mode, cancellation)
+                .await
+        }
     }
 }
 
@@ -890,6 +912,89 @@ fn truncate_preparation_is_inert_and_failed_admission_preserves_file() {
         assert!(
             selector
                 .file_truncate(&file, 13, &NEVER)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("identifiers exhausted")
+        );
+        assert_eq!(file.metadata().unwrap().len(), 0);
+    });
+}
+
+mod allocation_contract {
+    use crate as socketry_executor;
+    include!("../../../../examples/interface_probe/tests/file_allocate.rs");
+}
+
+#[test]
+fn allocation_native_and_fallback_preserve_contract_and_reserve_blocks() {
+    use std::os::unix::fs::MetadataExt;
+    async_io::block_on(async {
+        let selector = Selector::new().unwrap();
+        // CI must exercise native allocation, rather than silently testing only the fallback.
+        assert!(selector.supports_file_allocate);
+        let mut fallback = selector.clone();
+        fallback.supports_file_allocate = false;
+        for backend in [&selector, &fallback] {
+            let directory = tempfile::tempdir().unwrap();
+            allocation_contract::check(backend, directory.path()).await;
+            let file = Arc::new(tempfile::tempfile().unwrap());
+            let before = file.metadata().unwrap().blocks();
+            backend
+                .file_allocate(&file, 4096, 128 * 1024, AllocationMode::KeepSize, &NEVER)
+                .await
+                .unwrap();
+            assert_eq!(file.metadata().unwrap().len(), 0);
+            assert!(file.metadata().unwrap().blocks() > before);
+        }
+        selector.shutdown().await;
+        for backend in [&selector, &fallback] {
+            let file = Arc::new(tempfile::tempfile().unwrap());
+            assert_eq!(
+                backend
+                    .file_allocate(&file, 0, 4096, AllocationMode::Extend, &NEVER)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::BrokenPipe
+            );
+            assert_eq!(file.metadata().unwrap().len(), 0);
+        }
+    });
+}
+
+#[test]
+fn allocation_preparation_is_inert_and_failed_admission_preserves_file() {
+    async_io::block_on(async {
+        for mode in [AllocationMode::Extend, AllocationMode::KeepSize] {
+            let (mut request, _result) = sync_request(123);
+            request.operation = FileOperation::Allocate {
+                offset: 3,
+                length: 7,
+                mode,
+            };
+            let entry = request.entry();
+            assert_eq!(entry.get_user_data(), 123);
+            assert_eq!(entry.get_opcode(), u32::from(opcode::Fallocate::CODE));
+            assert_eq!(request.file.metadata().unwrap().len(), 0);
+        }
+        let (selector, _peer) = disconnected_selector();
+        let file = Arc::new(tempfile::tempfile().unwrap());
+        assert_eq!(
+            selector
+                .file_allocate(&file, 0, 4096, AllocationMode::Extend, &NEVER)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        selector
+            .controller
+            .next_identifier
+            .store(CANCEL_TAG - 1, Ordering::Relaxed);
+        assert!(
+            selector
+                .file_allocate(&file, 0, 4096, AllocationMode::KeepSize, &NEVER)
                 .await
                 .unwrap_err()
                 .to_string()

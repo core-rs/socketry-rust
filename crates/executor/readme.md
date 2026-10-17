@@ -198,6 +198,22 @@ async fn resize<S: File>(
 }
 ```
 
+`FileAllocate` is an optional capability for reserving backing space. Native and Tokio schedulers implement it on Linux; other targets currently omit the implementation at compile time. `AllocationMode::Extend` reserves a range and extends the logical length if necessary. `KeepSize` reserves it without changing the length, including beyond EOF. Both modes preserve existing contents and the shared cursor. Length must be positive and `offset + length` must fit in `i64`.
+
+The Linux implementation uses `fallocate` on the existing file pools, or a native io\_uring request when its opcode is available. Filesystem errors, including unsupported allocation, are preserved. There is no zero-writing or resize-only emulation. Cancellation and file retention follow the same completion contract as synchronization. Allocation does not unshare copy-on-write extents or guarantee durability; await related operations in order. Platform-specific operations can also be called explicitly through `spawn_blocking`.
+
+```rust,no_run
+use socketry_executor::{AllocationMode, Cancellation, FileAllocate, OperationResult};
+
+async fn reserve<S: FileAllocate>(
+    scheduler: &S,
+    file: &S::File,
+    cancellation: &Cancellation,
+) -> OperationResult<()> {
+    scheduler.file_allocate(file, 0, 1024 * 1024, AllocationMode::KeepSize, cancellation).await
+}
+```
+
 `file_sync(file, SyncMode, cancellation)` waits for OS synchronization and reports its result. `SyncMode::All` synchronizes contents and metadata; `SyncMode::Data` can omit metadata unrelated to retrieving file contents. Backends may provide full synchronization for either mode. Await preceding writes first: sync does not order concurrent writes, flush application buffers, or synchronize the parent directory entry. It leaves the shared cursor unchanged. Durability follows the OS, filesystem, and device guarantees.
 
 io\_uring uses native `Fsync` requests; readiness and Tokio use their existing blocking file pools. Cancellation before dispatch prevents submission, and blocking workers check again before starting. Once submitted, cancellation is best effort; a successful completion wins concurrent cancellation. Dropping a waiter does not undo the operation or release a file still in use by the backend.

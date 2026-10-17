@@ -5,7 +5,7 @@
 //! This is an interface probe, not a model of TCP scheduling or durability.
 use super::{Cancellation, File, FileOptions, OperationResult, Socket};
 use event_listener::Event;
-use socketry_executor::{BufferResult, SyncMode};
+use socketry_executor::{AllocationMode, BufferResult, FileAllocate, SyncMode};
 use socketry_executor::{Interest, IoBuf, IoBufMut};
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, SeekFrom};
@@ -104,6 +104,36 @@ impl Scheduler {
             .values()
             .map(|bytes| Arc::strong_count(bytes) - 1)
             .sum()
+    }
+}
+
+impl FileAllocate for Scheduler {
+    async fn file_allocate(
+        &self,
+        file: &Self::File,
+        offset: u64,
+        length: u64,
+        mode: AllocationMode,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        let end = offset
+            .checked_add(length)
+            .filter(|end| length > 0 && *end <= i64::MAX as u64)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        if !file.writable {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
+        }
+        if end > 1024 * 1024 {
+            return Err(io::Error::from(io::ErrorKind::FileTooLarge).into());
+        }
+        let mut bytes = file.bytes.lock().unwrap();
+        let additional = (end as usize).saturating_sub(bytes.len());
+        bytes.reserve(additional);
+        if mode == AllocationMode::Extend && end as usize > bytes.len() {
+            bytes.resize(end as usize, 0);
+        }
+        Ok(())
     }
 }
 

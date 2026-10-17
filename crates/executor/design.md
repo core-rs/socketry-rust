@@ -194,7 +194,7 @@ scheduler.sleep_until(deadline, cancellation)
 scheduler.sleep(duration, cancellation)
 ```
 
-This list includes proposed extensions. The implemented `File` methods are `file_open`, `file_seek`, `file_sync`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at`. The implemented TCP methods are `socket_listen`, `connect`, `accept`, `io_read`, `io_write`, and `io_wait`, plus synchronous `listener_addr`, `socket_local_addr`, and `socket_peer_addr`. Async I/O methods take `&Cancellation`; buffer operations return `(OperationResult<usize>, B)` on success, error, and cancellation.
+This list includes proposed extensions. The implemented `File` methods are `file_open`, `file_seek`, `file_sync`, `file_truncate`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at`. The implemented TCP methods are `socket_listen`, `connect`, `accept`, `io_read`, `io_write`, and `io_wait`, plus synchronous `listener_addr`, `socket_local_addr`, and `socket_peer_addr`. Async I/O methods take `&Cancellation`; buffer operations return `(OperationResult<usize>, B)` on success, error, and cancellation.
 
 An optional context pairing a scheduler reference with a cancellation signal could reduce repetitive arguments. Such a context should preserve explicit dependency and cancellation boundaries; it is a convenience, not a new computation abstraction.
 
@@ -306,6 +306,13 @@ pub trait File: Send + Sync {
         cancellation: &Cancellation,
     ) -> impl Future<Output = OperationResult<Self::File>> + Send;
 
+    fn file_truncate(
+        &self,
+        file: &Self::File,
+        length: u64,
+        cancellation: &Cancellation,
+    ) -> impl Future<Output = OperationResult<()>> + Send;
+
     fn file_sync(
         &self,
         file: &Self::File,
@@ -401,7 +408,7 @@ pub trait Clock: Send + Sync {
 }
 ```
 
-The associated file resource, synchronization, and both stateful and positioned file operations above are implemented. Current TCP operations use `connect`, `accept`, `io_read`, and `io_write`, without flags; the sketch shows possible syscall-oriented extensions. The connect convenience creates and connects a socket; a lower-level variant taking an existing socket may be needed for callers that configure it before connecting. Combined TCP `socket_listen`, address inspection, and optional `SocketRegistration` are implemented; separate socket setup, message ownership, and portable flags still need signatures. Explicit close consumes its handle and follows the shared admission contract below.
+The associated file resource, truncation, synchronization, and both stateful and positioned file operations above are implemented. Current TCP operations use `connect`, `accept`, `io_read`, and `io_write`, without flags; the sketch shows possible syscall-oriented extensions. The connect convenience creates and connects a socket; a lower-level variant taking an existing socket may be needed for callers that configure it before connecting. Combined TCP `socket_listen`, address inspection, and optional `SocketRegistration` are implemented; separate socket setup, message ownership, and portable flags still need signatures. Explicit close consumes its handle and follows the shared admission contract below.
 
 Additional capability shapes follow the same convention:
 
@@ -680,6 +687,10 @@ Not every useful scheduler operation has an io\_uring opcode; seek and address r
 
 ### File semantics
 
+Implemented `file_truncate(file, length, cancellation)` sets the logical file length and returns `OperationResult<()>` after completion. Shrinking discards the suffix; extending supplies zero bytes. The file must be open for writing, even when the requested length is unchanged. The shared cursor remains unchanged, including when it is past the new EOF. Lengths greater than `i64::MAX` return `InvalidInput`; OS errors and filesystem limits are preserved. Truncation does not guarantee disk-space reservation or durability, and callers must await related operations in order. Use `file_sync` after completion when synchronization is needed.
+
+Truncation is lazy and checks cancellation before dispatch; blocking workers check again before execution. Started blocking calls preserve their result. Native io\_uring requests use best-effort cancellation and retain the file through the original completion, with success winning a concurrent cancellation request. Dropping a waiter cannot undo a resize. Readiness and Tokio use `std::fs::File::set_len` on existing file pools. io\_uring probes `Ftruncate` once at initialization and uses it when available; older kernels use the blocking fallback without disabling the ring or exposing `Unsupported` for this operation. No extra cursor tracking or per-file serialization is introduced. The simulator implements resizing within its existing 1 MiB storage bound and reports `FileTooLarge` when truncation would exceed it.
+
 Implemented `file_sync(file, SyncMode, cancellation)` waits for OS synchronization and returns `OperationResult<()>`. `SyncMode::All` requests file contents and metadata; `SyncMode::Data` requests contents and metadata needed to retrieve them, and may perform full synchronization on some platforms. io\_uring submits `Fsync` with the appropriate data-sync flag and probes that opcode at initialization. Native readiness and Tokio use `std::fs::File::sync_all`/`sync_data` through their existing file pools. No payload buffer, scheduler-side cursor state, or per-file serialization is required.
 
 Synchronization is lazy and checks cancellation before dispatch; blocking workers check again before executing. Started blocking calls preserve their actual result. Ring cancellation is best effort and waits for the original completion, with successful completion winning a concurrent cancellation request. All backends retain the file until access ends even if the waiter disappears. Await preceding writes before synchronization; this operation does not order concurrent writes, flush application buffers, or synchronize the parent directory entry. Durability follows OS, filesystem, and device guarantees. The in-memory simulator treats synchronization as immediate and does not model crash durability. The ordinary method waits for completion; there is no `file_sync_submit`.
@@ -824,7 +835,7 @@ The simulator has bounded in-memory file sizes and unbounded byte queues. It doe
 | Capabilities | Public `File`, `Socket`, `SocketRegistration`, `Clock`, `Spawn`, and `Blocking`; associated resources and initial file/TCP creation implemented. Broader hooks remain design work. |
 | Blocking execution | Dedicated native/Tokio pools, configurable worker and admission limits, queued cancellation, and owning completion handles implemented. Started closures finish independently; graceful completion requires awaiting them. |
 | Linked operations | Prepared chains and `Linked` remain proposed; native linking, whole-chain blocking jobs, and readiness sequencing are not implemented. |
-| File operations | `file_open`, `file_seek`, `file_sync`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at` implemented with owned buffers. Explicit close, allocation, and metadata hooks pending. |
+| File operations | `file_open`, `file_seek`, `file_sync`, `file_truncate`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at` implemented with owned buffers. Explicit close, allocation, and metadata hooks pending. |
 | Submission and completion | Close, socket shutdown, and advice pairs remain proposed; their admission, `_submit`, and safe CQE suppression are pending. The public blocking pool has its own bounded admission. |
 | Socket operations | TCP listen, connect, accept, address inspection, generic read/write, readiness, and optional OS registration implemented. General sockets and message I/O pending. |
 | Backends | Native readiness, blocking file fallbacks, Linux io_uring, and an adapter to an existing Tokio runtime implemented; the example simulator implements the public I/O traits. |

@@ -152,6 +152,17 @@ impl Socket for SchedulerHandle {
 }
 impl File for SchedulerHandle {
     type File = <DefaultSelector as File>::File;
+    async fn file_truncate(
+        &self,
+        file: &Self::File,
+        length: u64,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.selector()?
+            .file_truncate(file, length, cancellation)
+            .await
+    }
+
     async fn file_sync(
         &self,
         file: &Self::File,
@@ -318,6 +329,15 @@ impl Socket for Scheduler {
 }
 impl File for Scheduler {
     type File = <SchedulerHandle as File>::File;
+    async fn file_truncate(
+        &self,
+        file: &Self::File,
+        length: u64,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.handle.file_truncate(file, length, cancellation).await
+    }
+
     async fn file_sync(
         &self,
         file: &Self::File,

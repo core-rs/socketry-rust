@@ -90,6 +90,7 @@ fn disconnected_selector() -> (Selector, UnixStream) {
     let (notification, peer) = UnixStream::pair().unwrap();
     (
         Selector {
+            supports_file_truncate: true,
             controller: Arc::new(Controller {
                 commands,
                 notification,
@@ -305,6 +306,19 @@ fn closed_selector_rejects_its_direct_network_operations() {
                 .kind(),
             io::ErrorKind::BrokenPipe
         );
+        for supports_file_truncate in [false, true] {
+            let mut selector = selector.clone();
+            selector.supports_file_truncate = supports_file_truncate;
+            assert_eq!(
+                selector
+                    .file_truncate(&file, 13, &NEVER)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::BrokenPipe
+            );
+        }
+        assert_eq!(file.metadata().unwrap().len(), 0);
         assert!(selector.connect(address, &NEVER).await.is_err());
         assert!(selector.accept(&listener, &NEVER).await.is_err());
         assert!(
@@ -494,6 +508,7 @@ fn cooperative_cancellation_waits_for_original_completion_and_preserves_progress
             let (commands, incoming) = mpsc::channel();
             let (notification, _peer) = UnixStream::pair().unwrap();
             let selector = Selector {
+                supports_file_truncate: true,
                 controller: Arc::new(Controller {
                     commands,
                     notification,
@@ -581,13 +596,13 @@ fn cancellation_before_submission_and_retry_returns_owned_buffers() {
     });
 }
 
-fn sync_request(identifier: u64) -> (SyncRequest, oneshot::Receiver<io::Result<()>>) {
+fn sync_request(identifier: u64) -> (FileRequest, oneshot::Receiver<io::Result<()>>) {
     let (reply, result) = oneshot::channel();
     (
-        SyncRequest {
+        FileRequest {
             identifier,
             file: Arc::new(tempfile::tempfile().unwrap()),
-            mode: SyncMode::All,
+            operation: FileOperation::Sync(SyncMode::All),
             reply: Some(reply),
             cancelling: false,
         },
@@ -687,61 +702,199 @@ fn pending_and_in_flight_sync_cancellation_preserve_retirement() {
 }
 
 #[test]
-fn sync_is_lazy_and_retains_the_file_until_original_completion() {
+fn buffer_free_file_operations_are_lazy_and_retain_the_file_until_original_completion() {
     async_io::block_on(async {
-        for abandon in [false, true] {
-            for complete in [false, true] {
-                let (commands, incoming) = mpsc::channel();
-                let (notification, _peer) = UnixStream::pair().unwrap();
-                let selector = Selector {
-                    controller: Arc::new(Controller {
-                        commands,
-                        notification,
-                        next_identifier: AtomicU64::new(0),
-                        closed: AtomicBool::new(false),
-                        shutdown: Arc::new(Shutdown {
-                            finished: AtomicBool::new(false),
-                            event: CompletionEvent::new(),
+        for operation in [
+            FileOperation::Sync(SyncMode::All),
+            FileOperation::Sync(SyncMode::Data),
+            FileOperation::Truncate(7),
+        ] {
+            for abandon in [false, true] {
+                for complete in [false, true] {
+                    let (commands, incoming) = mpsc::channel();
+                    let (notification, _peer) = UnixStream::pair().unwrap();
+                    let selector = Selector {
+                        supports_file_truncate: true,
+                        controller: Arc::new(Controller {
+                            commands,
+                            notification,
+                            next_identifier: AtomicU64::new(0),
+                            closed: AtomicBool::new(false),
+                            shutdown: Arc::new(Shutdown {
+                                finished: AtomicBool::new(false),
+                                event: CompletionEvent::new(),
+                            }),
                         }),
-                    }),
-                };
-                let file = Arc::new(tempfile::tempfile().unwrap());
-                let cancellation = Cancellation::new();
-                drop(selector.file_sync(&file, SyncMode::All, &cancellation));
-                assert!(incoming.try_recv().is_err());
-                assert_eq!(Arc::strong_count(&file), 1);
-                let mut sync = Box::pin(selector.file_sync(&file, SyncMode::Data, &cancellation));
-                assert!(futures_lite::future::poll_once(&mut sync).await.is_none());
-                let Command::Submit(request) = incoming.try_recv().unwrap() else {
-                    panic!("expected sync submission")
-                };
-                let identifier = request.identifier();
-                cancellation.cancel();
-                assert!(futures_lite::future::poll_once(&mut sync).await.is_none());
-                assert!(
-                    matches!(incoming.try_recv().unwrap(), Command::Cancel(value) if value == identifier)
-                );
-                assert_eq!(Arc::strong_count(&file), 2);
-                let completion = if complete {
-                    Ok(0)
-                } else {
-                    Err(io::Error::from_raw_os_error(libc::ECANCELED))
-                };
-                if abandon {
-                    drop(sync);
+                    };
+                    let file = Arc::new(tempfile::tempfile().unwrap());
+                    let cancellation = Cancellation::new();
+                    drop(run_file_operation(
+                        &selector,
+                        &file,
+                        operation,
+                        &cancellation,
+                    ));
+                    assert!(incoming.try_recv().is_err());
+                    assert_eq!(Arc::strong_count(&file), 1);
+                    let mut sync = Box::pin(run_file_operation(
+                        &selector,
+                        &file,
+                        operation,
+                        &cancellation,
+                    ));
+                    assert!(futures_lite::future::poll_once(&mut sync).await.is_none());
+                    let Command::Submit(request) = incoming.try_recv().unwrap() else {
+                        panic!("expected sync submission")
+                    };
+                    let identifier = request.identifier();
+                    cancellation.cancel();
+                    assert!(futures_lite::future::poll_once(&mut sync).await.is_none());
+                    assert!(
+                        matches!(incoming.try_recv().unwrap(), Command::Cancel(value) if value == identifier)
+                    );
                     assert_eq!(Arc::strong_count(&file), 2);
-                    request.finish(completion);
-                } else {
-                    request.finish(completion);
-                    let result = sync.await;
-                    if complete {
-                        result.unwrap();
+                    let completion = if complete {
+                        Ok(0)
                     } else {
-                        assert!(matches!(result, Err(crate::OperationError::Cancelled(_))));
+                        Err(io::Error::from_raw_os_error(libc::ECANCELED))
+                    };
+                    if abandon {
+                        drop(sync);
+                        assert_eq!(Arc::strong_count(&file), 2);
+                        request.finish(completion);
+                    } else {
+                        request.finish(completion);
+                        let result = sync.await;
+                        if complete {
+                            result.unwrap();
+                        } else {
+                            assert!(matches!(result, Err(crate::OperationError::Cancelled(_))));
+                        }
                     }
+                    assert_eq!(Arc::strong_count(&file), 1);
                 }
-                assert_eq!(Arc::strong_count(&file), 1);
             }
         }
+    });
+}
+
+async fn run_file_operation(
+    selector: &Selector,
+    file: &Arc<StdFile>,
+    operation: FileOperation,
+    cancellation: &Cancellation,
+) -> OperationResult<()> {
+    match operation {
+        FileOperation::Sync(mode) => selector.file_sync(file, mode, cancellation).await,
+        FileOperation::Truncate(length) => selector.file_truncate(file, length, cancellation).await,
+    }
+}
+
+#[test]
+fn truncate_capability_fallback_preserves_length_cursor_and_errors() {
+    async_io::block_on(async {
+        let selector = Selector::new().unwrap();
+        let mut fallback = selector.clone();
+        fallback.supports_file_truncate = false;
+        for backend in [&selector, &fallback] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("truncate");
+            let file = backend
+                .file_open(
+                    &path,
+                    FileOptions {
+                        read: true,
+                        ..FileOptions::CREATE
+                    },
+                    &NEVER,
+                )
+                .await
+                .unwrap();
+            backend
+                .file_seek(&file, SeekFrom::Start(3), &NEVER)
+                .await
+                .unwrap();
+            backend.file_truncate(&file, 5, &NEVER).await.unwrap();
+            assert_eq!(file.metadata().unwrap().len(), 5);
+            assert_eq!(
+                backend
+                    .file_seek(&file, SeekFrom::Current(0), &NEVER)
+                    .await
+                    .unwrap(),
+                3
+            );
+            let (result, bytes) = backend.file_read(&file, vec![255; 2], &NEVER).await;
+            assert_eq!(result.unwrap(), 2);
+            assert_eq!(bytes, [0, 0]);
+            backend.file_truncate(&file, 1, &NEVER).await.unwrap();
+            assert_eq!(file.metadata().unwrap().len(), 1);
+            assert_eq!(
+                backend
+                    .file_seek(&file, SeekFrom::Current(0), &NEVER)
+                    .await
+                    .unwrap(),
+                5
+            );
+            let cancelled = Cancellation::new();
+            cancelled.cancel();
+            assert!(matches!(
+                backend.file_truncate(&file, 0, &cancelled).await,
+                Err(crate::OperationError::Cancelled(_))
+            ));
+            assert_eq!(
+                backend
+                    .file_truncate(&file, u64::MAX, &NEVER)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+            let reader = backend
+                .file_open(&path, FileOptions::READ, &NEVER)
+                .await
+                .unwrap();
+            assert!(matches!(
+                backend.file_truncate(&reader, 0, &NEVER).await,
+                Err(crate::OperationError::Io(_))
+            ));
+            assert_eq!(file.metadata().unwrap().len(), 1);
+        }
+        selector.shutdown().await;
+    });
+}
+
+#[test]
+fn truncate_preparation_is_inert_and_failed_admission_preserves_file() {
+    async_io::block_on(async {
+        let (mut request, _result) = sync_request(123);
+        request.operation = FileOperation::Truncate(7);
+        // Building a request is inert, including on kernels where the selector would choose the fallback.
+        let entry = request.entry();
+        assert_eq!(entry.get_user_data(), 123);
+        assert_eq!(entry.get_opcode(), u32::from(opcode::Ftruncate::CODE));
+        assert_eq!(request.file.metadata().unwrap().len(), 0);
+        let (selector, _peer) = disconnected_selector();
+        let file = Arc::new(tempfile::tempfile().unwrap());
+        assert_eq!(
+            selector
+                .file_truncate(&file, 13, &NEVER)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        selector
+            .controller
+            .next_identifier
+            .store(CANCEL_TAG - 1, Ordering::Relaxed);
+        assert!(
+            selector
+                .file_truncate(&file, 13, &NEVER)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("identifiers exhausted")
+        );
+        assert_eq!(file.metadata().unwrap().len(), 0);
     });
 }

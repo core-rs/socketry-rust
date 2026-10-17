@@ -1,9 +1,25 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Blocking synchronization, shared-cursor, and positioned file operations shared by selector adapters.
+//! Blocking truncation, synchronization, shared-cursor, and positioned file operations shared by selector adapters.
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+
+pub(crate) fn validate_length(length: u64) -> io::Result<()> {
+    if length > i64::MAX as u64 {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "file length exceeds i64::MAX",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn truncate(file: &File, length: u64) -> io::Result<()> {
+    validate_length(length)?;
+    retry_interrupted(|| file.set_len(length))
+}
 
 pub(crate) fn sync(file: &File, mode: crate::SyncMode) -> io::Result<()> {
     retry_interrupted(|| match mode {

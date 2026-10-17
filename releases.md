@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add optional `SocketMessages` with owned scatter/gather send/receive, IP addresses, peeking, routing flags, and truncation metadata. Native readiness, Tokio, and io_uring share the buffer/cancellation contract; include conformance tests and a commented UDP example.
+
 - Add typed `SocketOptions<O>` get/set capabilities with `SocketReuseAddress`, `SocketKeepalive`, and `TcpNoDelay`. Native, Tokio, io_uring, and simulated backends support lazy cancellable configuration; generic consumers require each option at compile time. Add shared contract tests and a commented listener configuration example.
 
 - Add required `Socket::socket_shutdown`, `socket_shutdown_submit`, `socket_close`, and `socket_close_submit` across native, Tokio, io_uring, and simulated sockets. Directional shutdown borrows the descriptor; close consumes exclusive ownership. Accepted cleanup shares bounded admission and graceful draining with file close. Add a commented half-close example and conformance/lifetime tests. External `Socket` implementations must supply all four operations.

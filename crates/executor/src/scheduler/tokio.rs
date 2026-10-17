@@ -20,6 +20,7 @@ use crate::{
     IoBufMut, OperationResult, SocketRegistration, Spawn, SpawnError, TaskError,
 };
 use crate::{FileDescriptor, SyncMode};
+use crate::{SocketMessage, SocketMessages, SocketRecvFlags, SocketRecvResult, SocketSendFlags};
 use ::tokio::runtime::Handle;
 use ::tokio::task::{AbortHandle, JoinHandle};
 use event_listener::Event;
@@ -1358,3 +1359,96 @@ impl Blocking for SchedulerHandle {
 
 #[cfg(test)]
 mod tests;
+
+impl SocketMessages for SchedulerHandle {
+    async fn socket_sendmsg<B: IoBuf>(
+        &self,
+        socket: &Self::Socket,
+        message: SocketMessage<B>,
+        flags: SocketSendFlags,
+        cancellation: &Cancellation,
+    ) -> (OperationResult<usize>, SocketMessage<B>) {
+        if let Err(error) = self.check_runtime(socket.runtime()) {
+            return (Err(error.into()), message);
+        }
+        if let Err(error) = cancellation
+            .check()
+            .map_err(crate::OperationError::from)
+            .and_then(|()| {
+                crate::scheduler::message_io::validate(&message.buffers).map_err(Into::into)
+            })
+        {
+            return (Err(error), message);
+        }
+        let address = message.address;
+        let mut message =
+            crate::scheduler::message_io::Message::new(message.buffers, address, |buffer| {
+                buffer.as_ref().as_ptr().cast_mut()
+            });
+        let result = cancellable(
+            cancellation,
+            socket.io(Interest::Writable, |socket| message.send(socket, flags)),
+        )
+        .await;
+        (
+            result,
+            SocketMessage {
+                buffers: message.into_buffers(),
+                address,
+            },
+        )
+    }
+    async fn socket_recvmsg<B: IoBufMut>(
+        &self,
+        socket: &Self::Socket,
+        buffers: Vec<B>,
+        flags: SocketRecvFlags,
+        cancellation: &Cancellation,
+    ) -> (OperationResult<SocketRecvResult>, Vec<B>) {
+        if let Err(error) = self.check_runtime(socket.runtime()) {
+            return (Err(error.into()), buffers);
+        }
+        if let Err(error) = cancellation
+            .check()
+            .map_err(crate::OperationError::from)
+            .and_then(|()| crate::scheduler::message_io::validate(&buffers).map_err(Into::into))
+        {
+            return (Err(error), buffers);
+        }
+        let mut message = crate::scheduler::message_io::Message::new(buffers, None, |buffer| {
+            buffer.as_mut().as_mut_ptr()
+        });
+        let result = cancellable(
+            cancellation,
+            socket.io(Interest::Readable, |socket| message.recv(socket, flags)),
+        )
+        .await
+        .map(|bytes| message.received(bytes));
+        (result, message.into_buffers())
+    }
+}
+
+impl SocketMessages for Scheduler {
+    async fn socket_sendmsg<B: IoBuf>(
+        &self,
+        socket: &Self::Socket,
+        message: SocketMessage<B>,
+        flags: SocketSendFlags,
+        cancellation: &Cancellation,
+    ) -> (OperationResult<usize>, SocketMessage<B>) {
+        self.handle
+            .socket_sendmsg(socket, message, flags, cancellation)
+            .await
+    }
+    async fn socket_recvmsg<B: IoBufMut>(
+        &self,
+        socket: &Self::Socket,
+        buffers: Vec<B>,
+        flags: SocketRecvFlags,
+        cancellation: &Cancellation,
+    ) -> (OperationResult<SocketRecvResult>, Vec<B>) {
+        self.handle
+            .socket_recvmsg(socket, buffers, flags, cancellation)
+            .await
+    }
+}

@@ -39,6 +39,8 @@ use std::{
     task::Poll,
 };
 
+mod message;
+
 const CANCEL_TAG: u64 = 1 << 63;
 const COMMAND_EVENT: usize = 0;
 const RING_EVENT: usize = 1;
@@ -73,6 +75,8 @@ fn validate_operation_support(supported: impl Fn(u8) -> bool) -> io::Result<()> 
         opcode::Write::CODE,
         opcode::Recv::CODE,
         opcode::Send::CODE,
+        opcode::SendMsg::CODE,
+        opcode::RecvMsg::CODE,
         opcode::AsyncCancel::CODE,
         opcode::Fsync::CODE,
     ] {

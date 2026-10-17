@@ -9,6 +9,7 @@ use crate::scheduler::{BufferResult, Clock, File, Interest, Socket};
 #[cfg(target_os = "linux")]
 use crate::{AllocationMode, FileAllocate};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
+use crate::{SocketMessage, SocketMessages, SocketRecvFlags, SocketRecvResult, SocketSendFlags};
 use std::io::{self, SeekFrom};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
@@ -655,3 +656,63 @@ impl Clock for Scheduler {
 }
 #[cfg(test)]
 mod tests;
+
+impl SocketMessages for SchedulerHandle {
+    async fn socket_sendmsg<B: IoBuf>(
+        &self,
+        socket: &Self::Socket,
+        message: SocketMessage<B>,
+        flags: SocketSendFlags,
+        cancellation: &Cancellation,
+    ) -> (OperationResult<usize>, SocketMessage<B>) {
+        match self.selector() {
+            Ok(selector) => {
+                selector
+                    .socket_sendmsg(socket, message, flags, cancellation)
+                    .await
+            }
+            Err(error) => (Err(error.into()), message),
+        }
+    }
+    async fn socket_recvmsg<B: IoBufMut>(
+        &self,
+        socket: &Self::Socket,
+        buffers: Vec<B>,
+        flags: SocketRecvFlags,
+        cancellation: &Cancellation,
+    ) -> (OperationResult<SocketRecvResult>, Vec<B>) {
+        match self.selector() {
+            Ok(selector) => {
+                selector
+                    .socket_recvmsg(socket, buffers, flags, cancellation)
+                    .await
+            }
+            Err(error) => (Err(error.into()), buffers),
+        }
+    }
+}
+
+impl SocketMessages for Scheduler {
+    async fn socket_sendmsg<B: IoBuf>(
+        &self,
+        socket: &Self::Socket,
+        message: SocketMessage<B>,
+        flags: SocketSendFlags,
+        cancellation: &Cancellation,
+    ) -> (OperationResult<usize>, SocketMessage<B>) {
+        self.handle
+            .socket_sendmsg(socket, message, flags, cancellation)
+            .await
+    }
+    async fn socket_recvmsg<B: IoBufMut>(
+        &self,
+        socket: &Self::Socket,
+        buffers: Vec<B>,
+        flags: SocketRecvFlags,
+        cancellation: &Cancellation,
+    ) -> (OperationResult<SocketRecvResult>, Vec<B>) {
+        self.handle
+            .socket_recvmsg(socket, buffers, flags, cancellation)
+            .await
+    }
+}

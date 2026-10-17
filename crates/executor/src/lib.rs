@@ -28,9 +28,13 @@ pub mod scheduler;
 mod signal_registration;
 mod socket_domain;
 mod socket_keepalive;
+mod socket_message;
 mod socket_option;
 mod socket_protocol;
+mod socket_recv_flags;
+mod socket_recv_result;
 mod socket_reuse_address;
+mod socket_send_flags;
 mod socket_type;
 mod spawn;
 mod sync_mode;
@@ -55,7 +59,7 @@ pub use notify::Notify;
 pub use operation_error::{OperationError, OperationResult};
 pub use scheduler::{
     BufferResult, Clock, File, FileAllocate, Interest, Scheduler, SchedulerHandle, Signals, Socket,
-    SocketOptions, SocketRegistration,
+    SocketMessages, SocketOptions, SocketRegistration,
 };
 #[cfg(all(unix, feature = "signals"))]
 pub use signal_hook::consts::signal;
@@ -63,9 +67,13 @@ pub use signal_hook::consts::signal;
 pub use signal_registration::SignalRegistration;
 pub use socket_domain::SocketDomain;
 pub use socket_keepalive::SocketKeepalive;
+pub use socket_message::SocketMessage;
 pub use socket_option::SocketOption;
 pub use socket_protocol::SocketProtocol;
+pub use socket_recv_flags::SocketRecvFlags;
+pub use socket_recv_result::SocketRecvResult;
 pub use socket_reuse_address::SocketReuseAddress;
+pub use socket_send_flags::SocketSendFlags;
 pub use socket_type::SocketType;
 pub use spawn::{Spawn, SpawnError};
 pub use sync_mode::SyncMode;

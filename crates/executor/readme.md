@@ -322,6 +322,9 @@ Both operations are lazy and cancellable before execution. Await setters before 
 
 Run the [commented listener configuration example](examples/socket_options.rs) with `cargo run -p socketry-executor --example socket_options --features tokio`.
 
+The optional `SocketMessages` capability provides `socket_sendmsg`/`socket_recvmsg` with owned scatter/gather buffers, IP addresses, portable flags, and receive truncation metadata. See the [commented UDP message example](examples/socket_messages.rs). Ancillary data remains a separate extension.
+
+
 ### Cancellation and shutdown
 
 Pre-cancelled file/socket operations do not start. Readiness waits stop on cancellation. io\_uring requests cancellation but waits for the original completion before returning the buffer; successful progress wins a racing cancellation. Blocking jobs check cancellation again on their pool worker, before execution; a running syscall returns its actual result.

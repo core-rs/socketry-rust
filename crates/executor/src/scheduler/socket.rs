@@ -15,7 +15,7 @@ use std::{
 ///
 /// Creation, binding, listening, and connecting are separate operations. All operation futures are lazy. Pre-cancellation prevents a syscall; successful progress wins a cancellation race. Cancelling or abandoning a pending connect does not roll back kernel connection state: discard that socket before trying another connection. Completion backends retain owned buffers until the original operation completes.
 ///
-/// File and socket resources remain distinct. There is no common descriptor trait, protocol buffering, or automatic close coordination. Non-IP families and message/address APIs remain extensions.
+/// File and socket resources remain distinct. There is no common descriptor trait, protocol buffering, or automatic close coordination. Message/address I/O belongs to the optional `SocketMessages` capability. Non-IP families remain an extension.
 pub trait Socket: Send + Sync {
     type Socket: Send + Sync;
 

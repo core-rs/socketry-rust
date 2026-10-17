@@ -9,9 +9,10 @@ pub use socketry_executor::{
     AllocationMode, Blocking, BlockingError, BlockingOptions, BlockingTask, BufferResult,
     BufferSlice, Cancellation, Cancelled, Clock, File, FileAllocate, FileDescriptor, FileOptions,
     Interest, IoBuf, IoBufMut, Notify, OperationError, OperationResult, Scheduler, SchedulerHandle,
-    Signals, Socket, SocketDomain, SocketKeepalive, SocketOption, SocketOptions, SocketProtocol,
-    SocketRegistration, SocketReuseAddress, SocketType, Spawn, SpawnError, SyncMode, Task,
-    TaskError, TaskHandle, TcpNoDelay, defer_cancel, yield_now,
+    Signals, Socket, SocketDomain, SocketKeepalive, SocketMessage, SocketMessages, SocketOption,
+    SocketOptions, SocketProtocol, SocketRecvFlags, SocketRecvResult, SocketRegistration,
+    SocketReuseAddress, SocketSendFlags, SocketType, Spawn, SpawnError, SyncMode, Task, TaskError,
+    TaskHandle, TcpNoDelay, defer_cancel, yield_now,
 };
 
 #[cfg(all(unix, feature = "signals", any(feature = "native", feature = "tokio")))]

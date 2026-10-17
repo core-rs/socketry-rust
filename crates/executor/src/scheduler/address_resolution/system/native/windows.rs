@@ -31,10 +31,20 @@ pub(super) fn error(code: i32) -> AddressResolveError {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    // Inject startup failure only on the calling test thread, before any Winsock reference is acquired.
+    static STARTUP_ERROR: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
 pub(super) struct Winsock;
 impl Winsock {
     pub(super) fn new() -> io::Result<Self> {
         Self::start_with(|data| {
+            #[cfg(test)]
+            if let Some(error) = STARTUP_ERROR.take() {
+                return error;
+            }
             // SAFETY: data points to writable WSADATA; version 2.2 is requested. Each successful startup is paired with this guard's cleanup.
             unsafe { sys::WSAStartup(0x0202, data) }
         })
@@ -63,12 +73,13 @@ mod tests {
     use super::*;
     #[test]
     fn startup_failure_is_an_io_error() {
-        assert_eq!(
-            Winsock::start_with(|_| sys::WSASYSNOTREADY)
-                .err()
-                .unwrap()
-                .raw_os_error(),
-            Some(sys::WSASYSNOTREADY)
+        STARTUP_ERROR.set(Some(sys::WSASYSNOTREADY));
+        let error = super::super::lookup(Some("127.0.0.1"), "80", crate::AddressHints::default())
+            .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(sys::WSASYSNOTREADY));
+        // A failed startup acquired no reference and must not prevent a subsequent independent lookup.
+        assert!(
+            super::super::lookup(Some("127.0.0.1"), "80", crate::AddressHints::default()).is_ok()
         );
     }
 }

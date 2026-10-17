@@ -60,3 +60,9 @@ pub use signals::Signals;
 
 #[cfg(any(feature = "native", feature = "tokio"))]
 mod socket_io;
+
+mod socket_messages;
+pub use socket_messages::SocketMessages;
+
+#[cfg(any(feature = "native", feature = "tokio"))]
+mod message_io;

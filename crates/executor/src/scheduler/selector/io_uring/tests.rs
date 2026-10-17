@@ -255,6 +255,8 @@ fn capability_validation_rejects_each_unsupported_requirement() {
         opcode::Write::CODE,
         opcode::Recv::CODE,
         opcode::Send::CODE,
+        opcode::SendMsg::CODE,
+        opcode::RecvMsg::CODE,
         opcode::AsyncCancel::CODE,
         opcode::Fsync::CODE,
     ] {

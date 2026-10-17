@@ -36,7 +36,7 @@ Generic code takes a scheduler such as `&S`, with bounds describing the portion 
 
 Resource creation belongs inside the corresponding capability. `File` declares an associated file type, and file creation returns that type. `Socket` declares one associated socket type for unconnected, bound, listening, connected, and datagram sockets. Its `socket_open`, `socket_bind`, `socket_listen`, and `socket_connect` operations follow the corresponding system-call boundaries; `socket_accept` returns another value of that same type. `socket_listen` takes an existing socket and backlog and leaves bind behavior to the operating system, including implicit binding where supported. Generic consumers use these associated resources rather than creating a `std::fs::File` or `std::net::TcpListener` themselves.
 
-The initial socket arguments select IPv4 or IPv6, stream or datagram, and an optional TCP or UDP protocol. Address parameters use `std::net::SocketAddr`. `SocketOptions<O>` adds typed configuration without extending the required `Socket` surface. Non-IP families, message metadata, and ancillary data remain future extensions. File and socket descriptors remain distinct; no common descriptor trait is required. Existing std TCP resources can still enter through the optional `SocketRegistration` interoperability trait.
+The initial socket arguments select IPv4 or IPv6, stream or datagram, and an optional TCP or UDP protocol. Address parameters use `std::net::SocketAddr`. `SocketOptions<O>` adds typed configuration without extending the required `Socket` surface. `SocketMessages` adds owned scatter/gather payloads, IP addresses, and portable flags. Non-IP families and ancillary data remain future extensions. File and socket descriptors remain distinct; no common descriptor trait is required. Existing std TCP resources can still enter through the optional `SocketRegistration` interoperability trait.
 
 The interface does not require `Arc` around every resource. Concrete implementations choose their resource representation and how to retain it during in-flight work. They may use OS handles, registered-resource tables, shared ownership, or simulated resource identifiers. Taking a resource by reference does not remove the backend's obligation to retain everything still accessible by a submitted operation after its waiting future is dropped.
 
@@ -64,7 +64,37 @@ Get and set futures are lazy, borrow the descriptor, and check cancellation befo
 
 Readiness, native schedulers/handles, io_uring, and Tokio schedulers/handles implement all three options. Current native implementations call socket2's typed getters/setters directly during polling, including when io_uring is selected; these controls need no readiness wait or blocking-pool job. Tokio preserves its runtime-identity checks, and stopped schedulers/selectors reject operations. Native ABI mappings remain private. The simulator retains per-socket values but does not model packet timing, keepalive probes, address-sharing policies, or accepted-socket inheritance.
 
-Shared tests exercise round trips, cancellation, unpolled setters, configuration across bind/listen/connect, and independent accepted sockets. Native tests preserve protocol errors and validate stopped backends and foreign Tokio resources; compile-fail examples reject incorrect value types and missing capabilities. The [listener example](examples/socket_options.rs) demonstrates option selection before binding. Message/address I/O (`socket_sendmsg`/`socket_recvmsg`) remains the next socket-interface expansion, with ancillary data and owned message storage requiring their own design.
+Shared tests exercise round trips, cancellation, unpolled setters, configuration across bind/listen/connect, and independent accepted sockets. Native tests preserve protocol errors and validate stopped backends and foreign Tokio resources; compile-fail examples reject incorrect value types and missing capabilities. The [listener example](examples/socket_options.rs) demonstrates option selection before binding. Message/address I/O is implemented through `SocketMessages`, described below; ancillary data remains a separate extension.
+
+### Message/address I/O
+
+`SocketMessages: Socket` is an optional capability; existing implementations of `Socket` gain no required methods. The native readiness selectors, native scheduler/handle, io_uring selector, and Tokio scheduler/handle implement it. The stream-only example simulator does not currently implement this capability or UDP.
+
+```rust,ignore
+let message = SocketMessage {
+    buffers: vec![header, payload],
+    address: Some(destination), // None uses a connected peer.
+};
+let (sent, message) = scheduler
+    .socket_sendmsg(&socket, message, SocketSendFlags::default(), &cancellation)
+    .await;
+let (received, buffers) = scheduler
+    .socket_recvmsg(&socket, vec![vec![0; 2048]], SocketRecvFlags { peek: false }, &cancellation)
+    .await;
+let received = received?;
+// received.bytes, address, truncated, control_truncated
+```
+
+`SocketMessage<B>` owns a `Vec<B>` of `IoBuf` payload buffers and an optional `SocketAddr` destination. Sends return `(OperationResult<usize>, SocketMessage<B>)`. Receives accept `Vec<B: IoBufMut>` and return `(OperationResult<SocketRecvResult>, Vec<B>)`. Receive metadata contains the copied byte count, an optional sender address, payload truncation, and control truncation. Buffers are filled in order, their lengths stay unchanged, and only the returned byte count is newly received data. The sum of initialized lengths must fit `i32::MAX`, matching completion-result limits; native vector/message limits can still return OS errors. No payload concatenation is needed.
+
+Each call performs one transfer: streams can make partial progress, datagrams retain their boundaries, and a zero-byte UDP result can be an empty message. Empty buffer lists are represented by one zero-length native entry where required. Zero-capacity receives retain OS-specific behavior, including whether they consume data, wait, or return an address; use nonempty storage to receive empty datagrams portably. `SocketRecvFlags::peek` maps to `MSG_PEEK`; `SocketSendFlags::dont_route` maps to `MSG_DONTROUTE`. Unix sends suppress `SIGPIPE`, consistent with `socket_write`. Additional native flags, `MSG_WAITALL` policy, zero-copy sends, and original datagram-length reporting are separate extensions.
+
+Readiness and Tokio use nonblocking `sendmsg`/`recvmsg` on Unix and vectored Winsock calls on Windows. Windows `WSAEMSGSIZE` becomes a successful truncated receive with the copied length; other errors retain the backend's socket2 behavior. Unix exposes `MSG_CTRUNC`. This initial interface provides no ancillary send data or receive storage, and the Windows fallback cannot observe control metadata. An ancillary-capable interface must require a backend that preserves that data; it cannot silently use this payload/address fallback.
+
+io_uring submits native `SendMsg`/`RecvMsg` requests and probes both opcodes at initialization. Each request retains all payload, address, iovec, and header allocations until its original terminal CQE. Cancellation requests do not release them early, and abandoning the future still requests cancellation. Unsubmitted work returns its owned buffers normally. Readiness/Tokio leave no kernel access behind when a pending future is dropped. As with other I/O, finish or cancel-and-await operations before explicit close; completion notification follows release of retained descriptor ownership.
+
+The [message example](examples/socket_messages.rs) demonstrates a generic scatter/gather UDP exchange. Shared contracts exercise IPv4/IPv6 addresses, connected sends, peeking, truncation, empty messages, buffer views, non-`Sync` buffers, cancellation, stream reads/EOF, and resource cleanup across concrete backends. Native tests also check invalid states, closed schedulers, and foreign Tokio runtimes.
+
 
 ## Platform support and fallbacks
 
@@ -221,13 +251,14 @@ scheduler.socket_read(socket, buffer, cancellation)
 scheduler.socket_write(socket, buffer, cancellation)
 scheduler.socket_wait(socket, interest, cancellation)
 scheduler.socket_sendmsg(socket, message, flags, cancellation)
+scheduler.socket_recvmsg(socket, buffers, flags, cancellation)
 scheduler.address_resolve(name, options, cancellation)
 scheduler.now()
 scheduler.sleep_until(deadline, cancellation)
 scheduler.sleep(duration, cancellation)
 ```
 
-This list includes proposed extensions. The implemented `File` methods are `file_open`, `file_seek`, `file_sync`, `file_truncate`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at`. The implemented `Socket` methods are `socket_open`, `socket_bind`, `socket_listen`, `socket_connect`, `socket_accept`, `socket_read`, `socket_write`, and `socket_wait`, plus synchronous `socket_local_addr` and `socket_peer_addr`. Initial creation supports IPv4/IPv6 stream and datagram sockets with TCP/UDP protocol selection. Connected UDP preserves datagram boundaries; address-based message operations and ancillary data remain extensions. Async I/O methods take `&Cancellation`; buffer operations return `(OperationResult<usize>, B)` on success, error, and cancellation.
+This list includes proposed extensions. The implemented `File` methods are `file_open`, `file_seek`, `file_sync`, `file_truncate`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at`. The implemented `Socket` methods are `socket_open`, `socket_bind`, `socket_listen`, `socket_connect`, `socket_accept`, `socket_read`, `socket_write`, and `socket_wait`, plus synchronous `socket_local_addr` and `socket_peer_addr`. Initial creation supports IPv4/IPv6 stream and datagram sockets with TCP/UDP protocol selection. Connected UDP preserves datagram boundaries. Optional `SocketMessages` adds address-based message operations; ancillary data remains an extension. Async I/O methods take `&Cancellation`; buffer operations return `(OperationResult<usize>, B)` on success, error, and cancellation.
 
 An optional context pairing a scheduler reference with a cancellation signal could reduce repetitive arguments. Such a context should preserve explicit dependency and cancellation boundaries; it is a convenience, not a new computation abstraction.
 
@@ -471,7 +502,7 @@ pub trait Clock: Send + Sync {
 }
 ```
 
-The associated file resource, truncation, synchronization, and both stateful and positioned file operations above are implemented. The initial socket contract has explicit creation, bind, listen, connect, accept, stream/datagram read and write, readiness, and local/peer address operations. `socket_listen` receives an existing socket and a backlog. Socket close and directional shutdown use the cleanup contract below. Options, message/address I/O, and portable flags remain separate design work. Explicit file close consumes its handle and follows the shared admission contract below.
+The associated file resource, truncation, synchronization, and both stateful and positioned file operations above are implemented. The initial socket contract has explicit creation, bind, listen, connect, accept, stream/datagram read and write, readiness, and local/peer address operations. `socket_listen` receives an existing socket and a backlog. Socket close and directional shutdown use the cleanup contract below. `SocketOptions<O>` and `SocketMessages` provide optional typed configuration and message/address I/O with portable flags. Ancillary data and additional flags remain separate design work. Explicit file close consumes its handle and follows the shared admission contract below.
 
 Protocol buffering belongs above the descriptor-level scheduler interface. A protocol can use a specialized transport adapter or a generic buffering layer around `S::Socket`, with ordinary static dispatch as the default. Dynamic dispatch is an option when applications need runtime selection or type erasure; it should not add indirection to every primitive operation. The scheduler itself does not promise line, frame, or message buffering.
 
@@ -481,7 +512,7 @@ Additional capability shapes follow the same convention:
 | --- | --- | --- |
 | File allocation (`FileAllocate`, implemented on Linux) | `file_allocate(file, offset, length, mode, cancellation)` | `OperationResult<()>` |
 | Message send | `socket_sendmsg(socket, owned_message, flags, cancellation)` | Transfer result together with the owned message |
-| Message receive | `socket_recvmsg(socket, owned_message, flags, cancellation)` | Receive result including address/control/status, together with the owned message |
+| Message receive | `socket_recvmsg(socket, owned_buffers, flags, cancellation)` | Copied byte count, sender address and truncation status, together with the owned buffers; ancillary data is a future extension |
 | Address resolution | `address_resolve(name, options, cancellation)` | `OperationResult<ResolvedAddresses>` |
 
 These rows identify extension capabilities; they do not require every scheduler to implement every operation. Synchronization builds on ordinary futures and wakers, with lost-wakeup protection inside each primitive. `Spawn::spawn(future)` is primitive dispatch with no group or owner argument. It returns an awaitable task handle; dispatch failures are reported before execution. Grouping and group lifecycle belong above this interface.
@@ -855,7 +886,7 @@ Use `with_pool` for operations that receive a pool argument. The proposed naming
 | Receive a message into owned storage | `socket_recvmsg` | `prepare_socket_recvmsg` |
 | Receive a message using a pool | `socket_recvmsg_with_pool` | `prepare_socket_recvmsg_with_pool` |
 
-These names are proposed, not implemented APIs. Exact arguments, lease types, message metadata, and error/cancellation results remain to be chosen. Direct operations accept explicit cancellation; prepared operations retain the pool and resource inputs, with cancellation supplied at submission as described under linked operations. Preparation must not reserve a payload buffer for each waiting receive.
+Prepared operations and pool variants in this table remain proposed APIs. Ordinary `socket_recvmsg` is implemented as described above. Pool arguments, lease types, and their message metadata and error/cancellation results remain to be chosen. Direct operations accept explicit cancellation; prepared operations retain the pool and resource inputs, with cancellation supplied at submission as described under linked operations. Preparation must not reserve a payload buffer for each waiting receive.
 
 `with_pool` describes how an operation obtains storage. The [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/naming.html) use `from_*` for conversions; they do not prescribe `from_pool` for this operation.
 
@@ -881,7 +912,7 @@ The public contracts now cover associated resources and creation, owned buffer r
 
 Remaining design work includes:
 
-1. **Wider socket I/O:** message/address I/O, ancillary data, and further option extensions. Explicit directional shutdown/close and typed address-reuse, keepalive, and TCP no-delay options are implemented.
+1. **Wider socket I/O:** ancillary data, additional flags, and further option extensions. Payload/address message I/O is implemented through `SocketMessages`. Explicit directional shutdown/close and typed address-reuse, keepalive, and TCP no-delay options are implemented.
 2. **Blocking pool integration:** the public `Blocking` capability now provides bounded admission and owned completion. Existing file fallbacks still use backend pools; sharing, idle thread retirement, and further scheduling policies remain separate decisions.
 3. **Backend retirement:** account for all accepted work, including `_submit` jobs without application waiters. File close and socket close/shutdown cleanup are accounted for; extend this to subsequent submission-only operations. Application completion remains explicit through owned task handles; there is no implicit graceful join of all spawned work.
 4. **Timer engine integration:** the monotonic `Clock` and cancellable deadline contract are implemented. Native waits still use async-io, and the adapter uses its selected Tokio runtime, including paused time. Integrating `socketry-timers` into scheduler driving and parking remains separate work.

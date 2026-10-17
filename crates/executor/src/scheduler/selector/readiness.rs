@@ -14,6 +14,7 @@ use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOper
 use crate::{AllocationMode, FileAllocate};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
 use crate::{FileDescriptor, SyncMode};
+use crate::{SocketMessage, SocketMessages, SocketRecvFlags, SocketRecvResult, SocketSendFlags};
 use std::io::{self, SeekFrom};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
@@ -482,3 +483,62 @@ impl Clock for Selector {
 
 #[cfg(test)]
 mod tests;
+
+impl SocketMessages for Selector {
+    async fn socket_sendmsg<B: IoBuf>(
+        &self,
+        socket: &Self::Socket,
+        message: SocketMessage<B>,
+        flags: SocketSendFlags,
+        cancellation: &Cancellation,
+    ) -> (OperationResult<usize>, SocketMessage<B>) {
+        if let Err(error) = cancellation
+            .check()
+            .map_err(crate::OperationError::from)
+            .and_then(|()| {
+                crate::scheduler::message_io::validate(&message.buffers).map_err(Into::into)
+            })
+        {
+            return (Err(error), message);
+        }
+        let address = message.address;
+        let mut message = crate::scheduler::message_io::Message::sending(message.buffers, address);
+        let result = cancellable(
+            cancellation,
+            socket
+                .inner
+                .write_with(|socket| message.send(socket, flags)),
+        )
+        .await;
+        (
+            result,
+            SocketMessage {
+                buffers: message.into_buffers(),
+                address,
+            },
+        )
+    }
+    async fn socket_recvmsg<B: IoBufMut>(
+        &self,
+        socket: &Self::Socket,
+        buffers: Vec<B>,
+        flags: SocketRecvFlags,
+        cancellation: &Cancellation,
+    ) -> (OperationResult<SocketRecvResult>, Vec<B>) {
+        if let Err(error) = cancellation
+            .check()
+            .map_err(crate::OperationError::from)
+            .and_then(|()| crate::scheduler::message_io::validate(&buffers).map_err(Into::into))
+        {
+            return (Err(error), buffers);
+        }
+        let mut message = crate::scheduler::message_io::Message::receiving(buffers);
+        let result = cancellable(
+            cancellation,
+            socket.inner.read_with(|socket| message.recv(socket, flags)),
+        )
+        .await
+        .map(|bytes| message.received(bytes));
+        (result, message.into_buffers())
+    }
+}

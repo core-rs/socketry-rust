@@ -84,6 +84,9 @@ Generic code can accept `Socket`, `File`, `Clock`, and `Spawn` capabilities. Soc
 
 `SocketOptions<O>` adds typed, cancellable option get/set. Require `SocketReuseAddress`, `SocketKeepalive`, or `TcpNoDelay` as needed; the option selects its value type and backend capability. The [listener configuration example](crates/executor/examples/socket_options.rs) shows configuration before binding.
 
+The optional `SocketMessages` capability provides `socket_sendmsg`/`socket_recvmsg` with owned scatter/gather buffers, IP addresses, portable flags, and receive truncation metadata. See the [commented UDP message example](crates/executor/examples/socket_messages.rs). Ancillary data remains a separate extension.
+
+
 `FileAllocate` adds optional range allocation with `AllocationMode::Extend` or `KeepSize`. Native and Tokio implementations currently provide it on Linux; unsupported targets omit the trait implementation. See the [executor I/O documentation](crates/executor/readme.md#io-and-selectors) for allocation and filesystem guarantees.
 
 `File` is the scheduler capability trait; `File::File` is its associated resource type. Generic code can create and use files without importing OS resource types:

@@ -168,6 +168,23 @@ impl SocketOperations for Selector {
 
 impl File for Selector {
     type File = Arc<StdFile>;
+    async fn file_truncate(
+        &self,
+        file: &Self::File,
+        length: u64,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        let file = Arc::clone(file);
+        let cancellation = cancellation.clone();
+        blocking::unblock(move || {
+            crate::scheduler::blocking::run(&cancellation, || {
+                crate::scheduler::file_io::truncate(&file, length)
+            })
+        })
+        .await
+    }
+
     async fn file_sync(
         &self,
         file: &Self::File,

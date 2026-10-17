@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Linux completion reads, writes, and file synchronization using a ring owned by a dedicated selector thread. Tasks communicate through owned requests and standard wakers, so operation futures remain Send and can migrate between executor workers.
+//! Linux completion reads, writes, synchronization, and truncation using a ring owned by a dedicated selector thread. Tasks communicate through owned requests and standard wakers, so operation futures remain Send and can migrate between executor workers.
 //!
 //! Socket setup, accept, readiness waits and timers currently reuse async-io.
 //! Initialization probes the required opcodes and returns an error rather than
@@ -12,6 +12,8 @@
 //! This initial implementation uses one channel request and one completion
 //! channel per operation. It does not yet pool operation records or register
 //! buffers with the kernel.
+//!
+//! Truncation uses a native request when its opcode is available, otherwise the blocking file fallback preserves the same public contract.
 use super::readiness::{self, Listener, Socket};
 use crate::SyncMode;
 use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
@@ -230,29 +232,39 @@ impl<B: IoBuf> PendingRequest for Request<B> {
     }
 }
 
-// A synchronization request has no payload buffer, but retains its file until the original completion exactly like a transfer request.
-struct SyncRequest {
+#[derive(Clone, Copy)]
+enum FileOperation {
+    Sync(SyncMode),
+    Truncate(u64),
+}
+
+// Buffer-free file operations retain the file until the original completion exactly like transfer requests.
+struct FileRequest {
     identifier: u64,
     file: Arc<StdFile>,
-    mode: SyncMode,
+    operation: FileOperation,
     reply: Option<oneshot::Sender<io::Result<()>>>,
     cancelling: bool,
 }
 
-impl PendingRequest for SyncRequest {
+impl PendingRequest for FileRequest {
     fn identifier(&self) -> u64 {
         self.identifier
     }
 
     fn entry(&mut self) -> squeue::Entry {
-        let flags = match self.mode {
-            SyncMode::All => types::FsyncFlags::empty(),
-            SyncMode::Data => types::FsyncFlags::DATASYNC,
+        let descriptor = types::Fd(self.file.as_raw_fd());
+        let entry = match self.operation {
+            FileOperation::Sync(mode) => {
+                let flags = match mode {
+                    SyncMode::All => types::FsyncFlags::empty(),
+                    SyncMode::Data => types::FsyncFlags::DATASYNC,
+                };
+                opcode::Fsync::new(descriptor).flags(flags).build()
+            }
+            FileOperation::Truncate(length) => opcode::Ftruncate::new(descriptor, length).build(),
         };
-        opcode::Fsync::new(types::Fd(self.file.as_raw_fd()))
-            .flags(flags)
-            .build()
-            .user_data(self.identifier)
+        entry.user_data(self.identifier)
     }
 
     fn finish(mut self: Box<Self>, result: io::Result<usize>) {
@@ -278,7 +290,7 @@ impl PendingRequest for SyncRequest {
     }
 }
 
-impl Drop for SyncRequest {
+impl Drop for FileRequest {
     fn drop(&mut self) {
         // Queued requests can be destroyed before submission. InFlight retains requests whose kernel completion is unknown.
         if let Some(reply) = self.reply.take() {
@@ -388,6 +400,7 @@ impl Drop for CancelOnDrop {
 #[derive(Clone)]
 pub struct Selector {
     controller: Arc<Controller>,
+    supports_file_truncate: bool,
 }
 
 impl Selector {
@@ -423,6 +436,7 @@ impl Selector {
                 })
         })?;
         Ok(Self {
+            supports_file_truncate: probe.is_supported(opcode::Ftruncate::CODE),
             controller: Arc::new(Controller {
                 commands,
                 notification,
@@ -525,6 +539,29 @@ impl Selector {
             cancelling: false,
         };
         self.submit(Box::new(request), result, cancellation).await
+    }
+
+    async fn file_operation(
+        &self,
+        file: &Arc<StdFile>,
+        operation: FileOperation,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        self.check_open()?;
+        let identifier = self.next_identifier()?;
+        let (reply, result) = oneshot::channel();
+        let request = FileRequest {
+            identifier,
+            file: Arc::clone(file),
+            operation,
+            reply: Some(reply),
+            cancelling: false,
+        };
+        operation_result(
+            self.submit(Box::new(request), result, cancellation).await,
+            cancellation,
+        )
     }
 
     fn next_identifier(&self) -> io::Result<u64> {
@@ -711,27 +748,33 @@ impl SocketOperations for Selector {
 }
 impl File for Selector {
     type File = Arc<StdFile>;
+    async fn file_truncate(
+        &self,
+        file: &Self::File,
+        length: u64,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        self.check_open()?;
+        crate::scheduler::file_io::validate_length(length)?;
+        if self.supports_file_truncate {
+            self.file_operation(file, FileOperation::Truncate(length), cancellation)
+                .await
+        } else {
+            readiness::Selector
+                .file_truncate(file, length, cancellation)
+                .await
+        }
+    }
+
     async fn file_sync(
         &self,
         file: &Self::File,
         mode: SyncMode,
         cancellation: &Cancellation,
     ) -> OperationResult<()> {
-        cancellation.check()?;
-        self.check_open()?;
-        let identifier = self.next_identifier()?;
-        let (reply, result) = oneshot::channel();
-        let request = SyncRequest {
-            identifier,
-            file: Arc::clone(file),
-            mode,
-            reply: Some(reply),
-            cancelling: false,
-        };
-        operation_result(
-            self.submit(Box::new(request), result, cancellation).await,
-            cancellation,
-        )
+        self.file_operation(file, FileOperation::Sync(mode), cancellation)
+            .await
     }
 
     async fn file_seek(

@@ -18,6 +18,9 @@ mod stateful_file;
 #[path = "tests/file_sync.rs"]
 mod file_sync;
 
+#[path = "tests/file_truncate.rs"]
+mod file_truncate;
+
 #[test]
 fn stateful_operations_forward_and_preserve_short_transfers() {
     let scheduler = FailingFiles {
@@ -27,6 +30,7 @@ fn stateful_operations_forward_and_preserve_short_transfers() {
     // Exercise forwarding through the wrapper with failure injection disabled.
     block_on(stateful_file::check(&scheduler, Path::new("stateful")));
     block_on(file_sync::check(&scheduler, Path::new("sync")));
+    block_on(file_truncate::check(&scheduler, Path::new("truncate")));
     assert_eq!(scheduler.scheduler.open_files(), 0);
 }
 
@@ -54,6 +58,17 @@ struct FailingFiles {
 
 impl File for FailingFiles {
     type File = <simulated::Scheduler as File>::File;
+
+    async fn file_truncate(
+        &self,
+        file: &Self::File,
+        length: u64,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.scheduler
+            .file_truncate(file, length, cancellation)
+            .await
+    }
 
     async fn file_sync(
         &self,
@@ -327,5 +342,43 @@ fn listener_drop_releases_address_and_pending_connections() {
         let (result, _) = scheduler.io_read(&client, vec![0; 1], &NEVER).await;
         assert_eq!(result.unwrap(), 0);
         scheduler.socket_listen(address, &NEVER).await.unwrap();
+    });
+}
+
+#[test]
+fn simulated_truncate_rejects_excessive_storage_without_changing_file_or_cursor() {
+    block_on(async {
+        let scheduler = simulated::Scheduler::new(2, 2);
+        let path = Path::new("bounded-truncate");
+        let file = scheduler
+            .file_open(path, FileOptions::CREATE, &NEVER)
+            .await
+            .unwrap();
+        scheduler
+            .file_seek(&file, std::io::SeekFrom::Start(5), &NEVER)
+            .await
+            .unwrap();
+        scheduler
+            .file_truncate(&file, 1024 * 1024, &NEVER)
+            .await
+            .unwrap();
+        assert_eq!(
+            scheduler
+                .file_truncate(&file, 1024 * 1024 + 1, &NEVER)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::FileTooLarge
+        );
+        assert_eq!(scheduler.contents(path), vec![0; 1024 * 1024]);
+        assert_eq!(
+            scheduler
+                .file_seek(&file, std::io::SeekFrom::Current(0), &NEVER)
+                .await
+                .unwrap(),
+            5
+        );
+        scheduler.file_truncate(&file, 0, &NEVER).await.unwrap();
+        assert!(scheduler.contents(path).is_empty());
     });
 }

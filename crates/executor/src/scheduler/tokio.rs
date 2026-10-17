@@ -722,6 +722,26 @@ impl SocketOperations for SchedulerHandle {
 
 impl File for SchedulerHandle {
     type File = Arc<StdFile>;
+    async fn file_truncate(
+        &self,
+        file: &Self::File,
+        length: u64,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        self.shared.check_open()?;
+        let file = Arc::clone(file);
+        let cancellation = cancellation.clone();
+        file_operation_result(
+            self.shared
+                .runtime
+                .spawn_blocking(move || {
+                    super::blocking::run(&cancellation, || super::file_io::truncate(&file, length))
+                })
+                .await,
+        )
+    }
+
     async fn file_sync(
         &self,
         file: &Self::File,
@@ -996,6 +1016,15 @@ impl SocketOperations for Scheduler {
 }
 impl File for Scheduler {
     type File = <SchedulerHandle as File>::File;
+    async fn file_truncate(
+        &self,
+        file: &Self::File,
+        length: u64,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.handle.file_truncate(file, length, cancellation).await
+    }
+
     async fn file_sync(
         &self,
         file: &Self::File,

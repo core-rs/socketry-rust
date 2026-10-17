@@ -477,6 +477,17 @@ mod native {
                 io::ErrorKind::BrokenPipe
             );
 
+            let resize_file = Arc::new(tempfile::tempfile().unwrap());
+            assert_eq!(
+                handle
+                    .file_truncate(&resize_file, 13, &NEVER)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::BrokenPipe
+            );
+            assert_eq!(resize_file.metadata().unwrap().len(), 0);
+
             for mode in [SyncMode::All, SyncMode::Data] {
                 assert_eq!(
                     handle
@@ -818,6 +829,17 @@ mod tokio_adapter {
                     .kind(),
                 io::ErrorKind::BrokenPipe
             );
+
+            let resize_file = Arc::new(tempfile::tempfile().unwrap());
+            assert_eq!(
+                handle
+                    .file_truncate(&resize_file, 13, &NEVER)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::BrokenPipe
+            );
+            assert_eq!(resize_file.metadata().unwrap().len(), 0);
 
             for mode in [SyncMode::All, SyncMode::Data] {
                 assert_eq!(

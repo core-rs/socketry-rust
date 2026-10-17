@@ -181,6 +181,23 @@ Read/write operations take an owned `IoBuf` (`IoBufMut` for reads) and return `B
 
 `file_seek(file, std::io::SeekFrom, cancellation)` repositions the shared cursor and returns its resulting `u64` offset. Use `Start(offset)` for an absolute position, `Current(delta)` for a relative move, or `End(delta)` for a position relative to EOF. `Current(0)` queries the position. Seeking past EOF does not extend the file; absolute offsets must fit in `i64`, and invalid positions or filesystem limits return errors. Seeks use blocking file pools on every current native backend, including io\_uring, and Tokio's blocking pool in the adapter. Cancellation before execution prevents seeking; a started seek preserves its actual result. Await seeks and other cursor operations sequentially when their ordering matters. A seek/read pair is not atomic with respect to other users of the resource.
 
+`file_truncate(file, length, cancellation)` sets the logical file length. It discards bytes when shrinking and zero-fills an extension, leaving the shared cursor unchanged even if it is now past EOF. The file must be open for writing; lengths must fit in `i64`, and filesystem limits and OS errors are reported. Await related operations in order. Truncation does not guarantee disk-space reservation or durability; await `file_sync` afterward when needed.
+
+Truncation uses native io\_uring requests when supported by the running kernel, with the blocking file fallback otherwise. Readiness and Tokio use their existing file-operation pools. Cancellation is checked before dispatch and again by blocking workers before execution; started blocking calls preserve their result. Ring cancellation is best effort and waits for the original completion. Dropping a waiter does not undo a resize or release a file still in use by the backend.
+
+```rust,no_run
+use socketry_executor::{Cancellation, File, OperationResult};
+
+async fn resize<S: File>(
+    scheduler: &S,
+    file: &S::File,
+    length: u64,
+    cancellation: &Cancellation,
+) -> OperationResult<()> {
+    scheduler.file_truncate(file, length, cancellation).await
+}
+```
+
 `file_sync(file, SyncMode, cancellation)` waits for OS synchronization and reports its result. `SyncMode::All` synchronizes contents and metadata; `SyncMode::Data` can omit metadata unrelated to retrieving file contents. Backends may provide full synchronization for either mode. Await preceding writes first: sync does not order concurrent writes, flush application buffers, or synchronize the parent directory entry. It leaves the shared cursor unchanged. Durability follows the OS, filesystem, and device guarantees.
 
 io\_uring uses native `Fsync` requests; readiness and Tokio use their existing blocking file pools. Cancellation before dispatch prevents submission, and blocking workers check again before starting. Once submitted, cancellation is best effort; a successful completion wins concurrent cancellation. Dropping a waiter does not undo the operation or release a file still in use by the backend.

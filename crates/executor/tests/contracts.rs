@@ -22,9 +22,13 @@ mod stateful_file;
 #[path = "../examples/interface_probe/tests/file_sync.rs"]
 mod file_sync;
 
+#[path = "../examples/interface_probe/tests/file_truncate.rs"]
+mod file_truncate;
+
 async fn resources<S: File + Socket>(scheduler: &S, root: &Path) {
     stateful_file::check(scheduler, root).await;
     file_sync::check(scheduler, root).await;
+    file_truncate::check(scheduler, root).await;
     let never = Cancellation::never();
     let cancelled = Cancellation::new();
     cancelled.cancel();

@@ -110,6 +110,27 @@ impl Scheduler {
 impl File for Scheduler {
     type File = FileHandle;
 
+    async fn file_truncate(
+        &self,
+        file: &FileHandle,
+        length: u64,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        if length > i64::MAX as u64 {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
+        }
+        if !file.writable {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
+        }
+        // Match the simulator's existing bounded storage policy without allocating a huge sparse file in memory.
+        if length > 1024 * 1024 {
+            return Err(io::Error::from(io::ErrorKind::FileTooLarge).into());
+        }
+        file.bytes.lock().unwrap().resize(length as usize, 0);
+        Ok(())
+    }
+
     async fn file_sync(
         &self,
         _file: &Self::File,

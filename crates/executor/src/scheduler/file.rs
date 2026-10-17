@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use crate::{BufferResult, Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult};
-use std::{future::Future, path::Path};
+use std::{future::Future, io::SeekFrom, path::Path};
 
 /// Regular-file creation, shared-cursor operations, and explicit-offset operations through the chosen scheduler. The backend retains resources used by accepted operations even when the waiting future is destroyed.
 ///
@@ -18,6 +18,17 @@ pub trait File: Send + Sync {
         options: FileOptions,
         cancellation: &Cancellation,
     ) -> impl Future<Output = OperationResult<Self::File>> + Send;
+
+    /// Reposition the shared cursor and return its resulting byte offset. `SeekFrom::Current(0)` queries the position; seeking past EOF does not extend the file. Absolute offsets must fit in `i64`; invalid positions and OS limits return errors.
+    ///
+    /// Await cursor operations sequentially when ordering matters. A seek followed by a read or write is not atomic with respect to other users of the resource. Cancellation before execution prevents seeking; once started, the actual result is preserved, and dropping the future does not undo the seek.
+    fn file_seek(
+        &self,
+        file: &Self::File,
+        position: SeekFrom,
+        cancellation: &Cancellation,
+    ) -> impl Future<Output = OperationResult<u64>> + Send;
+
     /// Read once from the shared cursor, returning a possibly short count and the original buffer.
     fn file_read<B: IoBufMut>(
         &self,

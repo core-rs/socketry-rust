@@ -23,7 +23,7 @@ use io_uring::{IoUring, opcode, squeue, types};
 use polling::{Event, Events, Poller};
 use std::collections::{HashMap, VecDeque};
 use std::fs::File as StdFile;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, SeekFrom, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -645,6 +645,19 @@ impl SocketOperations for Selector {
 }
 impl File for Selector {
     type File = Arc<StdFile>;
+    async fn file_seek(
+        &self,
+        file: &Self::File,
+        position: SeekFrom,
+        cancellation: &Cancellation,
+    ) -> OperationResult<u64> {
+        self.check_open()?;
+        // Seek uses the blocking fallback and shares the OS cursor with ring operations. Callers await cursor operations in order when ordering matters.
+        readiness::Selector
+            .file_seek(file, position, cancellation)
+            .await
+    }
+
     async fn file_open(
         &self,
         path: &Path,

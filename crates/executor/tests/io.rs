@@ -468,6 +468,15 @@ mod native {
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
             assert_eq!(buffer, vec![6]);
 
+            assert_eq!(
+                handle
+                    .file_seek(&file, std::io::SeekFrom::Start(1), &NEVER)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::BrokenPipe
+            );
+
             for write in [false, true] {
                 let buffer = vec![11];
                 let allocation = buffer.as_ptr();
@@ -789,6 +798,15 @@ mod tokio_adapter {
                 .await;
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
             assert_eq!(buffer, vec![4]);
+
+            assert_eq!(
+                handle
+                    .file_seek(&file, std::io::SeekFrom::Start(1), &NEVER)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::BrokenPipe
+            );
 
             for write in [false, true] {
                 let buffer = vec![11];

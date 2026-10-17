@@ -8,7 +8,7 @@ use event_listener::Event;
 use socketry_executor::BufferResult;
 use socketry_executor::{Interest, IoBuf, IoBufMut};
 use std::collections::{HashMap, VecDeque};
-use std::io;
+use std::io::{self, SeekFrom};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
@@ -109,6 +109,26 @@ impl Scheduler {
 
 impl File for Scheduler {
     type File = FileHandle;
+
+    async fn file_seek(
+        &self,
+        file: &FileHandle,
+        position: SeekFrom,
+        cancellation: &Cancellation,
+    ) -> OperationResult<u64> {
+        cancellation.check()?;
+        let mut cursor = file.position.lock().unwrap();
+        let position = match position {
+            SeekFrom::Start(offset) => i128::from(offset),
+            SeekFrom::Current(offset) => i128::from(*cursor) + i128::from(offset),
+            SeekFrom::End(offset) => file.bytes.lock().unwrap().len() as i128 + i128::from(offset),
+        };
+        if !(0..=i128::from(i64::MAX)).contains(&position) {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
+        }
+        *cursor = position as u64;
+        Ok(*cursor)
+    }
 
     async fn file_open(
         &self,

@@ -25,7 +25,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File as StdFile;
 use std::future::Future;
-use std::io;
+use std::io::{self, SeekFrom};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::pin::Pin;
@@ -721,6 +721,26 @@ impl SocketOperations for SchedulerHandle {
 
 impl File for SchedulerHandle {
     type File = Arc<StdFile>;
+    async fn file_seek(
+        &self,
+        file: &Self::File,
+        position: SeekFrom,
+        cancellation: &Cancellation,
+    ) -> OperationResult<u64> {
+        cancellation.check()?;
+        self.shared.check_open()?;
+        let file = Arc::clone(file);
+        let cancellation = cancellation.clone();
+        file_operation_result(
+            self.shared
+                .runtime
+                .spawn_blocking(move || {
+                    super::blocking::run(&cancellation, || super::file_io::seek(&file, position))
+                })
+                .await,
+        )
+    }
+
     async fn file_open(
         &self,
         path: &Path,
@@ -955,6 +975,15 @@ impl SocketOperations for Scheduler {
 }
 impl File for Scheduler {
     type File = <SchedulerHandle as File>::File;
+    async fn file_seek(
+        &self,
+        file: &Self::File,
+        position: SeekFrom,
+        cancellation: &Cancellation,
+    ) -> OperationResult<u64> {
+        self.handle.file_seek(file, position, cancellation).await
+    }
+
     async fn file_open(
         &self,
         path: &Path,

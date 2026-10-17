@@ -3,7 +3,17 @@
 
 //! Blocking shared-cursor and positioned file operations shared by selector adapters.
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+
+pub(crate) fn seek(mut file: &File, position: SeekFrom) -> io::Result<u64> {
+    if matches!(position, SeekFrom::Start(offset) if offset > i64::MAX as u64) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "file offset exceeds i64::MAX",
+        ));
+    }
+    retry_interrupted(|| file.seek(position))
+}
 
 pub(crate) fn read(mut file: &File, buffer: &mut [u8]) -> io::Result<usize> {
     retry_interrupted(|| file.read(buffer))
@@ -57,7 +67,7 @@ pub(crate) fn write_at(file: &File, buffer: &[u8], offset: u64) -> io::Result<us
     retry_interrupted(operation)
 }
 
-fn retry_interrupted(mut operation: impl FnMut() -> io::Result<usize>) -> io::Result<usize> {
+fn retry_interrupted<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     loop {
         match operation() {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,

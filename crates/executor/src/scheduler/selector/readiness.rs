@@ -13,7 +13,7 @@ use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOper
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
 use async_io::Async;
 use std::fs::File as StdFile;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, SeekFrom, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
@@ -167,6 +167,23 @@ impl SocketOperations for Selector {
 
 impl File for Selector {
     type File = Arc<StdFile>;
+    async fn file_seek(
+        &self,
+        file: &Self::File,
+        position: SeekFrom,
+        cancellation: &Cancellation,
+    ) -> OperationResult<u64> {
+        cancellation.check()?;
+        let file = Arc::clone(file);
+        let cancellation = cancellation.clone();
+        blocking::unblock(move || {
+            crate::scheduler::blocking::run(&cancellation, || {
+                crate::scheduler::file_io::seek(&file, position)
+            })
+        })
+        .await
+    }
+
     async fn file_open(
         &self,
         path: &Path,

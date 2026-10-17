@@ -168,6 +168,8 @@ fn freebsd_pathnames_and_conflicting_hints_return_errors() {
         Some("127.0.0.1"),
         "80",
         AddressHints {
+            // AF_UNSPEC also explores FreeBSD's local family, where protocol is ignored. Pin the IP family so conflicting transport hints fail during native validation.
+            domain: Some(SocketDomain::Ipv4),
             socket_type: Some(SocketType::Stream),
             protocol: Some(SocketProtocol::Udp),
             ..AddressHints::default()

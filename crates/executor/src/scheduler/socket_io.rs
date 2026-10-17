@@ -28,6 +28,10 @@ impl<'buffer> SendBuffer<'buffer> {
     pub(super) fn send(&self, socket: &Socket) -> io::Result<usize> {
         // SAFETY: `owner` borrows the IoBuf owner, which remains alive until this synchronous syscall returns.
         let bytes = unsafe { slice::from_raw_parts(self.pointer, self.length) };
+        #[cfg(unix)]
+        return socket.send_with_flags(bytes, libc::MSG_NOSIGNAL);
+
+        #[cfg(not(unix))]
         socket.send(bytes)
     }
 }

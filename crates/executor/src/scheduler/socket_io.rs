@@ -217,14 +217,13 @@ mod tests {
         // Fill the send queue before the peer starts reading. Bound the payload as socket buffer limits vary by platform.
         let mut sent = 0;
         while sent < 1024 * 1024 {
-            match socket.send(&[0x5a; 4096]) {
-                Ok(length) => {
-                    assert_ne!(length, 0);
-                    sent += length;
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                Err(error) => panic!("send failed: {error}"),
+            let result = socket.send(&[0x5a; 4096]);
+            if matches!(&result, Err(error) if error.kind() == io::ErrorKind::WouldBlock) {
+                break;
             }
+            let length = result.unwrap();
+            assert_ne!(length, 0);
+            sent += length;
         }
         assert!(sent > 0);
         let reader = thread::spawn(move || {

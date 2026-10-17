@@ -27,7 +27,11 @@ fn flags_and_numeric_resolution() {
         "127.0.0.1:80".parse::<SocketAddr>().unwrap()
     );
     assert_eq!(addresses[0].socket_type, SocketType::Stream);
-    assert_eq!(addresses[0].protocol, Some(SocketProtocol::Tcp));
+    // Winsock may retain protocol zero when only SOCK_STREAM was requested; zero/default is intentionally preserved as None.
+    assert!(matches!(
+        addresses[0].protocol,
+        None | Some(SocketProtocol::Tcp)
+    ));
     assert!(lookup(Some("not-numeric.invalid"), "80", hints).is_err());
     // AI_ADDRCONFIG depends on the machine's interfaces: either a result or a native resolver error is valid.
     let _ = lookup(

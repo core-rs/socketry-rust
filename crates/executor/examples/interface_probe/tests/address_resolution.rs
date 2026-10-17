@@ -21,14 +21,15 @@ pub async fn check(scheduler: &impl AddressResolution) {
                 .address_resolve(Some(name), AddressService::Port(443), hints, &never)
                 .await;
             if domain.is_none_or(|domain| domain == SocketDomain::from(expected)) {
-                assert_eq!(
-                    result.unwrap(),
-                    vec![AddressInfo {
-                        address: expected,
-                        socket_type: SocketType::Stream,
-                        protocol: Some(SocketProtocol::Tcp)
-                    }]
-                );
+                let addresses = result.unwrap();
+                assert_eq!(addresses.len(), 1);
+                assert_eq!(addresses[0].address, expected);
+                assert_eq!(addresses[0].socket_type, SocketType::Stream);
+                // Some native resolvers retain the unspecified protocol as zero/default.
+                assert!(matches!(
+                    addresses[0].protocol,
+                    None | Some(SocketProtocol::Tcp)
+                ));
             } else if let Ok(addresses) = result {
                 // Some system resolvers synthesize mapped IPv6 literals even without an explicit V4MAPPED hint. Preserve native policy while checking the requested family and service.
                 assert!(

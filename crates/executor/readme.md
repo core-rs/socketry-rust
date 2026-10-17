@@ -181,6 +181,22 @@ Read/write operations take an owned `IoBuf` (`IoBufMut` for reads) and return `B
 
 `file_seek(file, std::io::SeekFrom, cancellation)` repositions the shared cursor and returns its resulting `u64` offset. Use `Start(offset)` for an absolute position, `Current(delta)` for a relative move, or `End(delta)` for a position relative to EOF. `Current(0)` queries the position. Seeking past EOF does not extend the file; absolute offsets must fit in `i64`, and invalid positions or filesystem limits return errors. Seeks use blocking file pools on every current native backend, including io\_uring, and Tokio's blocking pool in the adapter. Cancellation before execution prevents seeking; a started seek preserves its actual result. Await seeks and other cursor operations sequentially when their ordering matters. A seek/read pair is not atomic with respect to other users of the resource.
 
+`file_sync(file, SyncMode, cancellation)` waits for OS synchronization and reports its result. `SyncMode::All` synchronizes contents and metadata; `SyncMode::Data` can omit metadata unrelated to retrieving file contents. Backends may provide full synchronization for either mode. Await preceding writes first: sync does not order concurrent writes, flush application buffers, or synchronize the parent directory entry. It leaves the shared cursor unchanged. Durability follows the OS, filesystem, and device guarantees.
+
+io\_uring uses native `Fsync` requests; readiness and Tokio use their existing blocking file pools. Cancellation before dispatch prevents submission, and blocking workers check again before starting. Once submitted, cancellation is best effort; a successful completion wins concurrent cancellation. Dropping a waiter does not undo the operation or release a file still in use by the backend.
+
+```rust,no_run
+use socketry_executor::{Cancellation, File, OperationResult, SyncMode};
+
+async fn synchronize<S: File>(
+    scheduler: &S,
+    file: &S::File,
+    cancellation: &Cancellation,
+) -> OperationResult<()> {
+    scheduler.file_sync(file, SyncMode::All, cancellation).await
+}
+```
+
 Repeated calls to `file_read` continue from the position reached by the previous call. For example, this helper returns one chunk, which can be shorter than 4096 bytes:
 
 ```rust

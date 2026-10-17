@@ -7,8 +7,8 @@ mod support;
 
 static NEVER: socketry_executor::Cancellation = socketry_executor::Cancellation::never();
 
-use socketry_executor::SocketRegistration;
 use socketry_executor::{Clock, File, Interest, Socket, Spawn};
+use socketry_executor::{SocketRegistration, SyncMode};
 use std::fs::File as StdFile;
 use std::future::{Future, poll_fn};
 use std::io;
@@ -477,6 +477,17 @@ mod native {
                 io::ErrorKind::BrokenPipe
             );
 
+            for mode in [SyncMode::All, SyncMode::Data] {
+                assert_eq!(
+                    handle
+                        .file_sync(&file, mode, &NEVER)
+                        .await
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::BrokenPipe
+                );
+            }
+
             for write in [false, true] {
                 let buffer = vec![11];
                 let allocation = buffer.as_ptr();
@@ -808,6 +819,17 @@ mod tokio_adapter {
                 io::ErrorKind::BrokenPipe
             );
 
+            for mode in [SyncMode::All, SyncMode::Data] {
+                assert_eq!(
+                    handle
+                        .file_sync(&file, mode, &NEVER)
+                        .await
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::BrokenPipe
+                );
+            }
+
             for write in [false, true] {
                 let buffer = vec![11];
                 let allocation = buffer.as_ptr();
@@ -930,4 +952,44 @@ fn ring_shutdown_racing_submissions_returns_owned_buffers() {
             }
         }
     }));
+}
+
+#[cfg(unix)]
+async fn sync_errors<S: File<File = Arc<StdFile>>>(scheduler: &S) {
+    use std::os::{fd::OwnedFd, unix::net::UnixStream};
+    let (socket, _peer) = UnixStream::pair().unwrap();
+    let file = Arc::new(StdFile::from(OwnedFd::from(socket)));
+    for mode in [SyncMode::All, SyncMode::Data] {
+        let expected = match mode {
+            SyncMode::All => file.sync_all(),
+            SyncMode::Data => file.sync_data(),
+        }
+        .unwrap_err();
+        let actual = scheduler.file_sync(&file, mode, &NEVER).await.unwrap_err();
+        assert!(matches!(actual, socketry_executor::OperationError::Io(_)));
+        assert_eq!(actual.kind(), expected.kind());
+        assert_eq!(actual.raw_os_error(), expected.raw_os_error());
+    }
+}
+
+#[cfg(all(unix, feature = "native"))]
+#[test]
+fn native_file_sync_preserves_os_errors() {
+    let scheduler = socketry_executor::Scheduler::with_workers(2).unwrap();
+    scheduler.block_on(sync_errors(&scheduler));
+    scheduler.block_on(sync_errors(
+        &socketry_executor::scheduler::selector::readiness::Selector,
+    ));
+}
+
+#[cfg(all(unix, feature = "tokio"))]
+#[test]
+fn tokio_file_sync_preserves_os_errors() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let scheduler = socketry_executor::scheduler::tokio::Scheduler::new(runtime.handle().clone());
+    runtime.block_on(sync_errors(&scheduler));
+    runtime.block_on(scheduler.shutdown());
 }

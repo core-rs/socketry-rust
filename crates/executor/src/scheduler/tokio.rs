@@ -12,6 +12,7 @@ mod signals;
 
 use super::operation::cancellable;
 use super::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
+use crate::SyncMode;
 use crate::blocking_pool::BlockingPool;
 use crate::{
     Blocking, BlockingError, BlockingOptions, BlockingTask, Cancellation, FileOptions, IoBuf,
@@ -721,6 +722,26 @@ impl SocketOperations for SchedulerHandle {
 
 impl File for SchedulerHandle {
     type File = Arc<StdFile>;
+    async fn file_sync(
+        &self,
+        file: &Self::File,
+        mode: SyncMode,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        self.shared.check_open()?;
+        let file = Arc::clone(file);
+        let cancellation = cancellation.clone();
+        file_operation_result(
+            self.shared
+                .runtime
+                .spawn_blocking(move || {
+                    super::blocking::run(&cancellation, || super::file_io::sync(&file, mode))
+                })
+                .await,
+        )
+    }
+
     async fn file_seek(
         &self,
         file: &Self::File,
@@ -975,6 +996,15 @@ impl SocketOperations for Scheduler {
 }
 impl File for Scheduler {
     type File = <SchedulerHandle as File>::File;
+    async fn file_sync(
+        &self,
+        file: &Self::File,
+        mode: SyncMode,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.handle.file_sync(file, mode, cancellation).await
+    }
+
     async fn file_seek(
         &self,
         file: &Self::File,

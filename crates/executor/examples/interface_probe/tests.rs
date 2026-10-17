@@ -3,7 +3,7 @@
 
 use super::*;
 use futures_lite::future::block_on;
-use socketry_executor::IoBufMut;
+use socketry_executor::{IoBufMut, SyncMode};
 use std::future::Future;
 use std::pin::pin;
 use std::sync::{
@@ -15,6 +15,9 @@ use std::task::{Context, Wake, Waker};
 #[path = "tests/stateful_file.rs"]
 mod stateful_file;
 
+#[path = "tests/file_sync.rs"]
+mod file_sync;
+
 #[test]
 fn stateful_operations_forward_and_preserve_short_transfers() {
     let scheduler = FailingFiles {
@@ -23,6 +26,7 @@ fn stateful_operations_forward_and_preserve_short_transfers() {
     };
     // Exercise forwarding through the wrapper with failure injection disabled.
     block_on(stateful_file::check(&scheduler, Path::new("stateful")));
+    block_on(file_sync::check(&scheduler, Path::new("sync")));
     assert_eq!(scheduler.scheduler.open_files(), 0);
 }
 
@@ -50,6 +54,15 @@ struct FailingFiles {
 
 impl File for FailingFiles {
     type File = <simulated::Scheduler as File>::File;
+
+    async fn file_sync(
+        &self,
+        file: &Self::File,
+        mode: SyncMode,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.scheduler.file_sync(file, mode, cancellation).await
+    }
 
     async fn file_seek(
         &self,

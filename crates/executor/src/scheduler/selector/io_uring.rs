@@ -1,9 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Linux completion reads/writes using a ring owned by a dedicated selector
-//! thread. Tasks communicate through owned requests and standard wakers, so
-//! operation futures remain Send and can migrate between executor workers.
+//! Linux completion reads, writes, and file synchronization using a ring owned by a dedicated selector thread. Tasks communicate through owned requests and standard wakers, so operation futures remain Send and can migrate between executor workers.
 //!
 //! Socket setup, accept, readiness waits and timers currently reuse async-io.
 //! Initialization probes the required opcodes and returns an error rather than
@@ -15,6 +13,7 @@
 //! channel per operation. It does not yet pool operation records or register
 //! buffers with the kernel.
 use super::readiness::{self, Listener, Socket};
+use crate::SyncMode;
 use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
 use event_listener::{Event as CompletionEvent, Listener as _};
@@ -73,6 +72,7 @@ fn validate_operation_support(supported: impl Fn(u8) -> bool) -> io::Result<()> 
         opcode::Recv::CODE,
         opcode::Send::CODE,
         opcode::AsyncCancel::CODE,
+        opcode::Fsync::CODE,
     ] {
         if !supported(operation) {
             return Err(io::Error::new(
@@ -227,6 +227,66 @@ impl<B: IoBuf> PendingRequest for Request<B> {
         self.reply
             .take()
             .map(|reply| Box::new(reply) as Box<dyn Send>)
+    }
+}
+
+// A synchronization request has no payload buffer, but retains its file until the original completion exactly like a transfer request.
+struct SyncRequest {
+    identifier: u64,
+    file: Arc<StdFile>,
+    mode: SyncMode,
+    reply: Option<oneshot::Sender<io::Result<()>>>,
+    cancelling: bool,
+}
+
+impl PendingRequest for SyncRequest {
+    fn identifier(&self) -> u64 {
+        self.identifier
+    }
+
+    fn entry(&mut self) -> squeue::Entry {
+        let flags = match self.mode {
+            SyncMode::All => types::FsyncFlags::empty(),
+            SyncMode::Data => types::FsyncFlags::DATASYNC,
+        };
+        opcode::Fsync::new(types::Fd(self.file.as_raw_fd()))
+            .flags(flags)
+            .build()
+            .user_data(self.identifier)
+    }
+
+    fn finish(mut self: Box<Self>, result: io::Result<usize>) {
+        let reply = self
+            .reply
+            .take()
+            .expect("unfinished requests retain their completion sender");
+        let _ = reply.send(result.map(|_| ()));
+    }
+
+    fn cancelling(&self) -> bool {
+        self.cancelling
+    }
+
+    fn set_cancelling(&mut self) {
+        self.cancelling = true;
+    }
+
+    fn take_reply(&mut self) -> Option<Box<dyn Send>> {
+        self.reply
+            .take()
+            .map(|reply| Box::new(reply) as Box<dyn Send>)
+    }
+}
+
+impl Drop for SyncRequest {
+    fn drop(&mut self) {
+        // Queued requests can be destroyed before submission. InFlight retains requests whose kernel completion is unknown.
+        if let Some(reply) = self.reply.take() {
+            let _ = reply.send(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "selector closed before submission",
+            )));
+        }
     }
 }
 
@@ -450,18 +510,9 @@ impl Selector {
         if buffer.as_ref().is_empty() {
             return (Ok(0), buffer);
         }
-        let identifier = match self.controller.next_identifier.try_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |identifier| (identifier < CANCEL_TAG - 1).then_some(identifier + 1),
-        ) {
+        let identifier = match self.next_identifier() {
             Ok(identifier) => identifier,
-            Err(_) => {
-                return (
-                    Err(io::Error::other("io_uring operation identifiers exhausted")),
-                    buffer,
-                );
-            }
+            Err(error) => return (Err(error), buffer),
         };
         let (reply, result) = oneshot::channel();
         let request = Request {
@@ -473,10 +524,27 @@ impl Selector {
             reply: Some(reply),
             cancelling: false,
         };
-        if let Err(mpsc::SendError(Command::Submit(request))) = self
-            .controller
-            .commands
-            .send(Command::Submit(Box::new(request)))
+        self.submit(Box::new(request), result, cancellation).await
+    }
+
+    fn next_identifier(&self) -> io::Result<u64> {
+        self.controller
+            .next_identifier
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |identifier| {
+                (identifier < CANCEL_TAG - 1).then_some(identifier + 1)
+            })
+            .map_err(|_| io::Error::other("io_uring operation identifiers exhausted"))
+    }
+
+    async fn submit<T>(
+        &self,
+        request: Box<dyn PendingRequest>,
+        result: oneshot::Receiver<T>,
+        cancellation: &Cancellation,
+    ) -> T {
+        let identifier = request.identifier();
+        if let Err(mpsc::SendError(Command::Submit(request))) =
+            self.controller.commands.send(Command::Submit(request))
         {
             request.finish(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -490,13 +558,11 @@ impl Selector {
             armed: true,
         };
         self.controller.notify();
-        // A disconnected reply is an unexpected selector failure. Its original
-        // buffer is deliberately retained; it cannot safely be returned.
+        // A disconnected reply is an unexpected selector failure. Resources whose kernel completion cannot be established are deliberately retained.
         let mut result = pin!(result);
         let mut cancelled = pin!(cancellation.cancelled());
         let result = poll_fn(|context| {
-            // Original completion wins the race. A cancellation request never
-            // releases its buffer; continue waiting for the original CQE.
+            // Original completion wins the race. Cancellation never releases resources; continue waiting for the original CQE.
             if let Poll::Ready(result) = result.as_mut().poll(context) {
                 return Poll::Ready(result);
             }
@@ -645,6 +711,29 @@ impl SocketOperations for Selector {
 }
 impl File for Selector {
     type File = Arc<StdFile>;
+    async fn file_sync(
+        &self,
+        file: &Self::File,
+        mode: SyncMode,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        self.check_open()?;
+        let identifier = self.next_identifier()?;
+        let (reply, result) = oneshot::channel();
+        let request = SyncRequest {
+            identifier,
+            file: Arc::clone(file),
+            mode,
+            reply: Some(reply),
+            cancelling: false,
+        };
+        operation_result(
+            self.submit(Box::new(request), result, cancellation).await,
+            cancellation,
+        )
+    }
+
     async fn file_seek(
         &self,
         file: &Self::File,

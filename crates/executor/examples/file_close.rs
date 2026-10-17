@@ -37,7 +37,7 @@ async fn read_then_close<S: File>(scheduler: &S, path: &Path) -> OperationResult
     drop(buffer);
 
     // Move ownership into close only after the read has completed. Handle the read result AFTER closing, so a cancellation or read error does not skip explicit cleanup.
-    // `drop(read_future)` would only request cancellation; immediately closing afterward could panic because backend access may still be outstanding.
+    // `drop(read_future)` abandons completion and may leave backend work running. io_uring requests cancellation on drop, but even then immediately closing could panic because backend access may still be outstanding.
     scheduler.file_close(file).await?;
     result
 }

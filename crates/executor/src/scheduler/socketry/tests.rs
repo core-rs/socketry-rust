@@ -58,6 +58,93 @@ fn shutdown_drains_accepted_closes_after_their_waiters_are_dropped() {
     thread.join().unwrap();
 }
 
+#[cfg(feature = "native")]
+#[test]
+fn cleanup_completion_can_destroy_scheduler_without_waiting_on_its_own_worker() {
+    use crate::{BlockingOptions, File};
+    use futures_lite::future::block_on;
+    use std::future::Future;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::{Mutex, mpsc};
+    use std::task::{Context, Wake, Waker};
+    use std::time::Duration;
+
+    struct DestroyScheduler {
+        scheduler: Mutex<Option<Scheduler>>,
+        shutdown: bool,
+        completed: mpsc::Sender<()>,
+    }
+
+    impl Wake for DestroyScheduler {
+        fn wake(self: Arc<Self>) {
+            let scheduler = self.scheduler.lock().unwrap().take().unwrap();
+            if self.shutdown {
+                // Explicit synchronous shutdown rejects this context; unwinding still drops the scheduler without joining this worker.
+                assert!(catch_unwind(AssertUnwindSafe(|| scheduler.shutdown())).is_err());
+            } else {
+                drop(scheduler);
+            }
+            self.completed.send(()).unwrap();
+        }
+    }
+
+    for shutdown in [false, true] {
+        let timeout = Duration::from_secs(10);
+        let scheduler = Scheduler::with_workers_and_blocking(
+            1,
+            BlockingOptions {
+                threads: 1,
+                capacity: 3,
+            },
+        )
+        .unwrap();
+        let handle = scheduler.handle();
+        let (started, start) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let mut completion = Box::pin(
+            block_on(handle.shared.cleanup.submit(move || {
+                started.send(()).unwrap();
+                released.recv_timeout(timeout).unwrap();
+            }))
+            .unwrap(),
+        );
+        start.recv_timeout(timeout).unwrap();
+        // Further accepted cleanup must survive scheduler destruction and execute after the reentrant callback returns.
+        block_on(handle.file_close_submit(tempfile::tempfile().unwrap().into())).unwrap();
+        let (drained, drain) = mpsc::channel();
+        drop(
+            block_on(
+                handle
+                    .shared
+                    .cleanup
+                    .submit(move || drained.send(()).unwrap()),
+            )
+            .unwrap(),
+        );
+        let (completed, complete) = mpsc::channel();
+        let waker = Waker::from(Arc::new(DestroyScheduler {
+            scheduler: Mutex::new(Some(scheduler)),
+            shutdown,
+            completed,
+        }));
+        assert!(
+            completion
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        release.send(()).unwrap();
+        complete.recv_timeout(timeout).unwrap();
+        drain.recv_timeout(timeout).unwrap();
+        block_on(completion).unwrap().unwrap();
+        handle.shared.cleanup.wait_submitted_blocking();
+        assert!(matches!(
+            handle.spawn(async {}),
+            Err(SpawnError::SchedulerClosed)
+        ));
+    }
+}
+
 #[test]
 fn default_constructor_and_worker_count_report_available_workers() {
     let scheduler = Scheduler::new().unwrap();

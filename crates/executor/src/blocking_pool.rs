@@ -6,6 +6,7 @@ use event_listener::Event;
 #[cfg(any(feature = "native", test))]
 use event_listener::Listener;
 use futures_channel::oneshot;
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::future::{Future, poll_fn};
 use std::io;
@@ -15,6 +16,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::task::Poll;
 use std::thread;
+
+thread_local! {
+    static CURRENT_WORKER: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) fn is_worker() -> bool {
+    CURRENT_WORKER.get()
+}
 
 struct Job {
     run: Box<dyn FnOnce() + Send + 'static>,
@@ -274,6 +283,8 @@ impl Drop for BlockingPool {
 }
 
 fn work(shared: Arc<Shared>) {
+    // This entry point owns its thread. Include completion and capacity wakeups in the worker context: either callback can destroy a scheduler and must not synchronously drain this worker's queue.
+    CURRENT_WORKER.set(true);
     loop {
         let job = {
             let mut state = shared.state.lock().unwrap();

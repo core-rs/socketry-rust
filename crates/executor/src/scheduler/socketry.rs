@@ -465,10 +465,13 @@ impl Scheduler {
     /// Queued `spawn_blocking` jobs are discarded. Started blocking jobs finish independently; await their handles first for graceful shutdown. Accepted file-close jobs always finish; shutdown outside a worker waits for them.
     ///
     /// # Panics
-    /// Panics on a Socketry worker. Dropping a scheduler on a worker instead
-    /// requests shutdown without joining, allowing that worker to finish.
+    /// Panics on a Socketry future or blocking-pool worker. Dropping a scheduler on either kind of worker instead requests shutdown without joining or draining, allowing that worker to finish.
     pub fn shutdown(self) {
         worker::assert_outside_worker();
+        assert!(
+            !crate::blocking_pool::is_worker(),
+            "cannot synchronously shut down a scheduler on a blocking-pool worker"
+        );
         drop(self);
     }
 }
@@ -494,7 +497,7 @@ impl Spawn for Scheduler {
 impl Drop for Scheduler {
     fn drop(&mut self) {
         self.handle.shared.close();
-        if !worker::is_worker() {
+        if !worker::is_worker() && !crate::blocking_pool::is_worker() {
             for worker in self.workers.drain(..) {
                 let _ = worker.join();
             }

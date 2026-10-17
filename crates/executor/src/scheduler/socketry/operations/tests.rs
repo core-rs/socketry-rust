@@ -215,3 +215,33 @@ fn scheduler_and_handle_forward_network_file_and_clock_operations() {
         scheduler.sleep(Duration::ZERO, &NEVER).await.unwrap();
     });
 }
+
+#[test]
+fn socket_cleanup_preserves_admitted_jobs_and_bounds_admission() {
+    for mode in 0..6 {
+        let capacity = if mode == 4 { 1 } else { 2 };
+        let scheduler = Scheduler::with_workers_and_blocking(
+            1,
+            crate::BlockingOptions {
+                threads: 1,
+                capacity,
+            },
+        )
+        .unwrap();
+        let handle = scheduler.handle();
+        scheduler.block_on(async {
+            let pool = &handle.shared.cleanup;
+            match mode {
+                0..=3 => {
+                    crate::scheduler::cleanup::tests::accepted_socket_jobs(&handle, pool, mode)
+                        .await
+                }
+                4 => {
+                    crate::scheduler::cleanup::tests::saturated_socket_admission(&handle, pool)
+                        .await
+                }
+                _ => crate::scheduler::cleanup::tests::closed_socket_admission(&handle, pool).await,
+            }
+        });
+    }
+}

@@ -5,7 +5,11 @@ use crate::{
     BufferResult, Cancellation, Interest, IoBuf, IoBufMut, OperationResult, SocketDomain,
     SocketProtocol, SocketType,
 };
-use std::{future::Future, io, net::SocketAddr};
+use std::{
+    future::Future,
+    io,
+    net::{Shutdown, SocketAddr},
+};
 
 /// IP socket operations through the chosen scheduler. Each backend supplies one descriptor type for unconnected, listening, and connected sockets. Operations have the same state requirements as their system calls; invalid transitions report OS errors.
 ///
@@ -14,6 +18,31 @@ use std::{future::Future, io, net::SocketAddr};
 /// File and socket resources remain distinct. There is no common descriptor trait, protocol buffering, or automatic close coordination. Non-IP families and message/address APIs remain extensions.
 pub trait Socket: Send + Sync {
     type Socket: Send + Sync;
+
+    /// Consume and close an exclusively owned socket, awaiting bounded admission and OS completion. Finish all other operations first: close never cancels or joins them, and retained backend use may panic. Dropping an unpolled close releases the owned descriptor through its ordinary destructor.
+    fn socket_close(&self, socket: Self::Socket) -> impl Future<Output = io::Result<()>> + Send;
+
+    /// Consume the socket and await bounded cleanup admission only. Accepted close jobs survive waiter abandonment and are drained during graceful scheduler shutdown. Execution errors are discarded; use `socket_close` to observe them. The same exclusive-ownership requirement applies.
+    fn socket_close_submit(
+        &self,
+        socket: Self::Socket,
+    ) -> impl Future<Output = io::Result<()>> + Send;
+
+    /// Shut down reads, writes, or both, awaiting bounded admission and OS completion. The descriptor remains owned by the caller. Finish preceding writes before `Shutdown::Write`; reads may continue. Success confirms local shutdown, not peer receipt. Repeated shutdown and later I/O preserve platform-specific results.
+    ///
+    /// This lazy cleanup operation has no cancellation input. After admission it retains the socket and executes even if its waiter is dropped. Await its completion before explicitly closing the socket.
+    fn socket_shutdown(
+        &self,
+        socket: &Self::Socket,
+        how: Shutdown,
+    ) -> impl Future<Output = io::Result<()>> + Send;
+
+    /// Request shutdown and await bounded admission only. Acceptance does not establish completion or ordering with later operations, including close. The backend retains the socket until execution finishes; graceful scheduler shutdown drains accepted requests. Use `socket_shutdown` when subsequent work requires completion or errors.
+    fn socket_shutdown_submit(
+        &self,
+        socket: &Self::Socket,
+        how: Shutdown,
+    ) -> impl Future<Output = io::Result<()>> + Send;
 
     /// Open a nonblocking socket without binding, listening, or connecting. `None` selects the OS default protocol for the requested domain and type.
     fn socket_open(

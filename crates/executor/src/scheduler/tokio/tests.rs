@@ -681,3 +681,34 @@ fn cancelling_queued_blocking_work_preserves_buffers_cursor_and_prevents_creatio
     assert_eq!(file.as_ref().metadata().unwrap().len(), 0);
     runtime.block_on(scheduler.shutdown());
 }
+
+#[test]
+fn socket_cleanup_preserves_admitted_jobs_and_bounds_admission() {
+    for mode in 0..6 {
+        let capacity = if mode == 4 { 1 } else { 2 };
+        let runtime = runtime();
+        let scheduler = Scheduler::with_blocking(
+            runtime.handle().clone(),
+            crate::BlockingOptions {
+                threads: 1,
+                capacity,
+            },
+        )
+        .unwrap();
+        let handle = scheduler.handle();
+        runtime.block_on(async {
+            let pool = &handle.shared.cleanup;
+            match mode {
+                0..=3 => {
+                    crate::scheduler::cleanup::tests::accepted_socket_jobs(&handle, pool, mode)
+                        .await
+                }
+                4 => {
+                    crate::scheduler::cleanup::tests::saturated_socket_admission(&handle, pool)
+                        .await
+                }
+                _ => crate::scheduler::cleanup::tests::closed_socket_admission(&handle, pool).await,
+            }
+        });
+    }
+}

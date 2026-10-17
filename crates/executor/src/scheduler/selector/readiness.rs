@@ -67,6 +67,48 @@ impl SocketRegistration for Selector {
 
 impl SocketOperations for Selector {
     type Socket = SocketDescriptor;
+
+    async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
+        crate::scheduler::cleanup::run(
+            crate::scheduler::cleanup::standalone_pool(),
+            socket.into_close(),
+        )
+        .await
+    }
+
+    async fn socket_close_submit(&self, socket: Self::Socket) -> io::Result<()> {
+        crate::scheduler::cleanup::submit_only(
+            crate::scheduler::cleanup::standalone_pool(),
+            socket.into_close(),
+        )
+        .await
+    }
+
+    async fn socket_shutdown(
+        &self,
+        socket: &Self::Socket,
+        how: std::net::Shutdown,
+    ) -> io::Result<()> {
+        let socket = socket.retain();
+        crate::scheduler::cleanup::run(crate::scheduler::cleanup::standalone_pool(), move || {
+            socket.get_ref().shutdown(how)
+        })
+        .await
+    }
+
+    async fn socket_shutdown_submit(
+        &self,
+        socket: &Self::Socket,
+        how: std::net::Shutdown,
+    ) -> io::Result<()> {
+        let socket = socket.retain();
+        crate::scheduler::cleanup::submit_only(
+            crate::scheduler::cleanup::standalone_pool(),
+            move || socket.get_ref().shutdown(how),
+        )
+        .await
+    }
+
     async fn socket_open(
         &self,
         domain: crate::SocketDomain,
@@ -253,13 +295,13 @@ impl FileAllocate for Selector {
 impl File for Selector {
     type File = FileDescriptor;
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
-        crate::scheduler::file_close::close(crate::scheduler::file_close::standalone_pool(), file)
+        crate::scheduler::file_close::close(crate::scheduler::cleanup::standalone_pool(), file)
             .await
     }
 
     async fn file_close_submit(&self, file: Self::File) -> io::Result<()> {
         crate::scheduler::file_close::submit_only(
-            crate::scheduler::file_close::standalone_pool(),
+            crate::scheduler::cleanup::standalone_pool(),
             file,
         )
         .await

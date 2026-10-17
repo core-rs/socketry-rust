@@ -69,7 +69,44 @@ fn completion_releases_file_ownership_before_waking_close_callers() {
 fn close_rejects_a_stopped_selector() {
     async_io::block_on(async {
         let selector = Selector::new().unwrap();
+        let socket = || {
+            SocketDescriptor::new(
+                socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap(),
+            )
+            .unwrap()
+        };
+        let first = socket();
+        let second = socket();
+        let third = socket();
         selector.shutdown().await;
+        assert_eq!(
+            selector
+                .socket_shutdown(&first, std::net::Shutdown::Write)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(
+            selector
+                .socket_shutdown_submit(&first, std::net::Shutdown::Write)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(
+            selector.socket_close(second).await.unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(
+            selector
+                .socket_close_submit(third)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
         assert_eq!(
             selector
                 .file_close(tempfile::tempfile().unwrap().into())

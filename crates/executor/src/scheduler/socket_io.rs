@@ -8,6 +8,51 @@ use socket2::{Domain, Protocol, Socket, Type};
 use std::future::Future;
 use std::{io, marker::PhantomData, net::SocketAddr, slice};
 
+// Called only on the cleanup pool after exclusive ownership and deregistration. Close is never retried on Unix: the descriptor may already have been released on error.
+pub(crate) fn close(socket: Socket) -> io::Result<()> {
+    #[cfg(unix)]
+    let result = {
+        use std::os::fd::IntoRawFd;
+        // SAFETY: The socket is exclusively owned and deregistered, and transferring the raw descriptor prevents a second close in Drop.
+        unsafe { libc::close(socket.into_raw_fd()) }
+    };
+    #[cfg(unix)]
+    return close_result(result);
+
+    #[cfg(windows)]
+    close_with(socket, |socket| socket.set_nonblocking(false))
+}
+
+#[cfg(windows)]
+fn close_with(
+    socket: Socket,
+    set_blocking: impl FnOnce(&Socket) -> io::Result<()>,
+) -> io::Result<()> {
+    use std::os::windows::io::IntoRawSocket;
+    // Winsock cannot close a nonblocking socket with positive linger reliably. The cleanup worker may block, and no operation or readiness registration still uses this socket.
+    set_blocking(&socket)?;
+    // SAFETY: Ownership is transferred out of Socket; no other backend operation retains this socket, and Drop must not close it again.
+    let result = unsafe {
+        windows_sys::Win32::Networking::WinSock::closesocket(socket.into_raw_socket() as _)
+    };
+    close_result(result)
+}
+
+fn close_result(result: i32) -> io::Result<()> {
+    if result == 0 {
+        Ok(())
+    } else {
+        #[cfg(unix)]
+        let error = io::Error::last_os_error();
+        #[cfg(windows)]
+        // SAFETY: WSAGetLastError reads the calling thread's most recent Winsock error.
+        let error = io::Error::from_raw_os_error(unsafe {
+            windows_sys::Win32::Networking::WinSock::WSAGetLastError()
+        });
+        Err(error)
+    }
+}
+
 pub(super) struct SendBuffer<'buffer> {
     pointer: *const u8,
     length: usize,
@@ -144,6 +189,74 @@ fn connected_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_close_consumes_socket_and_preserves_error_results() {
+        close(Socket::new(Domain::IPV4, Type::STREAM, None).unwrap()).unwrap();
+        assert!(close_result(-1).is_err());
+    }
+
+    #[test]
+    fn explicit_close_preserves_positive_linger_and_queued_data() {
+        use std::{io::Read, net::TcpListener, thread, time::Duration};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        socket
+            .connect(&listener.local_addr().unwrap().into())
+            .unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket2::SockRef::from(&peer)
+            .set_recv_buffer_size(8192)
+            .unwrap();
+        socket.set_send_buffer_size(4096).unwrap();
+        socket.set_linger(Some(Duration::from_secs(5))).unwrap();
+        socket.set_nonblocking(true).unwrap();
+
+        // Fill the send queue before the peer starts reading. Bound the payload as socket buffer limits vary by platform.
+        let mut sent = 0;
+        while sent < 1024 * 1024 {
+            let result = socket.send(&[0x5a; 4096]);
+            if matches!(&result, Err(error) if error.kind() == io::ErrorKind::WouldBlock) {
+                break;
+            }
+            let length = result.unwrap();
+            assert_ne!(length, 0);
+            sent += length;
+        }
+        assert!(sent > 0);
+        let reader = thread::spawn(move || {
+            let mut received = Vec::new();
+            peer.read_to_end(&mut received).unwrap();
+            received
+        });
+
+        close(socket).unwrap();
+        assert_eq!(reader.join().unwrap(), vec![0x5a; sent]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn close_configuration_errors_are_returned_and_ownership_is_released() {
+        use std::{
+            io::Read,
+            net::{TcpListener, TcpStream},
+            time::Duration,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = Socket::from(TcpStream::connect(listener.local_addr().unwrap()).unwrap());
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket.set_nonblocking(true).unwrap();
+
+        let error =
+            close_with(socket, |_| Err(io::ErrorKind::PermissionDenied.into())).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+    }
 
     #[test]
     fn socket_creation_errors_are_returned() {

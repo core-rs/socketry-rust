@@ -50,14 +50,19 @@ pub(super) fn lookup(
         return Err(platform::error(code).into());
     }
     let results = Results(result);
-    let mut current = results.0;
+    // SAFETY: Results owns the successful native list for the entire copy.
+    unsafe { copy_results(results.0) }
+}
+
+// SAFETY: current must be a live native result list; each recognized IP entry must contain a valid matching socket address. Other families are rejected without reading their address data.
+unsafe fn copy_results(mut current: *mut AddrInfo) -> io::Result<Vec<AddressInfo>> {
     let mut addresses = Vec::new();
     while !current.is_null() {
         // SAFETY: getaddrinfo owns a linked list valid until Results is dropped. All address data is copied before freeing the list.
         let entry = unsafe { &*current };
         addresses.push(AddressInfo {
             // SAFETY: The entry and address belong to the live resolver list.
-            address: unsafe { address(entry) },
+            address: unsafe { address(entry) }?,
             socket_type: socket_parameters::decode_socket_type(entry.ai_socktype),
             protocol: socket_parameters::decode_protocol(entry.ai_protocol),
         });
@@ -72,8 +77,15 @@ fn flags(hints: AddressHints) -> i32 {
         | (i32::from(hints.address_configured) * sys::AI_ADDRCONFIG as i32)
 }
 
-// SAFETY: entry must be a successful native getaddrinfo record, whose address is valid for its family and ai_addrlen. Our hints restrict resolution to IP families; getaddrinfo must uphold its native ABI contract.
-unsafe fn address(entry: &AddrInfo) -> std::net::SocketAddr {
+// SAFETY: For an IP family, entry must contain a valid matching socket address and ai_addrlen, as provided by native getaddrinfo. Other families are rejected before dereferencing ai_addr.
+unsafe fn address(entry: &AddrInfo) -> io::Result<std::net::SocketAddr> {
+    // AF_UNSPEC can include AF_LOCAL on FreeBSD. This capability exposes only IP endpoints and must reject other families without panicking.
+    if entry.ai_family != sys::AF_INET as i32 && entry.ai_family != sys::AF_INET6 as i32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "resolver returned a non-IP socket address",
+        ));
+    }
     let mut storage = socket2::SockAddrStorage::zeroed();
     let length = entry.ai_addrlen as usize;
     if length > std::mem::size_of::<socket2::SockAddrStorage>() {
@@ -89,8 +101,10 @@ unsafe fn address(entry: &AddrInfo) -> std::net::SocketAddr {
         socket2::SockAddr::new(storage, length as _)
     };
     match address.as_socket() {
-        Some(address) => address,
-        None => unreachable!("getaddrinfo with IP hints returns an IPv4 or IPv6 socket address"),
+        Some(address) => Ok(address),
+        None => {
+            unreachable!("getaddrinfo records have matching ai_family and socket address families")
+        }
     }
 }
 

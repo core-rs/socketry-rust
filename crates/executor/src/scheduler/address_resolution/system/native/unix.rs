@@ -13,6 +13,10 @@ pub(super) fn string(value: &str) -> CString {
     CString::new(value).expect("resolver inputs were checked for NUL before admission")
 }
 
+// FreeBSD's <netdb.h> defines this extension, which libc does not currently export: https://github.com/freebsd/freebsd-src/blob/main/include/netdb.h
+#[cfg(target_os = "freebsd")]
+pub(super) const EAI_BADHINTS: i32 = 12;
+
 pub(super) fn error(code: i32) -> AddressResolveError {
     let system_error = (code == sys::EAI_SYSTEM).then(io::Error::last_os_error);
     let kind = match code {
@@ -28,6 +32,8 @@ pub(super) fn error(code: i32) -> AddressResolveError {
         sys::EAI_NODATA => Kind::NameNotFound,
         sys::EAI_SERVICE => Kind::ServiceUnavailable,
         sys::EAI_BADFLAGS | sys::EAI_FAMILY | sys::EAI_SOCKTYPE => Kind::InvalidHints,
+        #[cfg(target_os = "freebsd")]
+        EAI_BADHINTS => Kind::InvalidHints,
         sys::EAI_FAIL => Kind::PermanentFailure,
         sys::EAI_MEMORY => Kind::OutOfMemory,
         sys::EAI_SYSTEM => Kind::System,

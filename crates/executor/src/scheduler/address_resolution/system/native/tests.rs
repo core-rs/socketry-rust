@@ -48,7 +48,7 @@ fn address_copy_preserves_scope_and_flow() {
     entry.ai_family = sys::AF_INET6 as i32;
     entry.ai_addrlen = storage.len() as _;
     entry.ai_addr = storage.as_ptr().cast_mut().cast();
-    assert_eq!(unsafe { address(&entry) }, expected);
+    assert_eq!(unsafe { address(&entry) }.unwrap(), expected);
 }
 
 #[test]
@@ -128,4 +128,53 @@ fn windows_resolver_error_categories() {
         assert!(!error.message.is_empty());
         assert!(error.system_error.is_none());
     }
+}
+
+#[test]
+fn empty_result_guard_does_not_call_native_free() {
+    // The guard accepts an empty list without assuming freeaddrinfo accepts a null pointer on every platform.
+    drop(Results(ptr::null_mut()));
+}
+
+#[test]
+fn non_ip_results_return_an_error() {
+    // A native list may include families outside this IP-only interface. The converter rejects them before reading address storage.
+    let mut entry: AddrInfo = unsafe { std::mem::zeroed() };
+    entry.ai_family = sys::AF_UNSPEC as i32;
+    assert_eq!(
+        unsafe { copy_results(&mut entry) }.unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+}
+
+#[cfg(target_os = "freebsd")]
+#[test]
+fn freebsd_pathnames_and_conflicting_hints_return_errors() {
+    assert_eq!(
+        lookup(
+            Some("/tmp/socketry-resolver.sock"),
+            "80",
+            AddressHints::default()
+        )
+        .unwrap_err()
+        .kind(),
+        io::ErrorKind::InvalidData
+    );
+    let error = lookup(
+        Some("127.0.0.1"),
+        "80",
+        AddressHints {
+            socket_type: Some(SocketType::Stream),
+            protocol: Some(SocketProtocol::Udp),
+            ..AddressHints::default()
+        },
+    )
+    .unwrap_err();
+    let detail = error
+        .get_ref()
+        .unwrap()
+        .downcast_ref::<crate::AddressResolveError>()
+        .unwrap();
+    assert_eq!(detail.kind, crate::AddressResolveErrorKind::InvalidHints);
+    assert_eq!(detail.code, Some(platform::EAI_BADHINTS));
 }

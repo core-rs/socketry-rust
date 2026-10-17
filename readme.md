@@ -38,7 +38,7 @@ See the [executor package](crates/executor/readme.md) for scheduling, ownership,
 cargo run --package socketry-executor --example work_stealing
 ```
 
-`AddressResolution` adds explicit hostname lookup through the scheduler, with owned results, a numeric port, and optional IPv4/IPv6 filtering. Native and Tokio use bounded blocking execution; the [echo client](examples/echo/client.rs) resolves `localhost` before connecting.
+`AddressResolution` adds explicit hostname lookup through the scheduler, with numeric or named services, native resolver hints, typed resolver errors, and owned address/type/protocol candidates. Unspecified transports can include raw sockets and native socket values. Native and Tokio use bounded blocking execution; the [echo client](examples/echo/client.rs) resolves `localhost` before connecting.
 
 ## Cooperative cancellation
 

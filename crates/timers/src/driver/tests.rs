@@ -436,6 +436,29 @@ fn remote_cancellation_after_flush_wins_both_expiry_strategies() {
 }
 
 #[test]
+fn cancelled_last_timer_leaves_a_wakeup_for_empty_park() {
+    let (result_tx, result_rx) = mpsc::channel();
+    let owner = thread::spawn(move || {
+        let mut driver = TimerDriver::new();
+        let mut producer = driver.producer(1);
+        assert_eq!(driver.next_deadline(), None);
+        let timer = producer
+            .try_schedule(Instant::now() + Duration::from_secs(30), 1)
+            .unwrap();
+        assert!(timer.cancel());
+        assert_eq!(driver.next_deadline(), None);
+        // The owner is already bound, so submission left an unpark token. Draining the cancelled timer must preserve that token even though no deadline remains.
+        driver.park();
+        result_tx.send(driver.next_deadline()).unwrap();
+    });
+    assert_eq!(
+        result_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        None
+    );
+    owner.join().unwrap();
+}
+
+#[test]
 fn empty_parked_driver_wakes_on_first_submission() {
     let mut driver = TimerDriver::new();
     let mut producer = driver.producer(1);

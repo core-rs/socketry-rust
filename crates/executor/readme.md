@@ -300,6 +300,28 @@ cargo run -p socketry-executor --example socket_shutdown --features tokio
 
 External `Socket` implementations must provide `socket_shutdown`, `socket_shutdown_submit`, `socket_close`, and `socket_close_submit`.
 
+### Typed socket options
+
+Require `SocketOptions<O>` for each option your generic code needs. `SocketReuseAddress`, `SocketKeepalive`, and `TcpNoDelay` are typed identifiers with boolean values, implemented by native and Tokio schedulers/handles and the native selectors. This is an extension of `Socket`; existing implementations need not support every option.
+
+```rust,no_run
+use socketry_executor::{Cancellation, OperationResult, SocketOptions, TcpNoDelay};
+
+async fn configure<S: SocketOptions<TcpNoDelay>>(
+    scheduler: &S,
+    socket: &S::Socket,
+    cancellation: &Cancellation,
+) -> OperationResult<()> {
+    scheduler.socket_set_option(socket, TcpNoDelay, true, cancellation).await?;
+    assert!(scheduler.socket_get_option(socket, TcpNoDelay, cancellation).await?);
+    Ok(())
+}
+```
+
+Both operations are lazy and cancellable before execution. Await setters before dependent operations such as bind/connect. OS errors and option semantics remain visible; keepalive uses system timing defaults, and address reuse and accepted-socket inheritance vary by platform. The capability does not add socket locking or atomic get/set transactions.
+
+Run the [commented listener configuration example](examples/socket_options.rs) with `cargo run -p socketry-executor --example socket_options --features tokio`.
+
 ### Cancellation and shutdown
 
 Pre-cancelled file/socket operations do not start. Readiness waits stop on cancellation. io\_uring requests cancellation but waits for the original completion before returning the buffer; successful progress wins a racing cancellation. Blocking jobs check cancellation again on their pool worker, before execution; a running syscall returns its actual result.

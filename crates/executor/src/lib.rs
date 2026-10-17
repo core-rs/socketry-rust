@@ -27,11 +27,15 @@ pub mod scheduler;
 #[cfg(all(unix, feature = "signals", any(feature = "native", feature = "tokio")))]
 mod signal_registration;
 mod socket_domain;
+mod socket_keepalive;
+mod socket_option;
 mod socket_protocol;
+mod socket_reuse_address;
 mod socket_type;
 mod spawn;
 mod sync_mode;
 mod task;
+mod tcp_no_delay;
 mod worker;
 
 pub use allocation_mode::AllocationMode;
@@ -51,18 +55,22 @@ pub use notify::Notify;
 pub use operation_error::{OperationError, OperationResult};
 pub use scheduler::{
     BufferResult, Clock, File, FileAllocate, Interest, Scheduler, SchedulerHandle, Signals, Socket,
-    SocketRegistration,
+    SocketOptions, SocketRegistration,
 };
 #[cfg(all(unix, feature = "signals"))]
 pub use signal_hook::consts::signal;
 #[cfg(all(unix, feature = "signals", any(feature = "native", feature = "tokio")))]
 pub use signal_registration::SignalRegistration;
 pub use socket_domain::SocketDomain;
+pub use socket_keepalive::SocketKeepalive;
+pub use socket_option::SocketOption;
 pub use socket_protocol::SocketProtocol;
+pub use socket_reuse_address::SocketReuseAddress;
 pub use socket_type::SocketType;
 pub use spawn::{Spawn, SpawnError};
 pub use sync_mode::SyncMode;
 pub use task::{Task, TaskError, TaskHandle, yield_now};
+pub use tcp_no_delay::TcpNoDelay;
 
 #[cfg(feature = "native")]
 pub use scheduler::selector::readiness::SocketDescriptor;

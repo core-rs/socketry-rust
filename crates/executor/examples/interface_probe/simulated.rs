@@ -71,6 +71,15 @@ struct Incoming {
 
 pub struct SocketDescriptor {
     state: Mutex<SocketState>,
+    options: Mutex<SocketConfiguration>,
+}
+
+// This model retains configured values, but does not model packet timing, probes, address-sharing policies, or accepted-socket inheritance.
+#[derive(Default)]
+struct SocketConfiguration {
+    reuse_address: bool,
+    keepalive: bool,
+    no_delay: bool,
 }
 
 enum SocketState {
@@ -153,6 +162,75 @@ impl Scheduler {
             .values()
             .map(|bytes| Arc::strong_count(bytes) - 1)
             .sum()
+    }
+}
+
+impl socketry_executor::SocketOptions<socketry_executor::SocketReuseAddress> for Scheduler {
+    async fn socket_get_option(
+        &self,
+        socket: &Self::Socket,
+        _option: socketry_executor::SocketReuseAddress,
+        cancellation: &Cancellation,
+    ) -> OperationResult<bool> {
+        cancellation.check()?;
+        Ok(socket.options.lock().unwrap().reuse_address)
+    }
+    async fn socket_set_option(
+        &self,
+        socket: &Self::Socket,
+        _option: socketry_executor::SocketReuseAddress,
+        value: bool,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        socket.options.lock().unwrap().reuse_address = value;
+        Ok(())
+    }
+}
+
+impl socketry_executor::SocketOptions<socketry_executor::SocketKeepalive> for Scheduler {
+    async fn socket_get_option(
+        &self,
+        socket: &Self::Socket,
+        _option: socketry_executor::SocketKeepalive,
+        cancellation: &Cancellation,
+    ) -> OperationResult<bool> {
+        cancellation.check()?;
+        Ok(socket.options.lock().unwrap().keepalive)
+    }
+    async fn socket_set_option(
+        &self,
+        socket: &Self::Socket,
+        _option: socketry_executor::SocketKeepalive,
+        value: bool,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        socket.options.lock().unwrap().keepalive = value;
+        Ok(())
+    }
+}
+
+impl socketry_executor::SocketOptions<socketry_executor::TcpNoDelay> for Scheduler {
+    async fn socket_get_option(
+        &self,
+        socket: &Self::Socket,
+        _option: socketry_executor::TcpNoDelay,
+        cancellation: &Cancellation,
+    ) -> OperationResult<bool> {
+        cancellation.check()?;
+        Ok(socket.options.lock().unwrap().no_delay)
+    }
+    async fn socket_set_option(
+        &self,
+        socket: &Self::Socket,
+        _option: socketry_executor::TcpNoDelay,
+        value: bool,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        socket.options.lock().unwrap().no_delay = value;
+        Ok(())
     }
 }
 
@@ -394,6 +472,7 @@ impl Socket for Scheduler {
             SocketDomain::Ipv6 => SocketAddr::from(([0; 16], 0)),
         };
         Ok(SocketDescriptor {
+            options: Mutex::new(SocketConfiguration::default()),
             state: Mutex::new(SocketState::Open {
                 domain,
                 kind,
@@ -537,6 +616,7 @@ impl Socket for Scheduler {
         let input = Arc::new(Pipe::default());
         let output = Arc::new(Pipe::default());
         let server = SocketDescriptor {
+            options: Mutex::new(SocketConfiguration::default()),
             state: Mutex::new(SocketState::Connected(Connection {
                 local: address,
                 peer: local,

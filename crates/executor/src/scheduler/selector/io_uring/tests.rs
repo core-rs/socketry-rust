@@ -129,6 +129,7 @@ fn capability_validation_rejects_each_unsupported_requirement() {
         opcode::Recv::CODE,
         opcode::Send::CODE,
         opcode::AsyncCancel::CODE,
+        opcode::Fsync::CODE,
     ] {
         assert_eq!(
             validate_operation_support(|operation| operation != missing)
@@ -291,6 +292,14 @@ fn closed_selector_rejects_its_direct_network_operations() {
         assert_eq!(
             selector
                 .file_seek(&file, SeekFrom::Start(1), &NEVER)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(
+            selector
+                .file_sync(&file, SyncMode::All, &NEVER)
                 .await
                 .unwrap_err()
                 .kind(),
@@ -569,5 +578,170 @@ fn cancellation_before_submission_and_retry_returns_owned_buffers() {
             operation_result::<()>(Err(io::ErrorKind::Interrupted.into()), &cancellation),
             Err(crate::OperationError::Cancelled(_))
         ));
+    });
+}
+
+fn sync_request(identifier: u64) -> (SyncRequest, oneshot::Receiver<io::Result<()>>) {
+    let (reply, result) = oneshot::channel();
+    (
+        SyncRequest {
+            identifier,
+            file: Arc::new(tempfile::tempfile().unwrap()),
+            mode: SyncMode::All,
+            reply: Some(reply),
+            cancelling: false,
+        },
+        result,
+    )
+}
+
+#[test]
+fn queued_sync_releases_its_file_and_reports_selector_exit() {
+    let (request, mut result) = sync_request(0);
+    let retained = Arc::downgrade(&request.file);
+    drop(request);
+    assert_eq!(retained.strong_count(), 0);
+    assert_eq!(
+        result.try_recv().unwrap().unwrap().unwrap_err().kind(),
+        io::ErrorKind::BrokenPipe
+    );
+}
+
+#[test]
+fn failed_selector_retains_in_flight_sync_file_before_notifying_caller() {
+    let (request, mut result) = sync_request(0);
+    let retained = Arc::downgrade(&request.file);
+    let mut in_flight = InFlight::default();
+    in_flight.0.insert(0, Box::new(request));
+    drop(in_flight);
+    assert!(result.try_recv().is_err());
+    assert_eq!(retained.strong_count(), 1);
+}
+
+#[test]
+fn sync_rejects_disconnected_and_exhausted_selectors() {
+    async_io::block_on(async {
+        let (selector, _peer) = disconnected_selector();
+        let file = Arc::new(tempfile::tempfile().unwrap());
+        assert_eq!(
+            selector
+                .file_sync(&file, SyncMode::All, &NEVER)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        selector
+            .controller
+            .next_identifier
+            .store(CANCEL_TAG - 1, Ordering::Relaxed);
+        assert!(
+            selector
+                .file_sync(&file, SyncMode::Data, &NEVER)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("identifiers exhausted")
+        );
+    });
+}
+
+#[test]
+fn pending_and_in_flight_sync_cancellation_preserve_retirement() {
+    let (mut reactor, commands, _notification) = new_reactor();
+    let (pending, mut pending_result) = sync_request(1);
+    let pending_file = Arc::downgrade(&pending.file);
+    reactor.pending.push_back(Box::new(pending));
+    reactor.cancel(1);
+    assert_eq!(
+        pending_result
+            .try_recv()
+            .unwrap()
+            .unwrap()
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::Interrupted
+    );
+    assert_eq!(pending_file.strong_count(), 0);
+
+    let (mut request, mut result) = sync_request(2);
+    let retained = Arc::downgrade(&request.file);
+    let entry = request.entry();
+    reactor.in_flight.0.insert(2, Box::new(request));
+    // SAFETY: The in-flight map owns the file until the original completion is consumed.
+    unsafe {
+        reactor.ring.submission().push(&entry).unwrap();
+    }
+    reactor.ring.submit().unwrap();
+    reactor.cancel(2);
+    reactor.cancel(2);
+    assert_eq!(reactor.cancellations.len(), 1);
+    assert_eq!(retained.strong_count(), 1);
+    commands.send(Command::Shutdown).unwrap();
+    reactor.run().unwrap();
+    let outcome = result.try_recv().unwrap().unwrap();
+    assert!(
+        outcome.is_ok() || matches!(outcome.unwrap_err().raw_os_error(), Some(libc::ECANCELED))
+    );
+    assert_eq!(retained.strong_count(), 0);
+}
+
+#[test]
+fn sync_is_lazy_and_retains_the_file_until_original_completion() {
+    async_io::block_on(async {
+        for abandon in [false, true] {
+            for complete in [false, true] {
+                let (commands, incoming) = mpsc::channel();
+                let (notification, _peer) = UnixStream::pair().unwrap();
+                let selector = Selector {
+                    controller: Arc::new(Controller {
+                        commands,
+                        notification,
+                        next_identifier: AtomicU64::new(0),
+                        closed: AtomicBool::new(false),
+                        shutdown: Arc::new(Shutdown {
+                            finished: AtomicBool::new(false),
+                            event: CompletionEvent::new(),
+                        }),
+                    }),
+                };
+                let file = Arc::new(tempfile::tempfile().unwrap());
+                let cancellation = Cancellation::new();
+                drop(selector.file_sync(&file, SyncMode::All, &cancellation));
+                assert!(incoming.try_recv().is_err());
+                assert_eq!(Arc::strong_count(&file), 1);
+                let mut sync = Box::pin(selector.file_sync(&file, SyncMode::Data, &cancellation));
+                assert!(futures_lite::future::poll_once(&mut sync).await.is_none());
+                let Command::Submit(request) = incoming.try_recv().unwrap() else {
+                    panic!("expected sync submission")
+                };
+                let identifier = request.identifier();
+                cancellation.cancel();
+                assert!(futures_lite::future::poll_once(&mut sync).await.is_none());
+                assert!(
+                    matches!(incoming.try_recv().unwrap(), Command::Cancel(value) if value == identifier)
+                );
+                assert_eq!(Arc::strong_count(&file), 2);
+                let completion = if complete {
+                    Ok(0)
+                } else {
+                    Err(io::Error::from_raw_os_error(libc::ECANCELED))
+                };
+                if abandon {
+                    drop(sync);
+                    assert_eq!(Arc::strong_count(&file), 2);
+                    request.finish(completion);
+                } else {
+                    request.finish(completion);
+                    let result = sync.await;
+                    if complete {
+                        result.unwrap();
+                    } else {
+                        assert!(matches!(result, Err(crate::OperationError::Cancelled(_))));
+                    }
+                }
+                assert_eq!(Arc::strong_count(&file), 1);
+            }
+        }
     });
 }

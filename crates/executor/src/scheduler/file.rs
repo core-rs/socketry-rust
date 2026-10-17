@@ -1,10 +1,10 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use crate::{BufferResult, Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult};
+use crate::{BufferResult, Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SyncMode};
 use std::{future::Future, io::SeekFrom, path::Path};
 
-/// Regular-file creation, shared-cursor operations, and explicit-offset operations through the chosen scheduler. The backend retains resources used by accepted operations even when the waiting future is destroyed.
+/// Regular-file creation, synchronization, shared-cursor operations, and explicit-offset operations through the chosen scheduler. The backend retains resources used by accepted operations even when the waiting future is destroyed.
 ///
 /// `file_read` and `file_write` use and advance the resource's shared cursor by the transferred byte count. Await operations sequentially when ordering matters: concurrent operations have no portable ordering or non-overlap guarantee. Dropping a submitted future does not roll back transferred bytes or cursor changes.
 ///
@@ -18,6 +18,18 @@ pub trait File: Send + Sync {
         options: FileOptions,
         cancellation: &Cancellation,
     ) -> impl Future<Output = OperationResult<Self::File>> + Send;
+
+    /// Synchronize file contents and selected metadata, waiting for OS completion and reporting errors. This leaves the shared cursor unchanged. Await preceding writes first; this call does not order concurrent operations or flush application buffers.
+    ///
+    /// The future is lazy. Cancellation before dispatch prevents submission; blocking workers check again before execution. Once submitted, cancellation is best effort, and a successful completion wins a concurrent cancellation request. Dropping the future cannot undo synchronization; the backend retains the file until access ends.
+    ///
+    /// Durability follows the platform, filesystem, and device guarantees. `SyncMode::Data` may perform full synchronization. Synchronizing a file does not synchronize its parent directory entry.
+    fn file_sync(
+        &self,
+        file: &Self::File,
+        mode: SyncMode,
+        cancellation: &Cancellation,
+    ) -> impl Future<Output = OperationResult<()>> + Send;
 
     /// Reposition the shared cursor and return its resulting byte offset. `SeekFrom::Current(0)` queries the position; seeking past EOF does not extend the file. Absolute offsets must fit in `i64`; invalid positions and OS limits return errors.
     ///

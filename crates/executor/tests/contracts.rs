@@ -19,8 +19,12 @@ mod simulated;
 #[path = "../examples/interface_probe/tests/stateful_file.rs"]
 mod stateful_file;
 
+#[path = "../examples/interface_probe/tests/file_sync.rs"]
+mod file_sync;
+
 async fn resources<S: File + Socket>(scheduler: &S, root: &Path) {
     stateful_file::check(scheduler, root).await;
+    file_sync::check(scheduler, root).await;
     let never = Cancellation::never();
     let cancelled = Cancellation::new();
     cancelled.cancel();

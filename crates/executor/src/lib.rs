@@ -25,6 +25,7 @@ pub mod scheduler;
 #[cfg(all(unix, feature = "signals", any(feature = "native", feature = "tokio")))]
 mod signal_registration;
 mod spawn;
+mod sync_mode;
 mod task;
 mod worker;
 
@@ -50,4 +51,5 @@ pub use signal_hook::consts::signal;
 #[cfg(all(unix, feature = "signals", any(feature = "native", feature = "tokio")))]
 pub use signal_registration::SignalRegistration;
 pub use spawn::{Spawn, SpawnError};
+pub use sync_mode::SyncMode;
 pub use task::{Task, TaskError, TaskHandle, yield_now};

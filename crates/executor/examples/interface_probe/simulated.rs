@@ -5,7 +5,7 @@
 //! This is an interface probe, not a model of TCP scheduling or durability.
 use super::{Cancellation, File, FileOptions, OperationResult, Socket};
 use event_listener::Event;
-use socketry_executor::BufferResult;
+use socketry_executor::{BufferResult, SyncMode};
 use socketry_executor::{Interest, IoBuf, IoBufMut};
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, SeekFrom};
@@ -109,6 +109,16 @@ impl Scheduler {
 
 impl File for Scheduler {
     type File = FileHandle;
+
+    async fn file_sync(
+        &self,
+        _file: &Self::File,
+        _mode: SyncMode,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        Ok(())
+    }
 
     async fn file_seek(
         &self,

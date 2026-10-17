@@ -7,6 +7,7 @@
 //! It remains available while registered resources are alive; Socketry task
 //! shutdown does not shut down that shared reactor. Futures contain no private
 //! coroutine stacks and may be polled on different workers.
+use crate::SyncMode;
 use crate::scheduler::file_io::{read_at, write_at};
 use crate::scheduler::operation::cancellable;
 use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
@@ -167,6 +168,23 @@ impl SocketOperations for Selector {
 
 impl File for Selector {
     type File = Arc<StdFile>;
+    async fn file_sync(
+        &self,
+        file: &Self::File,
+        mode: SyncMode,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        let file = Arc::clone(file);
+        let cancellation = cancellation.clone();
+        blocking::unblock(move || {
+            crate::scheduler::blocking::run(&cancellation, || {
+                crate::scheduler::file_io::sync(&file, mode)
+            })
+        })
+        .await
+    }
+
     async fn file_seek(
         &self,
         file: &Self::File,

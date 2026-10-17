@@ -1,9 +1,16 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Blocking shared-cursor and positioned file operations shared by selector adapters.
+//! Blocking synchronization, shared-cursor, and positioned file operations shared by selector adapters.
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+
+pub(crate) fn sync(file: &File, mode: crate::SyncMode) -> io::Result<()> {
+    retry_interrupted(|| match mode {
+        crate::SyncMode::All => file.sync_all(),
+        crate::SyncMode::Data => file.sync_data(),
+    })
+}
 
 pub(crate) fn seek(mut file: &File, position: SeekFrom) -> io::Result<u64> {
     if matches!(position, SeekFrom::Start(offset) if offset > i64::MAX as u64) {

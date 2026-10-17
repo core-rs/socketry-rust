@@ -3,6 +3,7 @@
 
 //! Native selector operations exposed by Socketry schedulers and handles.
 use super::{Scheduler, SchedulerHandle};
+use crate::SyncMode;
 use crate::scheduler::selector::DefaultSelector;
 use crate::scheduler::{BufferResult, Clock, File, Interest, Socket};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
@@ -151,6 +152,15 @@ impl Socket for SchedulerHandle {
 }
 impl File for SchedulerHandle {
     type File = <DefaultSelector as File>::File;
+    async fn file_sync(
+        &self,
+        file: &Self::File,
+        mode: SyncMode,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.selector()?.file_sync(file, mode, cancellation).await
+    }
+
     async fn file_seek(
         &self,
         file: &Self::File,
@@ -308,6 +318,15 @@ impl Socket for Scheduler {
 }
 impl File for Scheduler {
     type File = <SchedulerHandle as File>::File;
+    async fn file_sync(
+        &self,
+        file: &Self::File,
+        mode: SyncMode,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.handle.file_sync(file, mode, cancellation).await
+    }
+
     async fn file_seek(
         &self,
         file: &Self::File,

@@ -4,6 +4,46 @@
 static NEVER: crate::Cancellation = crate::Cancellation::never();
 
 use super::*;
+
+#[test]
+fn shutdown_drains_accepted_close_jobs() {
+    use futures_lite::future::poll_once;
+    let runtime = runtime();
+    let scheduler = Scheduler::with_blocking(
+        runtime.handle().clone(),
+        BlockingOptions {
+            threads: 1,
+            capacity: 3,
+        },
+    )
+    .unwrap();
+    let handle = scheduler.handle();
+    let (started, start) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let timeout = std::time::Duration::from_secs(10);
+    drop(
+        runtime
+            .block_on(handle.shared.cleanup.submit(move || {
+                started.send(()).unwrap();
+                released.recv_timeout(timeout).unwrap();
+            }))
+            .unwrap(),
+    );
+    start.recv_timeout(timeout).unwrap();
+    runtime.block_on(async {
+        let mut closing = Box::pin(handle.file_close(tempfile::tempfile().unwrap().into()));
+        assert!(poll_once(&mut closing).await.is_none());
+        drop(closing);
+        scheduler
+            .file_close_submit(tempfile::tempfile().unwrap().into())
+            .await
+            .unwrap();
+        let mut shutdown = Box::pin(scheduler.shutdown());
+        assert!(poll_once(&mut shutdown).await.is_none());
+        release.send(()).unwrap();
+        shutdown.await;
+    });
+}
 use std::future::ready;
 use std::io::Read;
 use std::sync::mpsc;
@@ -34,6 +74,7 @@ fn expect_error<ResultType>(result: io::Result<ResultType>) -> io::Error {
 
 fn shared(runtime: &::tokio::runtime::Runtime) -> Arc<Shared> {
     Arc::new(Shared {
+        cleanup: BlockingPool::new(BlockingOptions::default()),
         blocking: BlockingPool::new(BlockingOptions::default()),
         runtime: runtime.handle().clone(),
         closed: AtomicBool::new(false),
@@ -629,7 +670,7 @@ fn cancelling_queued_blocking_work_preserves_buffers_cursor_and_prevents_creatio
         .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cancelled-open");
-    let file = Arc::new(tempfile::tempfile().unwrap());
+    let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
     let cancellation = Cancellation::new();
     runtime.block_on(async {
         let buffer = vec![42; 4];
@@ -690,6 +731,6 @@ fn cancelling_queued_blocking_work_preserves_buffers_cursor_and_prevents_creatio
         blocker.await.unwrap();
     });
     assert!(!path.exists());
-    assert_eq!(file.metadata().unwrap().len(), 0);
+    assert_eq!(file.as_ref().metadata().unwrap().len(), 0);
     runtime.block_on(scheduler.shutdown());
 }

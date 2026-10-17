@@ -3,6 +3,8 @@
 
 use crate::{BlockingError, BlockingOptions, BlockingTask, Cancellation, TaskError};
 use event_listener::Event;
+#[cfg(any(feature = "native", test))]
+use event_listener::Listener;
 use futures_channel::oneshot;
 use std::collections::VecDeque;
 use std::future::{Future, poll_fn};
@@ -14,7 +16,10 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::task::Poll;
 use std::thread;
 
-type Job = Box<dyn FnOnce() + Send + 'static>;
+struct Job {
+    run: Box<dyn FnOnce() + Send + 'static>,
+    submitted: bool,
+}
 
 // Field order also releases captures before notifying completion when shutdown discards a queued job.
 struct Operation<F, Output> {
@@ -37,6 +42,7 @@ impl<F: FnOnce() -> Output, Output> Operation<F, Output> {
 struct State {
     closed: bool,
     outstanding: usize,
+    submitted: usize,
     queue: VecDeque<Job>,
 }
 
@@ -49,19 +55,25 @@ struct Shared {
 /// A scheduler-owned service, independent of its future workers and I/O selector.
 pub(crate) struct BlockingPool {
     shared: Arc<Shared>,
-    options: BlockingOptions,
+    pub(crate) options: BlockingOptions,
     started: OnceLock<io::Result<()>>,
     #[cfg(test)]
-    fail_start_at: Option<usize>,
+    pub(crate) fail_start_at: Option<usize>,
 }
 
 impl BlockingPool {
+    #[cfg(all(test, feature = "native"))]
+    pub(crate) fn shared_listener_count(&self) -> usize {
+        self.shared.capacity.total_listeners()
+    }
+
     pub(crate) fn new(options: BlockingOptions) -> Self {
         Self {
             shared: Arc::new(Shared {
                 state: Mutex::new(State {
                     closed: false,
                     outstanding: 0,
+                    submitted: 0,
                     queue: VecDeque::new(),
                 }),
                 work: Condvar::new(),
@@ -116,6 +128,60 @@ impl BlockingPool {
         F: FnOnce() -> Output + Send + 'static,
         Output: Send + 'static,
     {
+        self.admit(cancellation, || {
+            let (sender, result) = oneshot::channel();
+            let abandoned = Arc::new(AtomicBool::new(false));
+            let owner = Arc::clone(&abandoned);
+            let cancellation = cancellation.clone();
+            let operation = Operation {
+                operation,
+                completion: sender,
+            };
+            (
+                Job {
+                    run: Box::new(move || {
+                        operation.run(owner.load(Ordering::Acquire) || cancellation.is_cancelled())
+                    }),
+                    submitted: false,
+                },
+                BlockingTask { result, abandoned },
+            )
+        })
+        .await
+    }
+
+    /// Admit work whose execution survives waiter abandonment and pool closure. Only scheduler-owned cleanup uses this path.
+    #[cfg(any(feature = "native", feature = "tokio", test))]
+    pub(crate) async fn submit<F, Output>(
+        &self,
+        operation: F,
+    ) -> Result<oneshot::Receiver<Result<Output, TaskError>>, BlockingError>
+    where
+        F: FnOnce() -> Output + Send + 'static,
+        Output: Send + 'static,
+    {
+        self.admit(&Cancellation::never(), || {
+            let (completion, result) = oneshot::channel();
+            let operation = Operation {
+                operation,
+                completion,
+            };
+            (
+                Job {
+                    run: Box::new(move || operation.run(false)),
+                    submitted: true,
+                },
+                result,
+            )
+        })
+        .await
+    }
+
+    async fn admit<Output>(
+        &self,
+        cancellation: &Cancellation,
+        make_job: impl FnOnce() -> (Job, Output),
+    ) -> Result<Output, BlockingError> {
         let mut cancelled = pin!(cancellation.cancelled());
         loop {
             let listener = self.shared.capacity.listen();
@@ -134,21 +200,13 @@ impl BlockingPool {
                         self.start()?;
                         continue;
                     }
-                    let (sender, result) = oneshot::channel();
-                    let abandoned = Arc::new(AtomicBool::new(false));
-                    let owner = Arc::clone(&abandoned);
-                    let cancellation = cancellation.clone();
-                    let operation = Operation {
-                        operation,
-                        completion: sender,
-                    };
+                    let (job, result) = make_job();
                     state.outstanding += 1;
-                    state.queue.push_back(Box::new(move || {
-                        operation.run(owner.load(Ordering::Acquire) || cancellation.is_cancelled());
-                    }));
+                    state.submitted += usize::from(job.submitted);
+                    state.queue.push_back(job);
                     drop(state);
                     self.shared.work.notify_one();
-                    return Ok(BlockingTask { result, abandoned });
+                    return Ok(result);
                 }
             }
             let mut listener = pin!(listener);
@@ -162,13 +220,43 @@ impl BlockingPool {
         }
     }
 
+    #[cfg(any(
+        feature = "tokio",
+        all(feature = "io-uring", target_os = "linux"),
+        test
+    ))]
+    pub(crate) async fn wait_submitted(&self) {
+        loop {
+            let listener = self.shared.capacity.listen();
+            if self.shared.state.lock().unwrap().submitted == 0 {
+                return;
+            }
+            listener.await;
+        }
+    }
+
+    #[cfg(any(feature = "native", test))]
+    pub(crate) fn wait_submitted_blocking(&self) {
+        loop {
+            let listener = self.shared.capacity.listen();
+            if self.shared.state.lock().unwrap().submitted == 0 {
+                return;
+            }
+            listener.wait();
+        }
+    }
+
     pub(crate) fn close(&self) {
         let queue = {
             let mut state = self.shared.state.lock().unwrap();
             state.closed = true;
-            let queue = std::mem::take(&mut state.queue);
-            state.outstanding -= queue.len();
-            queue
+            let (submitted, abandoned): (VecDeque<_>, VecDeque<_>) =
+                std::mem::take(&mut state.queue)
+                    .into_iter()
+                    .partition(|job| job.submitted);
+            state.queue = submitted;
+            state.outstanding -= abandoned.len();
+            abandoned
         };
         self.shared.capacity.notify(usize::MAX);
         self.shared.work.notify_all();
@@ -200,8 +288,12 @@ fn work(shared: Arc<Shared>) {
             }
         };
         // Catch abandoned-result and capture destructor panics as well as user execution panics, so capacity is always returned and the worker survives.
-        let _ = catch_unwind(AssertUnwindSafe(job));
-        shared.state.lock().unwrap().outstanding -= 1;
+        let _ = catch_unwind(AssertUnwindSafe(job.run));
+        {
+            let mut state = shared.state.lock().unwrap();
+            state.outstanding -= 1;
+            state.submitted -= usize::from(job.submitted);
+        }
         shared.capacity.notify(usize::MAX);
     }
 }

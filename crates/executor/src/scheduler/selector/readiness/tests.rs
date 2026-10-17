@@ -70,9 +70,9 @@ fn readiness_operations_remain_available_with_other_backends_selected() {
             received.extend_from_slice(&buffer[..count]);
         }
         assert_eq!(received, b"hello");
-        let file = Arc::new(tempfile::tempfile().unwrap());
+        let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
         let (result, buffer) = selector
-            .file_write_at(&Arc::clone(&file), b"file".to_vec(), 3, &NEVER)
+            .file_write_at(&file, b"file".to_vec(), 3, &NEVER)
             .await;
         assert_eq!(result.unwrap(), 4);
         assert_eq!(buffer, b"file");
@@ -97,7 +97,7 @@ fn direct_readiness_cancellation_returns_buffers_before_submitting_work() {
                 .await,
             Err(crate::OperationError::Cancelled(_))
         ));
-        let file = Arc::new(tempfile::tempfile().unwrap());
+        let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
         let buffer = vec![1; 4];
         let allocation = buffer.as_ptr();
         let (result, buffer) = selector

@@ -16,7 +16,7 @@
 //! Allocation and truncation use native requests when their opcodes are available, otherwise the blocking file fallback preserves the same public contract.
 use super::readiness::{self, Listener, Socket};
 use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
-use crate::{AllocationMode, FileAllocate, SyncMode};
+use crate::{AllocationMode, FileAllocate, FileHandle, SyncMode};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
 use event_listener::{Event as CompletionEvent, Listener as _};
 use futures_channel::oneshot;
@@ -129,7 +129,7 @@ enum Resource {
 
 struct Request<B: IoBuf = Vec<u8>> {
     identifier: u64,
-    resource: Resource,
+    resource: Option<Resource>,
     buffer: Option<B>,
     pointer: fn(&mut B) -> *mut u8,
     write: bool,
@@ -142,7 +142,11 @@ impl<B: IoBuf> Request<B> {
         let buffer = self.buffer.as_mut().expect("request retains its buffer");
         let length = buffer.as_ref().len().min(i32::MAX as usize) as u32;
         let pointer = (self.pointer)(buffer);
-        let entry = match &self.resource {
+        let entry = match self
+            .resource
+            .as_ref()
+            .expect("request retains its resource")
+        {
             Resource::Socket(socket) => {
                 let descriptor = types::Fd(socket.0.get_ref().as_raw_fd());
                 if self.write {
@@ -174,15 +178,16 @@ impl<B: IoBuf> Request<B> {
             .reply
             .take()
             .expect("unfinished requests retain their completion sender");
-        let _ = reply.send((
-            result,
-            self.buffer.take().expect("request returns its buffer once"),
-        ));
+        let buffer = self.buffer.take().expect("request returns its buffer once");
+        // Release the retained descriptor before waking a caller that may immediately close it.
+        drop(self);
+        let _ = reply.send((result, buffer));
     }
 }
 
 impl<B: IoBuf> Drop for Request<B> {
     fn drop(&mut self) {
+        drop(self.resource.take());
         // A submission can race Shutdown and remain in the incoming queue as
         // the selector exits. Such requests have never reached the kernel and
         // can return their buffers normally. InFlight deliberately suppresses
@@ -246,7 +251,7 @@ enum FileOperation {
 // Buffer-free file operations retain the file until the original completion exactly like transfer requests.
 struct FileRequest {
     identifier: u64,
-    file: Arc<StdFile>,
+    file: Option<Arc<StdFile>>,
     operation: FileOperation,
     reply: Option<oneshot::Sender<io::Result<()>>>,
     cancelling: bool,
@@ -258,7 +263,12 @@ impl PendingRequest for FileRequest {
     }
 
     fn entry(&mut self) -> squeue::Entry {
-        let descriptor = types::Fd(self.file.as_raw_fd());
+        let descriptor = types::Fd(
+            self.file
+                .as_ref()
+                .expect("request retains its file")
+                .as_raw_fd(),
+        );
         let entry = match self.operation {
             FileOperation::Sync(mode) => {
                 let flags = match mode {
@@ -285,6 +295,8 @@ impl PendingRequest for FileRequest {
             .reply
             .take()
             .expect("unfinished requests retain their completion sender");
+        // Completion must also establish exclusive application ownership before notifying the waiter.
+        drop(self);
         let _ = reply.send(result.map(|_| ()));
     }
 
@@ -305,6 +317,7 @@ impl PendingRequest for FileRequest {
 
 impl Drop for FileRequest {
     fn drop(&mut self) {
+        drop(self.file.take());
         // Queued requests can be destroyed before submission. InFlight retains requests whose kernel completion is unknown.
         if let Some(reply) = self.reply.take() {
             let _ = reply.send(Err(io::Error::new(
@@ -353,6 +366,7 @@ impl Drop for SignalCompletion {
 }
 
 struct Controller {
+    cleanup: crate::blocking_pool::BlockingPool,
     commands: mpsc::Sender<Command>,
     notification: UnixStream,
     next_identifier: AtomicU64,
@@ -374,6 +388,7 @@ impl Controller {
 
     fn close(&self) {
         if !self.closed.swap(true, Ordering::AcqRel) {
+            self.cleanup.close();
             let _ = self.commands.send(Command::Shutdown);
             self.notify();
         }
@@ -453,6 +468,7 @@ impl Selector {
             supports_file_truncate: probe.is_supported(opcode::Ftruncate::CODE),
             supports_file_allocate: probe.is_supported(opcode::Fallocate::CODE),
             controller: Arc::new(Controller {
+                cleanup: crate::blocking_pool::BlockingPool::new(crate::BlockingOptions::default()),
                 commands,
                 notification,
                 next_identifier: AtomicU64::new(0),
@@ -468,6 +484,7 @@ impl Selector {
 
     pub(crate) fn wait_closed(&self) {
         self.close();
+        self.controller.cleanup.wait_submitted_blocking();
         loop {
             let listener = self.controller.shutdown.event.listen();
             if self.controller.shutdown.finished.load(Ordering::Acquire) {
@@ -482,6 +499,7 @@ impl Selector {
     /// cancelled may delay shutdown.
     pub async fn shutdown(&self) {
         self.close();
+        self.controller.cleanup.wait_submitted().await;
         loop {
             let listener = self.controller.shutdown.event.listen();
             if self.controller.shutdown.finished.load(Ordering::Acquire) {
@@ -546,7 +564,7 @@ impl Selector {
         let (reply, result) = oneshot::channel();
         let request = Request {
             identifier,
-            resource,
+            resource: Some(resource),
             buffer: Some(buffer),
             pointer,
             write,
@@ -558,7 +576,7 @@ impl Selector {
 
     async fn file_operation(
         &self,
-        file: &Arc<StdFile>,
+        file: &FileHandle,
         operation: FileOperation,
         cancellation: &Cancellation,
     ) -> OperationResult<()> {
@@ -568,7 +586,7 @@ impl Selector {
         let (reply, result) = oneshot::channel();
         let request = FileRequest {
             identifier,
-            file: Arc::clone(file),
+            file: Some(file.retain()),
             operation,
             reply: Some(reply),
             cancelling: false,
@@ -793,7 +811,17 @@ impl FileAllocate for Selector {
 }
 
 impl File for Selector {
-    type File = Arc<StdFile>;
+    type File = FileHandle;
+    async fn file_close(&self, file: Self::File) -> io::Result<()> {
+        self.check_open()?;
+        crate::scheduler::file_close::close(&self.controller.cleanup, file).await
+    }
+
+    async fn file_close_submit(&self, file: Self::File) -> io::Result<()> {
+        self.check_open()?;
+        crate::scheduler::file_close::submit_only(&self.controller.cleanup, file).await
+    }
+
     async fn file_truncate(
         &self,
         file: &Self::File,
@@ -855,7 +883,7 @@ impl File for Selector {
     ) -> BufferResult<B> {
         let (result, buffer) = self
             .operation(
-                Resource::File(Arc::clone(file), None),
+                Resource::File(file.retain(), None),
                 buffer,
                 false,
                 |buffer| buffer.as_mut().as_mut_ptr(),
@@ -872,7 +900,7 @@ impl File for Selector {
     ) -> BufferResult<B> {
         let (result, buffer) = self
             .operation(
-                Resource::File(Arc::clone(file), None),
+                Resource::File(file.retain(), None),
                 buffer,
                 true,
                 |buffer| buffer.as_ref().as_ptr().cast_mut(),
@@ -890,7 +918,7 @@ impl File for Selector {
     ) -> BufferResult<B> {
         let (result, buffer) = self
             .operation(
-                Resource::File(Arc::clone(file), Some(offset)),
+                Resource::File(file.retain(), Some(offset)),
                 buffer,
                 false,
                 |buffer| buffer.as_mut().as_mut_ptr(),
@@ -908,7 +936,7 @@ impl File for Selector {
     ) -> BufferResult<B> {
         let (result, buffer) = self
             .operation(
-                Resource::File(Arc::clone(file), Some(offset)),
+                Resource::File(file.retain(), Some(offset)),
                 buffer,
                 true,
                 |buffer| buffer.as_ref().as_ptr().cast_mut(),

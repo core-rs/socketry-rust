@@ -140,6 +140,15 @@ impl FileAllocate for Scheduler {
 impl File for Scheduler {
     type File = FileHandle;
 
+    async fn file_close(&self, file: Self::File) -> io::Result<()> {
+        drop(file);
+        Ok(())
+    }
+
+    async fn file_close_submit(&self, file: Self::File) -> io::Result<()> {
+        self.file_close(file).await
+    }
+
     async fn file_truncate(
         &self,
         file: &FileHandle,

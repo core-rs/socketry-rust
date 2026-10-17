@@ -7,15 +7,14 @@
 //! It remains available while registered resources are alive; Socketry task
 //! shutdown does not shut down that shared reactor. Futures contain no private
 //! coroutine stacks and may be polled on different workers.
-use crate::SyncMode;
 use crate::scheduler::file_io::{read_at, write_at};
 use crate::scheduler::operation::cancellable;
 use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
 #[cfg(target_os = "linux")]
 use crate::{AllocationMode, FileAllocate};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
+use crate::{FileHandle, SyncMode};
 use async_io::Async;
-use std::fs::File as StdFile;
 use std::io::{self, Read, SeekFrom, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
@@ -179,7 +178,7 @@ impl FileAllocate for Selector {
         cancellation: &Cancellation,
     ) -> OperationResult<()> {
         cancellation.check()?;
-        let file = Arc::clone(file);
+        let file = file.retain();
         let cancellation = cancellation.clone();
         blocking::unblock(move || {
             crate::scheduler::blocking::run(&cancellation, || {
@@ -191,7 +190,20 @@ impl FileAllocate for Selector {
 }
 
 impl File for Selector {
-    type File = Arc<StdFile>;
+    type File = FileHandle;
+    async fn file_close(&self, file: Self::File) -> io::Result<()> {
+        crate::scheduler::file_close::close(crate::scheduler::file_close::standalone_pool(), file)
+            .await
+    }
+
+    async fn file_close_submit(&self, file: Self::File) -> io::Result<()> {
+        crate::scheduler::file_close::submit_only(
+            crate::scheduler::file_close::standalone_pool(),
+            file,
+        )
+        .await
+    }
+
     async fn file_truncate(
         &self,
         file: &Self::File,
@@ -199,7 +211,7 @@ impl File for Selector {
         cancellation: &Cancellation,
     ) -> OperationResult<()> {
         cancellation.check()?;
-        let file = Arc::clone(file);
+        let file = file.retain();
         let cancellation = cancellation.clone();
         blocking::unblock(move || {
             crate::scheduler::blocking::run(&cancellation, || {
@@ -216,7 +228,7 @@ impl File for Selector {
         cancellation: &Cancellation,
     ) -> OperationResult<()> {
         cancellation.check()?;
-        let file = Arc::clone(file);
+        let file = file.retain();
         let cancellation = cancellation.clone();
         blocking::unblock(move || {
             crate::scheduler::blocking::run(&cancellation, || {
@@ -233,7 +245,7 @@ impl File for Selector {
         cancellation: &Cancellation,
     ) -> OperationResult<u64> {
         cancellation.check()?;
-        let file = Arc::clone(file);
+        let file = file.retain();
         let cancellation = cancellation.clone();
         blocking::unblock(move || {
             crate::scheduler::blocking::run(&cancellation, || {
@@ -253,7 +265,9 @@ impl File for Selector {
         let path = path.to_owned();
         let cancellation = cancellation.clone();
         blocking::unblock(move || {
-            crate::scheduler::blocking::run(&cancellation, || options.open(&path).map(Arc::new))
+            crate::scheduler::blocking::run(&cancellation, || {
+                options.open(&path).map(FileHandle::from)
+            })
         })
         .await
     }
@@ -263,7 +277,7 @@ impl File for Selector {
         buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        let file = Arc::clone(file);
+        let file = file.retain();
         file_operation(buffer, cancellation, move |buffer| {
             crate::scheduler::file_io::read(&file, buffer.as_mut())
         })
@@ -275,7 +289,7 @@ impl File for Selector {
         buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        let file = Arc::clone(file);
+        let file = file.retain();
         file_operation(buffer, cancellation, move |buffer| {
             crate::scheduler::file_io::write(&file, buffer.as_ref())
         })
@@ -288,7 +302,7 @@ impl File for Selector {
         offset: u64,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        let file = Arc::clone(file);
+        let file = file.retain();
         file_operation(buffer, cancellation, move |buffer| {
             read_at(&file, buffer.as_mut(), offset)
         })
@@ -301,7 +315,7 @@ impl File for Selector {
         offset: u64,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        let file = Arc::clone(file);
+        let file = file.retain();
         file_operation(buffer, cancellation, move |buffer| {
             write_at(&file, buffer.as_ref(), offset)
         })

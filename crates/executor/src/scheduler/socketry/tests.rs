@@ -11,6 +11,53 @@ fn ready_task(value: usize) -> ReadyTask {
     std::future::ready(value)
 }
 
+#[cfg(feature = "native")]
+#[test]
+fn shutdown_drains_accepted_closes_after_their_waiters_are_dropped() {
+    use crate::{BlockingOptions, File};
+    use futures_lite::future::{block_on, poll_once};
+    use std::{sync::mpsc, time::Duration};
+    let timeout = Duration::from_secs(10);
+    let scheduler = Scheduler::with_workers_and_blocking(
+        1,
+        BlockingOptions {
+            threads: 1,
+            capacity: 3,
+        },
+    )
+    .unwrap();
+    let handle = scheduler.handle();
+    let (started, start) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    drop(
+        block_on(handle.shared.cleanup.submit(move || {
+            started.send(()).unwrap();
+            released.recv_timeout(timeout).unwrap();
+        }))
+        .unwrap(),
+    );
+    start.recv_timeout(timeout).unwrap();
+
+    let mut closing = Box::pin(handle.file_close(tempfile::tempfile().unwrap().into()));
+    assert!(block_on(poll_once(&mut closing)).is_none());
+    drop(closing);
+    block_on(handle.file_close_submit(tempfile::tempfile().unwrap().into())).unwrap();
+    let (finished, finish) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        scheduler.shutdown();
+        finished.send(()).unwrap();
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    while handle.shared.cleanup.shared_listener_count() == 0 {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    assert!(finish.try_recv().is_err());
+    release.send(()).unwrap();
+    finish.recv_timeout(timeout).unwrap();
+    thread.join().unwrap();
+}
+
 #[test]
 fn default_constructor_and_worker_count_report_available_workers() {
     let scheduler = Scheduler::new().unwrap();

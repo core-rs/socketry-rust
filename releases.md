@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add required `File::file_close` and `file_close_submit`, owned non-`Clone` native/Tokio `FileHandle` resources, bounded cleanup admission, and graceful cleanup draining. Finish outstanding operations before explicit close; abandoned backend use causes a panic rather than implicit cancellation or joining. Add a commented cancellation/close example and release io_uring file references before completion wakeups. External `File` implementations must add both methods; concrete callers using `Arc<std::fs::File>` must migrate to `FileHandle`.
+
 - Add optional `FileAllocate` with `AllocationMode::Extend`/`KeepSize`, cancellation, and cursor preservation. Linux native and Tokio backends reserve space with `fallocate`; io\_uring uses native requests when supported. Other targets omit the capability, and filesystem errors remain observable.
 
 - Add required `File::file_truncate` to resize writable files with cancellation, zero-filled extension, and cursor preservation. Use native io\_uring truncation when supported, otherwise blocking file pools. External `File` implementations must provide this method.

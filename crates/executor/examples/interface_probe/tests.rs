@@ -24,6 +24,9 @@ mod file_truncate;
 #[path = "tests/file_allocate.rs"]
 mod file_allocate;
 
+#[path = "tests/file_close.rs"]
+mod file_close;
+
 #[test]
 fn stateful_operations_forward_and_preserve_short_transfers() {
     let scheduler = FailingFiles {
@@ -34,6 +37,7 @@ fn stateful_operations_forward_and_preserve_short_transfers() {
     block_on(stateful_file::check(&scheduler, Path::new("stateful")));
     block_on(file_sync::check(&scheduler, Path::new("sync")));
     block_on(file_truncate::check(&scheduler, Path::new("truncate")));
+    block_on(file_close::check(&scheduler, Path::new("close")));
     assert_eq!(scheduler.scheduler.open_files(), 0);
 }
 
@@ -61,6 +65,12 @@ struct FailingFiles {
 
 impl File for FailingFiles {
     type File = <simulated::Scheduler as File>::File;
+    async fn file_close(&self, file: Self::File) -> io::Result<()> {
+        self.scheduler.file_close(file).await
+    }
+    async fn file_close_submit(&self, file: Self::File) -> io::Result<()> {
+        self.scheduler.file_close_submit(file).await
+    }
 
     async fn file_truncate(
         &self,

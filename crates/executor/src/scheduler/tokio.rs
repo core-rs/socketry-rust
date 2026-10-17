@@ -12,7 +12,6 @@ mod signals;
 
 use super::operation::cancellable;
 use super::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
-use crate::SyncMode;
 use crate::blocking_pool::BlockingPool;
 #[cfg(target_os = "linux")]
 use crate::{AllocationMode, FileAllocate};
@@ -20,13 +19,13 @@ use crate::{
     Blocking, BlockingError, BlockingOptions, BlockingTask, Cancellation, FileOptions, IoBuf,
     IoBufMut, OperationResult, SocketRegistration, Spawn, SpawnError, TaskError,
 };
+use crate::{FileHandle, SyncMode};
 use ::tokio::runtime::Handle;
 use ::tokio::task::{AbortHandle, JoinHandle};
 use event_listener::Event;
 use pin_project_lite::pin_project;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fs::File as StdFile;
 use std::future::Future;
 use std::io::{self, SeekFrom};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -65,6 +64,7 @@ struct Registry {
 
 struct Shared {
     blocking: BlockingPool,
+    cleanup: BlockingPool,
     runtime: Handle,
     closed: AtomicBool,
     registry: Mutex<Registry>,
@@ -159,6 +159,7 @@ impl Shared {
             .collect();
         drop(registry);
         self.blocking.close();
+        self.cleanup.close();
         for abort in aborts {
             abort.abort();
         }
@@ -429,7 +430,7 @@ impl Scheduler {
         Self::with_pool(runtime, BlockingPool::new(BlockingOptions::default()))
     }
 
-    /// Configure a dedicated blocking pool, independent of Tokio's global blocking pool.
+    /// Configure dedicated blocking and cleanup pools, independent of Tokio's global blocking pool. Each pool has these limits.
     pub fn with_blocking(runtime: Handle, options: BlockingOptions) -> io::Result<Self> {
         Ok(Self::with_pool(
             runtime,
@@ -438,10 +439,12 @@ impl Scheduler {
     }
 
     fn with_pool(runtime: Handle, blocking: BlockingPool) -> Self {
+        let cleanup = BlockingPool::new(blocking.options);
         Self {
             handle: SchedulerHandle {
                 shared: Arc::new(Shared {
                     blocking,
+                    cleanup,
                     runtime,
                     closed: AtomicBool::new(false),
                     registry: Mutex::new(Registry {
@@ -473,11 +476,12 @@ impl Scheduler {
 
     /// Close admission, cancel all owned future tasks, and wait for their futures to be destroyed.
     ///
-    /// Queued blocking jobs are discarded. Started blocking jobs finish independently; await their handles first for graceful shutdown.
+    /// Queued `spawn_blocking` jobs are discarded. Started blocking jobs finish independently; await their handles first for graceful shutdown. Accepted file-close jobs survive destruction and are drained by this method.
     pub async fn shutdown(self) {
         assert_outside_scheduler(&self.handle.shared);
         self.handle.shared.close();
         self.handle.shared.wait().await;
+        self.handle.shared.cleanup.wait_submitted().await;
     }
 }
 
@@ -734,7 +738,7 @@ impl FileAllocate for SchedulerHandle {
     ) -> OperationResult<()> {
         cancellation.check()?;
         self.shared.check_open()?;
-        let file = Arc::clone(file);
+        let file = file.retain();
         let cancellation = cancellation.clone();
         file_operation_result(
             self.shared
@@ -750,7 +754,17 @@ impl FileAllocate for SchedulerHandle {
 }
 
 impl File for SchedulerHandle {
-    type File = Arc<StdFile>;
+    type File = FileHandle;
+    async fn file_close(&self, file: Self::File) -> io::Result<()> {
+        self.shared.check_open()?;
+        super::file_close::close(&self.shared.cleanup, file).await
+    }
+
+    async fn file_close_submit(&self, file: Self::File) -> io::Result<()> {
+        self.shared.check_open()?;
+        super::file_close::submit_only(&self.shared.cleanup, file).await
+    }
+
     async fn file_truncate(
         &self,
         file: &Self::File,
@@ -759,7 +773,7 @@ impl File for SchedulerHandle {
     ) -> OperationResult<()> {
         cancellation.check()?;
         self.shared.check_open()?;
-        let file = Arc::clone(file);
+        let file = file.retain();
         let cancellation = cancellation.clone();
         file_operation_result(
             self.shared
@@ -779,7 +793,7 @@ impl File for SchedulerHandle {
     ) -> OperationResult<()> {
         cancellation.check()?;
         self.shared.check_open()?;
-        let file = Arc::clone(file);
+        let file = file.retain();
         let cancellation = cancellation.clone();
         file_operation_result(
             self.shared
@@ -799,7 +813,7 @@ impl File for SchedulerHandle {
     ) -> OperationResult<u64> {
         cancellation.check()?;
         self.shared.check_open()?;
-        let file = Arc::clone(file);
+        let file = file.retain();
         let cancellation = cancellation.clone();
         file_operation_result(
             self.shared
@@ -825,7 +839,9 @@ impl File for SchedulerHandle {
             self.shared
                 .runtime
                 .spawn_blocking(move || {
-                    super::blocking::run(&cancellation, || options.open(&path).map(Arc::new))
+                    super::blocking::run(&cancellation, || {
+                        options.open(&path).map(FileHandle::from)
+                    })
                 })
                 .await,
         )
@@ -836,7 +852,7 @@ impl File for SchedulerHandle {
         buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        let file = Arc::clone(file);
+        let file = file.retain();
         self.file_operation(buffer, cancellation, move |buffer| {
             crate::scheduler::file_io::read(&file, buffer.as_mut())
         })
@@ -848,7 +864,7 @@ impl File for SchedulerHandle {
         buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        let file = Arc::clone(file);
+        let file = file.retain();
         self.file_operation(buffer, cancellation, move |buffer| {
             crate::scheduler::file_io::write(&file, buffer.as_ref())
         })
@@ -861,7 +877,7 @@ impl File for SchedulerHandle {
         offset: u64,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        let file = Arc::clone(file);
+        let file = file.retain();
         self.file_operation(buffer, cancellation, move |buffer| {
             super::file_io::read_at(&file, buffer.as_mut(), offset)
         })
@@ -874,7 +890,7 @@ impl File for SchedulerHandle {
         offset: u64,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        let file = Arc::clone(file);
+        let file = file.retain();
         self.file_operation(buffer, cancellation, move |buffer| {
             super::file_io::write_at(&file, buffer.as_ref(), offset)
         })
@@ -1061,6 +1077,14 @@ impl FileAllocate for Scheduler {
 
 impl File for Scheduler {
     type File = <SchedulerHandle as File>::File;
+    async fn file_close(&self, file: Self::File) -> io::Result<()> {
+        self.handle.file_close(file).await
+    }
+
+    async fn file_close_submit(&self, file: Self::File) -> io::Result<()> {
+        self.handle.file_close_submit(file).await
+    }
+
     async fn file_truncate(
         &self,
         file: &Self::File,

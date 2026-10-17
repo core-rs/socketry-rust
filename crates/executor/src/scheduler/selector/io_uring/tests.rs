@@ -14,7 +14,7 @@ fn queued_request_returns_its_buffer_if_the_selector_exits() {
         identifier: 0,
         resource: Resource::File(
             Arc::new(StdFile::open(std::env::current_exe().unwrap()).unwrap()),
-            0,
+            Some(0),
         ),
         buffer: Some(buffer),
         pointer: |buffer| buffer.as_mut_ptr(),
@@ -73,7 +73,7 @@ fn request(identifier: u64) -> (Request, oneshot::Receiver<RawBufferResult>) {
     (
         Request {
             identifier,
-            resource: Resource::File(Arc::new(tempfile::tempfile().unwrap()), 0),
+            resource: Resource::File(Arc::new(tempfile::tempfile().unwrap()), Some(0)),
             buffer: Some(vec![1]),
             pointer: |buffer| buffer.as_mut_ptr(),
             write: false,

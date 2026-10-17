@@ -22,7 +22,7 @@ fn read_and_write_reject_offsets_outside_the_platform_range() {
 }
 
 #[test]
-fn positioned_file_operations_read_and_write_at_the_requested_offset() {
+fn file_io_operations_read_and_write_at_the_requested_offset() {
     static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
         "socketry-file-{}-{}",

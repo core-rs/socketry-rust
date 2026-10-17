@@ -12,6 +12,20 @@ use std::sync::{
 };
 use std::task::{Context, Wake, Waker};
 
+#[path = "tests/stateful_file.rs"]
+mod stateful_file;
+
+#[test]
+fn stateful_operations_forward_and_preserve_short_transfers() {
+    let scheduler = FailingFiles {
+        scheduler: simulated::Scheduler::new(2, 1),
+        failure: Failure::None,
+    };
+    // Exercise forwarding through the wrapper with failure injection disabled.
+    block_on(stateful_file::check(&scheduler, Path::new("stateful")));
+    assert_eq!(scheduler.scheduler.open_files(), 0);
+}
+
 #[derive(Default)]
 struct WakeCount(AtomicUsize);
 
@@ -22,6 +36,7 @@ impl Wake for WakeCount {
 }
 
 enum Failure {
+    None,
     Create,
     Read,
     Write,
@@ -46,6 +61,24 @@ impl File for FailingFiles {
             return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
         }
         self.scheduler.file_open(path, mode, cancellation).await
+    }
+
+    async fn file_read<B: IoBufMut>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> socketry_executor::BufferResult<B> {
+        self.scheduler.file_read(file, buffer, cancellation).await
+    }
+
+    async fn file_write<B: IoBuf>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> socketry_executor::BufferResult<B> {
+        self.scheduler.file_write(file, buffer, cancellation).await
     }
 
     async fn file_read_at<B: IoBufMut>(

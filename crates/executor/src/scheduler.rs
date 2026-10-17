@@ -7,7 +7,7 @@ pub mod selector;
 pub mod socketry;
 
 #[cfg(any(feature = "native", feature = "tokio"))]
-mod positioned_file;
+mod file_io;
 
 #[cfg(feature = "tokio")]
 pub mod tokio;

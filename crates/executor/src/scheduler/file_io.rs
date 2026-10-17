@@ -1,9 +1,17 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Blocking positioned file operations shared by selector adapters.
+//! Blocking shared-cursor and positioned file operations shared by selector adapters.
 use std::fs::File;
-use std::io;
+use std::io::{self, Read, Write};
+
+pub(crate) fn read(mut file: &File, buffer: &mut [u8]) -> io::Result<usize> {
+    retry_interrupted(|| file.read(buffer))
+}
+
+pub(crate) fn write(mut file: &File, buffer: &[u8]) -> io::Result<usize> {
+    retry_interrupted(|| file.write(buffer))
+}
 
 pub(crate) fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
     if offset > i64::MAX as u64 {

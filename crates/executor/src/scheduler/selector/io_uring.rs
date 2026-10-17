@@ -121,7 +121,8 @@ where
 
 enum Resource {
     Socket(Socket),
-    File(Arc<StdFile>, u64),
+    // None uses the shared OS cursor; Some is a validated explicit offset.
+    File(Arc<StdFile>, Option<u64>),
 }
 
 struct Request<B: IoBuf = Vec<u8>> {
@@ -154,11 +155,11 @@ impl<B: IoBuf> Request<B> {
                 let descriptor = types::Fd(file.as_raw_fd());
                 if self.write {
                     opcode::Write::new(descriptor, pointer, length)
-                        .offset(*offset)
+                        .offset(offset.unwrap_or(u64::MAX))
                         .build()
                 } else {
                     opcode::Read::new(descriptor, pointer, length)
-                        .offset(*offset)
+                        .offset(offset.unwrap_or(u64::MAX))
                         .build()
                 }
             }
@@ -437,10 +438,7 @@ impl Selector {
         if let Err(error) = self.check_open() {
             return (Err(error), buffer);
         }
-        if buffer.as_ref().is_empty() {
-            return (Ok(0), buffer);
-        }
-        if matches!(&resource, Resource::File(_, offset) if *offset > i64::MAX as u64) {
+        if matches!(&resource, Resource::File(_, Some(offset)) if *offset > i64::MAX as u64) {
             return (
                 Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -448,6 +446,9 @@ impl Selector {
                 )),
                 buffer,
             );
+        }
+        if buffer.as_ref().is_empty() {
+            return (Ok(0), buffer);
         }
         let identifier = match self.controller.next_identifier.try_update(
             Ordering::Relaxed,
@@ -655,6 +656,40 @@ impl File for Selector {
             .file_open(path, options, cancellation)
             .await
     }
+    async fn file_read<B: IoBufMut>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let (result, buffer) = self
+            .operation(
+                Resource::File(Arc::clone(file), None),
+                buffer,
+                false,
+                |buffer| buffer.as_mut().as_mut_ptr(),
+                cancellation,
+            )
+            .await;
+        (operation_result(result, cancellation), buffer)
+    }
+    async fn file_write<B: IoBuf>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let (result, buffer) = self
+            .operation(
+                Resource::File(Arc::clone(file), None),
+                buffer,
+                true,
+                |buffer| buffer.as_ref().as_ptr().cast_mut(),
+                cancellation,
+            )
+            .await;
+        (operation_result(result, cancellation), buffer)
+    }
     async fn file_read_at<B: IoBufMut>(
         &self,
         file: &Self::File,
@@ -664,7 +699,7 @@ impl File for Selector {
     ) -> BufferResult<B> {
         let (result, buffer) = self
             .operation(
-                Resource::File(Arc::clone(file), offset),
+                Resource::File(Arc::clone(file), Some(offset)),
                 buffer,
                 false,
                 |buffer| buffer.as_mut().as_mut_ptr(),
@@ -682,7 +717,7 @@ impl File for Selector {
     ) -> BufferResult<B> {
         let (result, buffer) = self
             .operation(
-                Resource::File(Arc::clone(file), offset),
+                Resource::File(Arc::clone(file), Some(offset)),
                 buffer,
                 true,
                 |buffer| buffer.as_ref().as_ptr().cast_mut(),

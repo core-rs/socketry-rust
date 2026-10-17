@@ -740,6 +740,30 @@ impl File for SchedulerHandle {
                 .await,
         )
     }
+    async fn file_read<B: IoBufMut>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let file = Arc::clone(file);
+        self.file_operation(buffer, cancellation, move |buffer| {
+            crate::scheduler::file_io::read(&file, buffer.as_mut())
+        })
+        .await
+    }
+    async fn file_write<B: IoBuf>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let file = Arc::clone(file);
+        self.file_operation(buffer, cancellation, move |buffer| {
+            crate::scheduler::file_io::write(&file, buffer.as_ref())
+        })
+        .await
+    }
     async fn file_read_at<B: IoBufMut>(
         &self,
         file: &Self::File,
@@ -749,7 +773,7 @@ impl File for SchedulerHandle {
     ) -> BufferResult<B> {
         let file = Arc::clone(file);
         self.file_operation(buffer, cancellation, move |buffer| {
-            super::positioned_file::read_at(&file, buffer.as_mut(), offset)
+            super::file_io::read_at(&file, buffer.as_mut(), offset)
         })
         .await
     }
@@ -762,7 +786,7 @@ impl File for SchedulerHandle {
     ) -> BufferResult<B> {
         let file = Arc::clone(file);
         self.file_operation(buffer, cancellation, move |buffer| {
-            super::positioned_file::write_at(&file, buffer.as_ref(), offset)
+            super::file_io::write_at(&file, buffer.as_ref(), offset)
         })
         .await
     }
@@ -938,6 +962,22 @@ impl File for Scheduler {
         cancellation: &Cancellation,
     ) -> OperationResult<Self::File> {
         self.handle.file_open(path, options, cancellation).await
+    }
+    async fn file_read<B: IoBufMut>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        self.handle.file_read(file, buffer, cancellation).await
+    }
+    async fn file_write<B: IoBuf>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        self.handle.file_write(file, buffer, cancellation).await
     }
     async fn file_read_at<B: IoBufMut>(
         &self,

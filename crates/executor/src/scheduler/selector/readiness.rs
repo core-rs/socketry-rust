@@ -7,8 +7,8 @@
 //! It remains available while registered resources are alive; Socketry task
 //! shutdown does not shut down that shared reactor. Futures contain no private
 //! coroutine stacks and may be polled on different workers.
+use crate::scheduler::file_io::{read_at, write_at};
 use crate::scheduler::operation::cancellable;
-use crate::scheduler::positioned_file::{read_at, write_at};
 use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
 use async_io::Async;
@@ -178,6 +178,30 @@ impl File for Selector {
         let cancellation = cancellation.clone();
         blocking::unblock(move || {
             crate::scheduler::blocking::run(&cancellation, || options.open(&path).map(Arc::new))
+        })
+        .await
+    }
+    async fn file_read<B: IoBufMut>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let file = Arc::clone(file);
+        file_operation(buffer, cancellation, move |buffer| {
+            crate::scheduler::file_io::read(&file, buffer.as_mut())
+        })
+        .await
+    }
+    async fn file_write<B: IoBuf>(
+        &self,
+        file: &Self::File,
+        buffer: B,
+        cancellation: &Cancellation,
+    ) -> BufferResult<B> {
+        let file = Arc::clone(file);
+        file_operation(buffer, cancellation, move |buffer| {
+            crate::scheduler::file_io::write(&file, buffer.as_ref())
         })
         .await
     }

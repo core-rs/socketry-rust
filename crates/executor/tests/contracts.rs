@@ -3,7 +3,7 @@
 
 use socketry_executor::{
     Cancellation, File, FileOptions, Interest, IoBuf, OperationError, OperationResult, Socket,
-    Spawn,
+    SocketDomain, SocketProtocol, SocketType, Spawn,
 };
 use std::{
     future::{Future, poll_fn},
@@ -100,27 +100,133 @@ async fn resources<S: File + Socket>(scheduler: &S, root: &Path) {
 
     let address = "127.0.0.1:0".parse().unwrap();
     assert!(matches!(
-        scheduler.socket_listen(address, &cancelled).await,
+        scheduler
+            .socket_open(
+                SocketDomain::Ipv4,
+                SocketType::Stream,
+                Some(SocketProtocol::Tcp),
+                &cancelled
+            )
+            .await,
         Err(OperationError::Cancelled(_))
     ));
-    let listener = scheduler.socket_listen(address, &never).await.unwrap();
-    let address = scheduler.listener_addr(&listener).unwrap();
-    assert_ne!(address.port(), 0);
+    let listener = scheduler
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Stream,
+            Some(SocketProtocol::Tcp),
+            &never,
+        )
+        .await
+        .unwrap();
+    let unbound = scheduler
+        .socket_open(SocketDomain::Ipv4, SocketType::Stream, None, &never)
+        .await
+        .unwrap();
+    assert!(matches!(
+        scheduler.socket_bind(&unbound, address, &cancelled).await,
+        Err(OperationError::Cancelled(_))
+    ));
+    assert!(matches!(
+        scheduler.socket_listen(&unbound, 128, &cancelled).await,
+        Err(OperationError::Cancelled(_))
+    ));
+    let reserved = scheduler
+        .socket_open(SocketDomain::Ipv4, SocketType::Stream, None, &never)
+        .await
+        .unwrap();
+    scheduler
+        .socket_bind(&reserved, address, &never)
+        .await
+        .unwrap();
+    let reserved_address = scheduler.socket_local_addr(&reserved).unwrap();
+    let another_reserved = scheduler
+        .socket_open(SocketDomain::Ipv4, SocketType::Stream, None, &never)
+        .await
+        .unwrap();
+    scheduler
+        .socket_bind(&another_reserved, address, &never)
+        .await
+        .unwrap();
+    assert_ne!(
+        scheduler.socket_local_addr(&another_reserved).unwrap(),
+        reserved_address
+    );
+    let duplicate = scheduler
+        .socket_open(SocketDomain::Ipv4, SocketType::Stream, None, &never)
+        .await
+        .unwrap();
     assert_eq!(
         scheduler
-            .socket_listen(address, &never)
+            .socket_bind(&duplicate, reserved_address, &never)
             .await
-            .err()
-            .unwrap()
+            .unwrap_err()
             .kind(),
         io::ErrorKind::AddrInUse
     );
+    drop(reserved);
+    scheduler
+        .socket_bind(&duplicate, reserved_address, &never)
+        .await
+        .unwrap();
+    let ipv6 = scheduler
+        .socket_open(
+            SocketDomain::from("[::1]:0".parse::<std::net::SocketAddr>().unwrap()),
+            SocketType::Stream,
+            None,
+            &never,
+        )
+        .await
+        .unwrap();
+    scheduler
+        .socket_bind(&ipv6, "[::1]:0".parse().unwrap(), &never)
+        .await
+        .unwrap();
+    assert!(scheduler.socket_local_addr(&ipv6).unwrap().is_ipv6());
+    scheduler
+        .socket_bind(&listener, address, &never)
+        .await
+        .unwrap();
+    scheduler
+        .socket_listen(&listener, 128, &never)
+        .await
+        .unwrap();
+    let address = scheduler.socket_local_addr(&listener).unwrap();
+    assert_ne!(address.port(), 0);
+    let duplicate = scheduler
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Stream,
+            Some(SocketProtocol::Tcp),
+            &never,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        scheduler
+            .socket_bind(&duplicate, address, &never)
+            .await
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::AddrInUse
+    );
+    let cancelled_client = scheduler
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Stream,
+            Some(SocketProtocol::Tcp),
+            &never,
+        )
+        .await
+        .unwrap();
     assert!(matches!(
-        scheduler.connect(address, &cancelled).await,
+        scheduler
+            .socket_connect(&cancelled_client, address, &cancelled)
+            .await,
         Err(OperationError::Cancelled(_))
     ));
     let stopping = Cancellation::new();
-    let mut accept = pin!(scheduler.accept(&listener, &stopping));
+    let mut accept = pin!(scheduler.socket_accept(&listener, &stopping));
     poll_fn(|context| {
         assert!(accept.as_mut().poll(context).is_pending());
         Poll::Ready(())
@@ -129,26 +235,38 @@ async fn resources<S: File + Socket>(scheduler: &S, root: &Path) {
     stopping.cancel();
     assert!(matches!(accept.await, Err(OperationError::Cancelled(_))));
 
-    let client = scheduler.connect(address, &never).await.unwrap();
-    let (server, peer) = scheduler.accept(&listener, &never).await.unwrap();
+    let client = scheduler
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Stream,
+            Some(SocketProtocol::Tcp),
+            &never,
+        )
+        .await
+        .unwrap();
+    scheduler
+        .socket_connect(&client, address, &never)
+        .await
+        .unwrap();
+    let (server, peer) = scheduler.socket_accept(&listener, &never).await.unwrap();
     assert_eq!(scheduler.socket_local_addr(&server).unwrap(), address);
     assert_eq!(scheduler.socket_peer_addr(&client).unwrap(), address);
     assert_eq!(scheduler.socket_local_addr(&client).unwrap(), peer);
     assert_eq!(scheduler.socket_peer_addr(&server).unwrap(), peer);
     scheduler
-        .io_wait(&client, Interest::Writable, &never)
+        .socket_wait(&client, Interest::Writable, &never)
         .await
         .unwrap();
     assert!(matches!(
         scheduler
-            .io_wait(&server, Interest::Readable, &cancelled)
+            .socket_wait(&server, Interest::Readable, &cancelled)
             .await,
         Err(OperationError::Cancelled(_))
     ));
     let buffer = vec![9; 4];
     let allocation = buffer.as_ptr();
     let stopping = Cancellation::new();
-    let mut read = pin!(scheduler.io_read(&server, buffer, &stopping));
+    let mut read = pin!(scheduler.socket_read(&server, buffer, &stopping));
     poll_fn(|context| {
         assert!(read.as_mut().poll(context).is_pending());
         Poll::Ready(())
@@ -159,19 +277,145 @@ async fn resources<S: File + Socket>(scheduler: &S, root: &Path) {
     assert!(matches!(result, Err(OperationError::Cancelled(_))));
     assert_eq!(buffer.as_ptr(), allocation);
     assert_eq!(buffer, vec![9; 4]);
-    let (result, _) = scheduler.io_write(&client, vec![0], &cancelled).await;
+    let (result, _) = scheduler.socket_write(&client, vec![0], &cancelled).await;
     assert!(matches!(result, Err(OperationError::Cancelled(_))));
     let (result, _) = scheduler
-        .io_write(&client, b"-ok-".to_vec().slice(1..3), &never)
+        .socket_write(&client, b"-ok-".to_vec().slice(1..3), &never)
         .await;
     assert_eq!(result.unwrap(), 2);
     scheduler
-        .io_wait(&server, Interest::Readable, &never)
+        .socket_wait(&server, Interest::Readable, &never)
         .await
         .unwrap();
-    let (result, buffer) = scheduler.io_read(&server, buffer.slice(1..3), &never).await;
+    let (result, buffer) = scheduler
+        .socket_read(&server, buffer.slice(1..3), &never)
+        .await;
     assert_eq!(result.unwrap(), 2);
     assert_eq!(buffer.into_inner(), vec![9, b'o', b'k', 9]);
+
+    let datagram = scheduler
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Datagram,
+            Some(SocketProtocol::Udp),
+            &never,
+        )
+        .await;
+    match datagram {
+        Ok(datagram) => {
+            let receiver = scheduler
+                .socket_open(
+                    SocketDomain::Ipv4,
+                    SocketType::Datagram,
+                    Some(SocketProtocol::Udp),
+                    &never,
+                )
+                .await
+                .unwrap();
+            scheduler
+                .socket_bind(&receiver, "127.0.0.1:0".parse().unwrap(), &never)
+                .await
+                .unwrap();
+            let address = scheduler.socket_local_addr(&receiver).unwrap();
+            scheduler
+                .socket_connect(&datagram, address, &never)
+                .await
+                .unwrap();
+            assert!(scheduler.socket_listen(&datagram, 1, &never).await.is_err());
+
+            let (result, buffer) = scheduler.socket_write(&datagram, Vec::new(), &never).await;
+            assert_eq!(result.unwrap(), 0);
+            assert!(buffer.is_empty());
+            let (result, _) = scheduler
+                .socket_write(&datagram, b"later".to_vec(), &never)
+                .await;
+            assert_eq!(result.unwrap(), 5);
+            let (result, buffer) = scheduler.socket_read(&receiver, vec![0; 8], &never).await;
+            assert_eq!(result.unwrap(), 0);
+            assert_eq!(buffer, vec![0; 8]);
+            let (result, buffer) = scheduler.socket_read(&receiver, vec![0; 8], &never).await;
+            assert_eq!(result.unwrap(), 5);
+            assert_eq!(&buffer[..5], b"later");
+
+            let zero_receiver = scheduler
+                .socket_open(
+                    SocketDomain::Ipv4,
+                    SocketType::Datagram,
+                    Some(SocketProtocol::Udp),
+                    &never,
+                )
+                .await
+                .unwrap();
+            scheduler
+                .socket_bind(&zero_receiver, "127.0.0.1:0".parse().unwrap(), &never)
+                .await
+                .unwrap();
+            let zero_sender = scheduler
+                .socket_open(
+                    SocketDomain::Ipv4,
+                    SocketType::Datagram,
+                    Some(SocketProtocol::Udp),
+                    &never,
+                )
+                .await
+                .unwrap();
+            scheduler
+                .socket_connect(
+                    &zero_sender,
+                    scheduler.socket_local_addr(&zero_receiver).unwrap(),
+                    &never,
+                )
+                .await
+                .unwrap();
+            let (result, _) = scheduler
+                .socket_write(&zero_sender, b"drop".to_vec(), &never)
+                .await;
+            assert_eq!(result.unwrap(), 4);
+            scheduler
+                .socket_wait(&zero_receiver, Interest::Readable, &never)
+                .await
+                .unwrap();
+            let (result, buffer) = scheduler
+                .socket_read(&zero_receiver, Vec::new(), &never)
+                .await;
+            #[cfg(windows)]
+            assert!(matches!(result, Err(OperationError::Io(_))));
+            #[cfg(not(windows))]
+            assert_eq!(result.unwrap(), 0);
+            assert!(buffer.is_empty());
+
+            // The readiness wait confirms a datagram is queued before the empty receive.
+            let stopping = Cancellation::new();
+            let buffer = vec![0; 8];
+            let allocation = buffer.as_ptr();
+            let mut read = pin!(scheduler.socket_read(&zero_receiver, buffer, &stopping));
+            poll_fn(|context| match read.as_mut().poll(context) {
+                Poll::Pending => Poll::Ready(()),
+                Poll::Ready(result) => {
+                    panic!("unexpected datagram after empty receive: {result:?}")
+                }
+            })
+            .await;
+            stopping.cancel();
+            let (result, buffer) = read.await;
+            assert!(
+                matches!(result, Err(OperationError::Cancelled(_))),
+                "unexpected datagram read result: {result:?}"
+            );
+            assert_eq!(buffer.as_ptr(), allocation);
+            assert_eq!(buffer, vec![0; 8]);
+        }
+        Err(error) => assert_eq!(error.kind(), io::ErrorKind::Unsupported),
+    }
+
+    assert_eq!(
+        SocketDomain::from("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap()),
+        SocketDomain::Ipv4
+    );
+    assert_eq!(
+        SocketDomain::from("[::1]:0".parse::<std::net::SocketAddr>().unwrap()),
+        SocketDomain::Ipv6
+    );
 }
 
 struct ReportDrop(Option<futures_channel::oneshot::Sender<()>>);

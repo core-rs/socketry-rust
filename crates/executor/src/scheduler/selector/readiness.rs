@@ -13,39 +13,40 @@ use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOper
 #[cfg(target_os = "linux")]
 use crate::{AllocationMode, FileAllocate};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
-use crate::{FileHandle, SyncMode};
-use async_io::Async;
-use std::io::{self, Read, SeekFrom, Write};
+use crate::{FileDescriptor, SyncMode};
+use std::io::{self, SeekFrom};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Instant;
 
-/// A reusable socket registration. Clones share one underlying registration.
-#[derive(Clone)]
-pub struct Socket(pub(crate) Arc<Async<TcpStream>>);
+mod socket_descriptor;
+pub use socket_descriptor::SocketDescriptor;
 
-impl Socket {
-    pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.0.get_ref().local_addr()
-    }
-
-    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        self.0.get_ref().peer_addr()
-    }
+async fn accept_with(
+    socket: &SocketDescriptor,
+    cancellation: &Cancellation,
+    accept: impl FnMut(&socket2::Socket) -> io::Result<(socket2::Socket, socket2::SockAddr)> + Send,
+    register: impl FnOnce(socket2::Socket) -> io::Result<SocketDescriptor>,
+) -> OperationResult<(SocketDescriptor, SocketAddr)> {
+    cancellable(cancellation, async {
+        let (accepted, address) = socket.inner.read_with(accept).await?;
+        register_accepted(accepted, address, register)
+    })
+    .await
 }
 
-/// A reusable listening socket registration.
-pub struct Listener(Async<TcpListener>);
-
-impl Listener {
-    pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.0.get_ref().local_addr()
-    }
+fn register_accepted(
+    accepted: socket2::Socket,
+    address: socket2::SockAddr,
+    register: impl FnOnce(socket2::Socket) -> io::Result<SocketDescriptor>,
+) -> io::Result<(SocketDescriptor, SocketAddr)> {
+    Ok((
+        register(accepted)?,
+        crate::scheduler::socket_io::address(address),
+    ))
 }
 
-/// Compile-time platform selection with a shared readiness reactor.
-/// All instances share the reactor and may use each other's registrations.
+/// Compile-time platform selection with a shared readiness reactor. All instances share registrations.
 #[derive(Clone, Copy, Default)]
 pub struct Selector;
 
@@ -55,115 +56,175 @@ impl Selector {
     }
 }
 
-fn wrap_socket(socket: io::Result<Async<TcpStream>>) -> io::Result<Socket> {
-    socket.map(|socket| Socket(Arc::new(socket)))
-}
-
-fn wrap_listener(listener: io::Result<Async<TcpListener>>) -> io::Result<Listener> {
-    listener.map(Listener)
-}
-
-fn wrap_accepted(
-    accepted: io::Result<(Async<TcpStream>, SocketAddr)>,
-) -> io::Result<(Socket, SocketAddr)> {
-    accepted.map(|(socket, address)| (Socket(Arc::new(socket)), address))
-}
-
 impl SocketRegistration for Selector {
-    fn register_socket(&self, socket: TcpStream) -> io::Result<Socket> {
-        wrap_socket(Async::new(socket))
+    fn register_socket(&self, socket: TcpStream) -> io::Result<SocketDescriptor> {
+        SocketDescriptor::new(socket.into())
     }
-
-    fn register_listener(&self, listener: TcpListener) -> io::Result<Listener> {
-        wrap_listener(Async::new(listener))
+    fn register_listener(&self, listener: TcpListener) -> io::Result<SocketDescriptor> {
+        SocketDescriptor::new(listener.into())
     }
 }
 
 impl SocketOperations for Selector {
-    type Socket = Socket;
-    type Listener = Listener;
+    type Socket = SocketDescriptor;
+    async fn socket_open(
+        &self,
+        domain: crate::SocketDomain,
+        kind: crate::SocketType,
+        protocol: Option<crate::SocketProtocol>,
+        cancellation: &Cancellation,
+    ) -> OperationResult<SocketDescriptor> {
+        cancellation.check()?;
+        crate::scheduler::socket_io::open_descriptor(
+            domain,
+            kind,
+            protocol,
+            crate::scheduler::socket_io::open,
+            SocketDescriptor::new,
+        )
+    }
+    async fn socket_bind(
+        &self,
+        socket: &SocketDescriptor,
+        address: SocketAddr,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        Ok(socket.get_ref().bind(&address.into())?)
+    }
     async fn socket_listen(
         &self,
-        address: SocketAddr,
+        socket: &SocketDescriptor,
+        backlog: i32,
         cancellation: &Cancellation,
-    ) -> OperationResult<Listener> {
+    ) -> OperationResult<()> {
         cancellation.check()?;
-        self.register_listener(TcpListener::bind(address)?)
-            .map_err(Into::into)
+        Ok(socket.get_ref().listen(backlog)?)
     }
-    fn listener_addr(&self, listener: &Listener) -> io::Result<SocketAddr> {
-        listener.local_addr()
-    }
-    fn socket_local_addr(&self, socket: &Socket) -> io::Result<SocketAddr> {
+    fn socket_local_addr(&self, socket: &SocketDescriptor) -> io::Result<SocketAddr> {
         socket.local_addr()
     }
-    fn socket_peer_addr(&self, socket: &Socket) -> io::Result<SocketAddr> {
+    fn socket_peer_addr(&self, socket: &SocketDescriptor) -> io::Result<SocketAddr> {
         socket.peer_addr()
     }
-    async fn connect(
+    async fn socket_connect(
         &self,
+        socket: &SocketDescriptor,
         address: SocketAddr,
         cancellation: &Cancellation,
-    ) -> OperationResult<Socket> {
-        cancellable(cancellation, async {
-            wrap_socket(Async::<TcpStream>::connect(address).await)
-        })
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        let result = socket.get_ref().connect(&address.into());
+        crate::scheduler::socket_io::connect_result(
+            result,
+            cancellable(
+                cancellation,
+                socket
+                    .inner
+                    .write_with(crate::scheduler::socket_io::connected),
+            ),
+        )
         .await
     }
-    async fn accept(
+    async fn socket_accept(
         &self,
-        listener: &Listener,
+        socket: &SocketDescriptor,
         cancellation: &Cancellation,
-    ) -> OperationResult<(Socket, SocketAddr)> {
-        cancellable(cancellation, async {
-            wrap_accepted(listener.0.accept().await)
-        })
+    ) -> OperationResult<(SocketDescriptor, SocketAddr)> {
+        accept_with(
+            socket,
+            cancellation,
+            |socket| socket.accept(),
+            SocketDescriptor::new,
+        )
         .await
     }
-    async fn io_read<B: IoBufMut>(
+    async fn socket_read<B: IoBufMut>(
         &self,
-        socket: &Socket,
+        socket: &SocketDescriptor,
         mut buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
         let result = cancellable(
             cancellation,
             socket
-                .0
-                .read_with(|mut socket| socket.read(buffer.as_mut())),
+                .inner
+                .read_with(|socket| crate::scheduler::socket_io::recv(socket, buffer.as_mut())),
         )
         .await;
         (result, buffer)
     }
-    async fn io_write<B: IoBuf>(
+    async fn socket_write<B: IoBuf>(
         &self,
-        socket: &Socket,
-        mut buffer: B,
+        socket: &SocketDescriptor,
+        buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        let owned = &mut buffer;
+        let send_buffer = crate::scheduler::socket_io::SendBuffer::new(&buffer);
         let result = cancellable(
             cancellation,
             socket
-                .0
-                .write_with(move |mut socket| socket.write(owned.as_ref())),
+                .inner
+                .write_with(move |socket| send_buffer.send(socket)),
         )
         .await;
         (result, buffer)
     }
-    async fn io_wait(
+    async fn socket_wait(
         &self,
-        socket: &Socket,
+        socket: &SocketDescriptor,
         interest: Interest,
         cancellation: &Cancellation,
     ) -> OperationResult<()> {
         cancellable(cancellation, async {
             match interest {
-                Interest::Readable => socket.0.readable().await,
-                Interest::Writable => socket.0.writable().await,
+                Interest::Readable => socket.inner.readable().await,
+                Interest::Writable => socket.inner.writable().await,
             }
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod socket_tests {
+    use super::*;
+
+    #[test]
+    fn accepted_socket_registration_errors_are_returned() {
+        let accepted =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        let address = socket2::SockAddr::from("127.0.0.1:1".parse::<SocketAddr>().unwrap());
+
+        assert_eq!(
+            register_accepted(accepted, address, |_| {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            })
+            .err()
+            .unwrap()
+            .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn accept_errors_are_returned() {
+        let socket = SocketDescriptor::new(
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap(),
+        )
+        .unwrap();
+
+        let result = futures_lite::future::block_on(accept_with(
+            &socket,
+            &Cancellation::never(),
+            |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            |_| unreachable!("accept errors before descriptor registration"),
+        ));
+
+        assert_eq!(
+            result.err().unwrap().kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 }
 
@@ -190,7 +251,7 @@ impl FileAllocate for Selector {
 }
 
 impl File for Selector {
-    type File = FileHandle;
+    type File = FileDescriptor;
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
         crate::scheduler::file_close::close(crate::scheduler::file_close::standalone_pool(), file)
             .await
@@ -266,7 +327,7 @@ impl File for Selector {
         let cancellation = cancellation.clone();
         blocking::unblock(move || {
             crate::scheduler::blocking::run(&cancellation, || {
-                options.open(&path).map(FileHandle::from)
+                options.open(&path).map(FileDescriptor::from)
             })
         })
         .await

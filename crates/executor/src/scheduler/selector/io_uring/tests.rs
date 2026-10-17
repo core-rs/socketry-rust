@@ -256,7 +256,7 @@ fn initialization_propagates_each_system_failure() {
 fn rejected_operations_preserve_buffer_allocations() {
     async_io::block_on(async {
         let (selector, _peer) = disconnected_selector();
-        let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
+        let file = crate::FileDescriptor::from(tempfile::tempfile().unwrap());
         let (_, buffer) = selector.file_read_at(&file, Vec::new(), 0, &NEVER).await;
         assert!(buffer.is_empty());
         let buffer = vec![7; 8];
@@ -278,6 +278,27 @@ fn rejected_operations_preserve_buffer_allocations() {
                 .contains("identifiers exhausted")
         );
         assert_eq!(returned.as_ptr(), allocation);
+    });
+}
+
+#[test]
+fn empty_file_buffers_complete_without_selector_admission() {
+    async_io::block_on(async {
+        let (selector, _peer) = disconnected_selector();
+        let file = Arc::new(tempfile::tempfile().unwrap());
+
+        let (result, buffer) = selector
+            .operation(
+                Resource::File(file, Some(0)),
+                Vec::new(),
+                false,
+                |buffer| buffer.as_mut_ptr(),
+                &NEVER,
+            )
+            .await;
+
+        assert_eq!(result.unwrap(), 0);
+        assert!(buffer.is_empty());
     });
 }
 
@@ -361,8 +382,30 @@ fn closed_selector_rejects_its_direct_network_operations() {
         selector.wait_closed();
         assert!(selector.register_socket(raw_socket).is_err());
         assert!(selector.register_listener(raw_listener).is_err());
-        assert!(selector.socket_listen(address, &NEVER).await.is_err());
-        assert!(selector.listener_addr(&listener).is_err());
+        assert!(
+            selector
+                .socket_open(
+                    crate::SocketDomain::Ipv4,
+                    crate::SocketType::Stream,
+                    Some(crate::SocketProtocol::Tcp),
+                    &NEVER,
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            selector
+                .socket_bind(&socket, address, &NEVER)
+                .await
+                .is_err()
+        );
+        assert!(
+            selector
+                .socket_listen(&listener, 128, &NEVER)
+                .await
+                .is_err()
+        );
+        assert!(selector.socket_local_addr(&listener).is_err());
         assert!(selector.socket_local_addr(&socket).is_err());
         assert!(selector.socket_peer_addr(&socket).is_err());
         let directory = tempfile::tempdir().unwrap();
@@ -374,7 +417,7 @@ fn closed_selector_rejects_its_direct_network_operations() {
                 .is_err()
         );
         assert!(!path.exists());
-        let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
+        let file = crate::FileDescriptor::from(tempfile::tempfile().unwrap());
         assert_eq!(
             selector
                 .file_seek(&file, SeekFrom::Start(1), &NEVER)
@@ -404,11 +447,16 @@ fn closed_selector_rejects_its_direct_network_operations() {
             );
         }
         assert_eq!(file.as_ref().metadata().unwrap().len(), 0);
-        assert!(selector.connect(address, &NEVER).await.is_err());
-        assert!(selector.accept(&listener, &NEVER).await.is_err());
         assert!(
             selector
-                .io_wait(&socket, Interest::Readable, &NEVER)
+                .socket_connect(&socket, address, &NEVER)
+                .await
+                .is_err()
+        );
+        assert!(selector.socket_accept(&listener, &NEVER).await.is_err());
+        assert!(
+            selector
+                .socket_wait(&socket, Interest::Readable, &NEVER)
                 .await
                 .is_err()
         );
@@ -540,7 +588,7 @@ fn socket_readiness_retries_preserve_allocations() {
         let buffer = vec![0; 5];
         let allocation = buffer.as_ptr();
         let failures = Failures::new([("operation", io::ErrorKind::WouldBlock.into())]);
-        let (result, buffer) = selector.io_read(&socket, buffer, &NEVER).await;
+        let (result, buffer) = selector.socket_read(&socket, buffer, &NEVER).await;
         let count = result.unwrap();
         assert!(count > 0);
         assert_eq!(&buffer[..count], &b"ready"[..count]);
@@ -550,7 +598,7 @@ fn socket_readiness_retries_preserve_allocations() {
         let buffer = b"write".to_vec();
         let allocation = buffer.as_ptr();
         let _failures = Failures::new([("operation", io::ErrorKind::WouldBlock.into())]);
-        let (result, buffer) = selector.io_write(&socket, buffer, &NEVER).await;
+        let (result, buffer) = selector.socket_write(&socket, buffer, &NEVER).await;
         let count = result.unwrap();
         assert!(count > 0);
         assert_eq!(buffer.as_ptr(), allocation);
@@ -609,7 +657,7 @@ fn cooperative_cancellation_waits_for_original_completion_and_preserves_progress
                     }),
                 }),
             };
-            let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
+            let file = crate::FileDescriptor::from(tempfile::tempfile().unwrap());
             let cancelled = Cancellation::new();
             let dropped = Arc::new(AtomicUsize::new(0));
             let buffer = CountedBuffer {
@@ -662,7 +710,7 @@ fn cancellation_before_submission_and_retry_returns_owned_buffers() {
         let cancellation = Cancellation::new();
         cancellation.cancel();
         let (selector, _peer) = disconnected_selector();
-        let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
+        let file = crate::FileDescriptor::from(tempfile::tempfile().unwrap());
         let buffer = vec![5; 3];
         let allocation = buffer.as_ptr();
         let (result, buffer) = selector
@@ -726,7 +774,7 @@ fn failed_selector_retains_in_flight_sync_file_before_notifying_caller() {
 fn sync_rejects_disconnected_and_exhausted_selectors() {
     async_io::block_on(async {
         let (selector, _peer) = disconnected_selector();
-        let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
+        let file = crate::FileDescriptor::from(tempfile::tempfile().unwrap());
         assert_eq!(
             selector
                 .file_sync(&file, SyncMode::All, &NEVER)
@@ -829,7 +877,7 @@ fn buffer_free_file_operations_are_lazy_and_retain_the_file_until_original_compl
                             }),
                         }),
                     };
-                    let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
+                    let file = crate::FileDescriptor::from(tempfile::tempfile().unwrap());
                     let cancellation = Cancellation::new();
                     drop(run_file_operation(
                         &selector,
@@ -883,7 +931,7 @@ fn buffer_free_file_operations_are_lazy_and_retain_the_file_until_original_compl
 
 async fn run_file_operation(
     selector: &Selector,
-    file: &FileHandle,
+    file: &FileDescriptor,
     operation: FileOperation,
     cancellation: &Cancellation,
 ) -> OperationResult<()> {
@@ -986,7 +1034,7 @@ fn truncate_preparation_is_inert_and_failed_admission_preserves_file() {
         assert_eq!(entry.get_opcode(), u32::from(opcode::Ftruncate::CODE));
         assert_eq!(request.file.as_ref().unwrap().metadata().unwrap().len(), 0);
         let (selector, _peer) = disconnected_selector();
-        let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
+        let file = crate::FileDescriptor::from(tempfile::tempfile().unwrap());
         assert_eq!(
             selector
                 .file_truncate(&file, 13, &NEVER)
@@ -1028,7 +1076,7 @@ fn allocation_native_and_fallback_preserve_contract_and_reserve_blocks() {
         for backend in [&selector, &fallback] {
             let directory = tempfile::tempdir().unwrap();
             allocation_contract::check(backend, directory.path()).await;
-            let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
+            let file = crate::FileDescriptor::from(tempfile::tempfile().unwrap());
             let before = file.as_ref().metadata().unwrap().blocks();
             backend
                 .file_allocate(&file, 4096, 128 * 1024, AllocationMode::KeepSize, &NEVER)
@@ -1039,7 +1087,7 @@ fn allocation_native_and_fallback_preserve_contract_and_reserve_blocks() {
         }
         selector.shutdown().await;
         for backend in [&selector, &fallback] {
-            let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
+            let file = crate::FileDescriptor::from(tempfile::tempfile().unwrap());
             assert_eq!(
                 backend
                     .file_allocate(&file, 0, 4096, AllocationMode::Extend, &NEVER)
@@ -1069,7 +1117,7 @@ fn allocation_preparation_is_inert_and_failed_admission_preserves_file() {
             assert_eq!(request.file.as_ref().unwrap().metadata().unwrap().len(), 0);
         }
         let (selector, _peer) = disconnected_selector();
-        let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
+        let file = crate::FileDescriptor::from(tempfile::tempfile().unwrap());
         assert_eq!(
             selector
                 .file_allocate(&file, 0, 4096, AllocationMode::Extend, &NEVER)

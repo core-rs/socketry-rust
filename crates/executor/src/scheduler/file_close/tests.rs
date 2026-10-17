@@ -9,7 +9,7 @@ use std::{panic::AssertUnwindSafe, sync::Arc};
 #[test]
 fn exclusive_close_is_lazy_and_reports_closed_admission() {
     let pool = BlockingPool::new(BlockingOptions::default());
-    let file = FileHandle::from(tempfile::tempfile().unwrap());
+    let file = FileDescriptor::from(tempfile::tempfile().unwrap());
     let retained = Arc::downgrade(&file.0);
     let close = submit(&pool, file);
     assert_eq!(retained.strong_count(), 1);
@@ -40,7 +40,7 @@ fn exclusive_close_is_lazy_and_reports_closed_admission() {
 #[test]
 fn outstanding_use_panics_without_closing_the_retained_file() {
     let pool = BlockingPool::new(BlockingOptions::default());
-    let file = FileHandle::from(tempfile::tempfile().unwrap());
+    let file = FileDescriptor::from(tempfile::tempfile().unwrap());
     let retained = file.retain();
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| block_on(submit(&pool, file))));
     assert!(outcome.is_err());

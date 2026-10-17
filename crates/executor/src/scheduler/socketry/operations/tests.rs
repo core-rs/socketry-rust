@@ -6,6 +6,7 @@ static NEVER: crate::Cancellation = crate::Cancellation::never();
 use super::{DefaultSelector, Scheduler, check_initialized_open, check_open};
 use crate::SocketRegistration;
 use crate::scheduler::{Clock, File, Interest, Socket};
+use crate::{OperationResult, SocketDomain, SocketProtocol, SocketType};
 use std::fs::OpenOptions;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -24,6 +25,19 @@ fn socket_pair() -> (TcpStream, TcpStream) {
     let client = TcpStream::connect(address).unwrap();
     let (server, _) = listener.accept().unwrap();
     (client, server)
+}
+
+async fn connect<S: Socket>(scheduler: &S, address: SocketAddr) -> OperationResult<S::Socket> {
+    let socket = scheduler
+        .socket_open(
+            SocketDomain::from(address),
+            SocketType::Stream,
+            Some(SocketProtocol::Tcp),
+            &NEVER,
+        )
+        .await?;
+    scheduler.socket_connect(&socket, address, &NEVER).await?;
+    Ok(socket)
 }
 
 struct Cleanup(std::path::PathBuf);
@@ -116,9 +130,9 @@ fn scheduler_and_handle_forward_network_file_and_clock_operations() {
     let (_first_client, _first_server) = std::thread::scope(|scope| {
         let handle = handle.clone();
         let scheduler = &scheduler;
-        let connect = scope.spawn(move || scheduler.block_on(handle.connect(address, &NEVER)));
+        let connect = scope.spawn(move || scheduler.block_on(connect(&handle, address)));
         let (server, _) = scheduler
-            .block_on(scheduler.accept(&listener, &NEVER))
+            .block_on(scheduler.socket_accept(&listener, &NEVER))
             .unwrap();
         let client = connect.join().unwrap().unwrap();
         (client, server)
@@ -128,9 +142,9 @@ fn scheduler_and_handle_forward_network_file_and_clock_operations() {
     let listener = handle.register_listener(raw_listener).unwrap();
     let (client, server) = std::thread::scope(|scope| {
         let scheduler = &scheduler;
-        let connect = scope.spawn(move || scheduler.block_on(scheduler.connect(address, &NEVER)));
+        let connect = scope.spawn(move || scheduler.block_on(connect(scheduler, address)));
         let (server, _) = scheduler
-            .block_on(handle.accept(&listener, &NEVER))
+            .block_on(handle.socket_accept(&listener, &NEVER))
             .unwrap();
         let client = connect.join().unwrap().unwrap();
         (client, server)
@@ -147,7 +161,7 @@ fn scheduler_and_handle_forward_network_file_and_clock_operations() {
         NEXT_FILE.fetch_add(1, Ordering::Relaxed)
     ));
     let _cleanup = Cleanup(path.clone());
-    let file = crate::FileHandle::from(
+    let file = crate::FileDescriptor::from(
         OpenOptions::new()
             .create_new(true)
             .read(true)
@@ -157,25 +171,25 @@ fn scheduler_and_handle_forward_network_file_and_clock_operations() {
     );
 
     scheduler.block_on(async {
-        let (result, buffer) = handle.io_write(&client, vec![42], &NEVER).await;
+        let (result, buffer) = handle.socket_write(&client, vec![42], &NEVER).await;
         assert_eq!(result.unwrap(), 1);
         assert_eq!(buffer, vec![42]);
         handle
-            .io_wait(&server, Interest::Readable, &NEVER)
+            .socket_wait(&server, Interest::Readable, &NEVER)
             .await
             .unwrap();
-        let (result, buffer) = scheduler.io_read(&server, vec![0], &NEVER).await;
+        let (result, buffer) = scheduler.socket_read(&server, vec![0], &NEVER).await;
         assert_eq!(result.unwrap(), 1);
         assert_eq!(buffer, vec![42]);
 
-        let (result, buffer) = scheduler.io_write(&client, vec![43], &NEVER).await;
+        let (result, buffer) = scheduler.socket_write(&client, vec![43], &NEVER).await;
         assert_eq!(result.unwrap(), 1);
         assert_eq!(buffer, vec![43]);
         scheduler
-            .io_wait(&server, Interest::Readable, &NEVER)
+            .socket_wait(&server, Interest::Readable, &NEVER)
             .await
             .unwrap();
-        let (result, buffer) = handle.io_read(&server, vec![0], &NEVER).await;
+        let (result, buffer) = handle.socket_read(&server, vec![0], &NEVER).await;
         assert_eq!(result.unwrap(), 1);
         assert_eq!(buffer, vec![43]);
 

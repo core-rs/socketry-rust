@@ -7,7 +7,10 @@
 #[path = "interface_probe/simulated.rs"]
 mod simulated;
 
-use socketry_executor::{Cancellation, File, FileOptions, IoBuf, OperationResult, Socket};
+use socketry_executor::{
+    Cancellation, File, FileOptions, IoBuf, OperationResult, Socket, SocketDomain, SocketProtocol,
+    SocketType,
+};
 use std::{io, path::Path};
 static NEVER: Cancellation = Cancellation::never();
 
@@ -68,7 +71,7 @@ async fn send_all<S: Socket>(
     let mut written = 0;
     while written < buffer.len() {
         let (result, returned) = scheduler
-            .io_write(socket, buffer.slice(written..), cancellation)
+            .socket_write(socket, buffer.slice(written..), cancellation)
             .await;
         buffer = returned.into_inner();
         let count = result?;
@@ -81,12 +84,12 @@ async fn send_all<S: Socket>(
 }
 
 /// Serve one connection until peer EOF, echoing each received prefix.
-async fn serve<S: Socket>(scheduler: &S, listener: &S::Listener) -> OperationResult<usize> {
-    let (socket, _) = scheduler.accept(listener, &NEVER).await?;
+async fn serve<S: Socket>(scheduler: &S, listener: &S::Socket) -> OperationResult<usize> {
+    let (socket, _) = scheduler.socket_accept(listener, &NEVER).await?;
     let mut total = 0;
     loop {
         let (result, mut buffer) = scheduler
-            .io_read(&socket, vec![0; BUFFER_SIZE], &NEVER)
+            .socket_read(&socket, vec![0; BUFFER_SIZE], &NEVER)
             .await;
         let count = result?;
         if count == 0 {
@@ -99,17 +102,33 @@ async fn serve<S: Socket>(scheduler: &S, listener: &S::Listener) -> OperationRes
 }
 
 async fn exchange<S: Socket>(scheduler: &S) -> OperationResult<()> {
+    let address = "127.0.0.1:0".parse().unwrap();
     let listener = scheduler
-        .socket_listen("127.0.0.1:0".parse().unwrap(), &NEVER)
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Stream,
+            Some(SocketProtocol::Tcp),
+            &NEVER,
+        )
         .await?;
-    let address = scheduler.listener_addr(&listener)?;
+    scheduler.socket_bind(&listener, address, &NEVER).await?;
+    scheduler.socket_listen(&listener, 128, &NEVER).await?;
+    let address = scheduler.socket_local_addr(&listener)?;
     let client = async {
-        let socket = scheduler.connect(address, &NEVER).await?;
+        let socket = scheduler
+            .socket_open(
+                SocketDomain::Ipv4,
+                SocketType::Stream,
+                Some(SocketProtocol::Tcp),
+                &NEVER,
+            )
+            .await?;
+        scheduler.socket_connect(&socket, address, &NEVER).await?;
         send_all(scheduler, &socket, PAYLOAD.to_vec(), &NEVER).await?;
         let mut received = Vec::new();
         while received.len() < PAYLOAD.len() {
             let (result, buffer) = scheduler
-                .io_read(&socket, vec![0; BUFFER_SIZE], &NEVER)
+                .socket_read(&socket, vec![0; BUFFER_SIZE], &NEVER)
                 .await;
             let count = result?;
             if count == 0 {

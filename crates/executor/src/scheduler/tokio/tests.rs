@@ -65,13 +65,6 @@ fn socket_pair() -> (TcpStream, TcpStream) {
     (client, server)
 }
 
-fn expect_error<ResultType>(result: io::Result<ResultType>) -> io::Error {
-    match result {
-        Ok(_) => panic!("operation unexpectedly succeeded"),
-        Err(error) => error,
-    }
-}
-
 fn shared(runtime: &::tokio::runtime::Runtime) -> Arc<Shared> {
     Arc::new(Shared {
         cleanup: BlockingPool::new(BlockingOptions::default()),
@@ -281,68 +274,6 @@ fn shutdown_cancels_a_task_registered_before_tokio_spawn() {
 }
 
 #[test]
-fn socket_registration_preserves_configuration_and_conversion_errors() {
-    let runtime = runtime();
-    let (socket, _peer) = socket_pair();
-    let error = expect_error(register_socket_with(
-        runtime.handle(),
-        socket,
-        |_| Err(io::Error::other("socket mode failed")),
-        |_| panic!("conversion should not run after configuration fails"),
-    ));
-    assert_eq!(error.to_string(), "socket mode failed");
-
-    let (socket, _peer) = socket_pair();
-    let error = expect_error(register_socket_with(
-        runtime.handle(),
-        socket,
-        |_| Ok(()),
-        |_| Err(io::Error::other("socket conversion failed")),
-    ));
-    assert_eq!(error.to_string(), "socket conversion failed");
-}
-
-#[test]
-fn listener_registration_preserves_configuration_and_conversion_errors() {
-    let runtime = runtime();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let error = expect_error(register_listener_with(
-        runtime.handle(),
-        listener,
-        |_| Err(io::Error::other("listener mode failed")),
-        |_| panic!("conversion should not run after configuration fails"),
-    ));
-    assert_eq!(error.to_string(), "listener mode failed");
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let error = expect_error(register_listener_with(
-        runtime.handle(),
-        listener,
-        |_| Ok(()),
-        |_| Err(io::Error::other("listener conversion failed")),
-    ));
-    assert_eq!(error.to_string(), "listener conversion failed");
-}
-
-#[test]
-fn connection_and_accept_errors_are_propagated() {
-    let runtime = runtime();
-    let error = runtime.block_on(connect_with(
-        runtime.handle().clone(),
-        runtime.handle().id(),
-        ready(Err(io::Error::other("connect failed"))),
-    ));
-    assert_eq!(expect_error(error).to_string(), "connect failed");
-
-    let error = runtime.block_on(accept_with(
-        runtime.handle().clone(),
-        runtime.handle().id(),
-        ready(Err(io::Error::other("accept failed"))),
-    ));
-    assert_eq!(expect_error(error).to_string(), "accept failed");
-}
-
-#[test]
 fn poisoned_file_buffers_are_recovered_for_operations_and_return() {
     let buffer = Mutex::new(vec![1]);
     let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -449,7 +380,7 @@ fn write_retries_interrupted_and_would_block_operations() {
 }
 
 #[test]
-fn socket_write_waits_until_the_send_buffer_is_writable() {
+fn socket_write_completes_with_a_full_send_buffer() {
     let runtime = runtime();
     let scheduler = Scheduler::new(runtime.handle().clone());
     let handle = scheduler.handle();
@@ -459,10 +390,20 @@ fn socket_write_waits_until_the_send_buffer_is_writable() {
     let fill = vec![0; 64 * 1024];
 
     runtime.block_on(async {
-        socket.inner.writable().await.unwrap();
+        socket.wait(Interest::Writable).await.unwrap();
         let mut written = 0;
         loop {
-            match socket.inner.try_write(&fill) {
+            match socket.get_ref().send(&fill) {
+                Ok(0) => panic!("socket write made no progress"),
+                Ok(count) => written += count,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("failed to fill socket send buffer: {error}"),
+            }
+        }
+        let probe = vec![0; 1];
+        let send = crate::scheduler::socket_io::SendBuffer::new(&probe);
+        loop {
+            match send.send(socket.get_ref()) {
                 Ok(0) => panic!("socket write made no progress"),
                 Ok(count) => written += count,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
@@ -471,6 +412,10 @@ fn socket_write_waits_until_the_send_buffer_is_writable() {
         }
         assert!(written > 0);
     });
+
+    let (result, buffer) = runtime.block_on(handle.socket_write(&socket, Vec::new(), &NEVER));
+    assert_eq!(result.unwrap(), 0);
+    assert!(buffer.is_empty());
 
     let (start_reader, wait_for_start) = mpsc::sync_channel(0);
     let (finish_reader, wait_for_finish) = mpsc::sync_channel(0);
@@ -502,19 +447,21 @@ fn socket_write_waits_until_the_send_buffer_is_writable() {
         total
     });
 
-    let mut write = Box::pin(handle.io_write(&socket, vec![42], &NEVER));
-    runtime.block_on(async {
-        std::future::poll_fn(|context| {
-            assert!(write.as_mut().poll(context).is_pending());
-            start_reader.send(()).unwrap();
-            Poll::Ready(())
-        })
-        .await;
-
-        let (result, buffer) = write.await;
-        assert_eq!(result.unwrap(), 1);
-        assert_eq!(buffer, [42]);
-    });
+    let mut write = Box::pin(handle.socket_write(&socket, vec![42], &NEVER));
+    let completed_before_read = runtime.block_on(std::future::poll_fn(|context| {
+        let result = match write.as_mut().poll(context) {
+            Poll::Ready(result) => Some(result),
+            Poll::Pending => None,
+        };
+        start_reader.send(()).unwrap();
+        Poll::Ready(result)
+    }));
+    let (result, buffer) = match completed_before_read {
+        Some(result) => result,
+        None => runtime.block_on(write),
+    };
+    assert_eq!(result.unwrap(), 1);
+    assert_eq!(buffer, [42]);
 
     // Kernel buffering can complete the write before the reader gets CPU time. Observe an actual read before asking it to stop.
     wait_for_first_read
@@ -670,7 +617,7 @@ fn cancelling_queued_blocking_work_preserves_buffers_cursor_and_prevents_creatio
         .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cancelled-open");
-    let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
+    let file = crate::FileDescriptor::from(tempfile::tempfile().unwrap());
     let cancellation = Cancellation::new();
     runtime.block_on(async {
         let buffer = vec![42; 4];

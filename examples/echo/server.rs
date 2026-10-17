@@ -6,8 +6,8 @@
 // Traits such as `Socket`, `Signals`, and `IoBuf` provide methods used below. Importing a trait makes its methods available on implementing types.
 #[cfg(unix)]
 use socketry::{
-    Cancellation, IoBuf, OperationError, OperationResult, Scheduler, Signals, Socket,
-    signal::SIGINT,
+    Cancellation, IoBuf, OperationError, OperationResult, Scheduler, Signals, Socket, SocketDomain,
+    SocketProtocol, SocketType, signal::SIGINT,
 };
 
 #[cfg(unix)]
@@ -47,7 +47,7 @@ async fn echo<S: Socket>(
         // The operation returns `(success/error result, original buffer)`.
         //
         // Keeping the buffer outside `Result` lets us recover it even when the operation fails or is cancelled.
-        let (result, returned) = scheduler.io_read(&socket, buffer, shutdown).await;
+        let (result, returned) = scheduler.socket_read(&socket, buffer, shutdown).await;
 
         // Take ownership of the returned buffer for reuse.
         buffer = returned;
@@ -70,7 +70,7 @@ async fn echo<S: Socket>(
             //
             // `&drain` makes these writes ignore shutdown requests.
             let (result, returned) = scheduler
-                .io_write(&socket, buffer.slice(sent..count), &drain)
+                .socket_write(&socket, buffer.slice(sent..count), &drain)
                 .await;
 
             // The operation returned our owned range view. Recover the complete original buffer from it.
@@ -123,18 +123,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Save the result rather than using `?` here: even if accepting fails, we want to cancel and await existing clients before returning.
     let result: OperationResult<()> = scheduler.block_on(async {
         let listener = scheduler
-            .socket_listen(
-                // Parse the fixed address into a `SocketAddr`. `unwrap()` panics on failure; this literal is known valid.
-                "127.0.0.1:9000".parse().unwrap(),
+            .socket_open(
+                SocketDomain::Ipv4,
+                SocketType::Stream,
+                Some(SocketProtocol::Tcp),
                 &shutdown,
             )
             .await?;
+        // Bind the opened socket before putting it into listening mode.
+        scheduler
+            .socket_bind(&listener, "127.0.0.1:9000".parse().unwrap(), &shutdown)
+            .await?;
+        scheduler.socket_listen(&listener, 128, &shutdown).await?;
 
         loop {
             // `match` handles each possible operation result.
             //
-            // `accept` returns `(socket, peer_address)`. We ignore the address using `_`.
-            let (socket, _) = match scheduler.accept(&listener, &shutdown).await {
+            // `socket_accept` returns `(socket, peer_address)`. We ignore the address using `_`.
+            let (socket, _) = match scheduler.socket_accept(&listener, &shutdown).await {
                 Ok(connection) => connection,
 
                 // `_` ignores the cancellation error's inner value.

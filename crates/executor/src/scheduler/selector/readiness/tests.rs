@@ -3,57 +3,66 @@
 
 static NEVER: crate::Cancellation = crate::Cancellation::never();
 
-use super::{wrap_accepted, wrap_listener, wrap_socket};
-use std::io;
-
-fn injected_error<T>(result: io::Result<T>) {
-    let error = match result {
-        Err(error) => error,
-        Ok(_) => panic!("injected error was not preserved"),
-    };
-
-    assert_eq!(error.kind(), io::ErrorKind::Other);
-    assert_eq!(error.to_string(), "injected selector failure");
-}
-
-fn selector_error<T>() -> io::Result<T> {
-    Err(io::Error::other("injected selector failure"))
-}
-
-#[test]
-fn registration_and_network_errors_are_preserved() {
-    injected_error(wrap_socket(selector_error()));
-    injected_error(wrap_listener(selector_error()));
-    injected_error(wrap_accepted(selector_error()));
-}
-
 #[test]
 fn readiness_operations_remain_available_with_other_backends_selected() {
     use super::*;
     async_io::block_on(async {
         let selector = Selector::new().unwrap();
         let listener = selector
-            .socket_listen("127.0.0.1:0".parse().unwrap(), &NEVER)
+            .socket_open(
+                crate::SocketDomain::Ipv4,
+                crate::SocketType::Stream,
+                Some(crate::SocketProtocol::Tcp),
+                &NEVER,
+            )
             .await
             .unwrap();
-        let address = selector.listener_addr(&listener).unwrap();
+        selector
+            .socket_bind(&listener, "127.0.0.1:0".parse().unwrap(), &NEVER)
+            .await
+            .unwrap();
+        selector
+            .socket_listen(&listener, 128, &NEVER)
+            .await
+            .unwrap();
+        let address = selector.socket_local_addr(&listener).unwrap();
+        let duplicate = selector
+            .socket_open(
+                crate::SocketDomain::Ipv4,
+                crate::SocketType::Stream,
+                Some(crate::SocketProtocol::Tcp),
+                &NEVER,
+            )
+            .await
+            .unwrap();
         assert_eq!(
             selector
-                .socket_listen(address, &NEVER)
+                .socket_bind(&duplicate, address, &NEVER)
                 .await
-                .err()
-                .unwrap()
+                .unwrap_err()
                 .kind(),
             io::ErrorKind::AddrInUse
         );
-        let socket = selector.connect(address, &NEVER).await.unwrap();
-        let (peer, peer_address) = selector.accept(&listener, &NEVER).await.unwrap();
+        let socket = selector
+            .socket_open(
+                crate::SocketDomain::Ipv4,
+                crate::SocketType::Stream,
+                Some(crate::SocketProtocol::Tcp),
+                &NEVER,
+            )
+            .await
+            .unwrap();
+        selector
+            .socket_connect(&socket, address, &NEVER)
+            .await
+            .unwrap();
+        let (peer, peer_address) = selector.socket_accept(&listener, &NEVER).await.unwrap();
         assert_eq!(selector.socket_local_addr(&socket).unwrap(), peer_address);
         assert_eq!(selector.socket_peer_addr(&socket).unwrap(), address);
         let mut written = 0;
         while written < 5 {
             let (result, buffer) = selector
-                .io_write(&socket, b"hello"[written..].to_vec(), &NEVER)
+                .socket_write(&socket, b"hello"[written..].to_vec(), &NEVER)
                 .await;
             let count = result.unwrap();
             assert!(count > 0);
@@ -63,14 +72,30 @@ fn readiness_operations_remain_available_with_other_backends_selected() {
         let mut received = Vec::new();
         while received.len() < 5 {
             let (result, buffer) = selector
-                .io_read(&peer, vec![0; 5 - received.len()], &NEVER)
+                .socket_read(&peer, vec![0; 5 - received.len()], &NEVER)
                 .await;
             let count = result.unwrap();
             assert!(count > 0);
             received.extend_from_slice(&buffer[..count]);
         }
         assert_eq!(received, b"hello");
-        let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
+        let (result, _) = selector.socket_write(&peer, vec![99], &NEVER).await;
+        assert_eq!(result.unwrap(), 1);
+        selector
+            .socket_wait(&socket, Interest::Readable, &NEVER)
+            .await
+            .unwrap();
+        let (result, buffer) = selector.socket_read(&socket, Vec::new(), &NEVER).await;
+        assert_eq!(result.unwrap(), 0);
+        assert!(buffer.is_empty());
+        let (result, buffer) = selector.socket_read(&socket, vec![0], &NEVER).await;
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(buffer, vec![99]);
+        let (result, buffer) = selector.socket_write(&socket, Vec::new(), &NEVER).await;
+        assert_eq!(result.unwrap(), 0);
+        assert!(buffer.is_empty());
+
+        let file = crate::FileDescriptor::from(tempfile::tempfile().unwrap());
         let (result, buffer) = selector
             .file_write_at(&file, b"file".to_vec(), 3, &NEVER)
             .await;
@@ -97,7 +122,7 @@ fn direct_readiness_cancellation_returns_buffers_before_submitting_work() {
                 .await,
             Err(crate::OperationError::Cancelled(_))
         ));
-        let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
+        let file = crate::FileDescriptor::from(tempfile::tempfile().unwrap());
         let buffer = vec![1; 4];
         let allocation = buffer.as_ptr();
         let (result, buffer) = selector

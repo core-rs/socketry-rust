@@ -6,7 +6,7 @@
 static NEVER: socketry_executor::Cancellation = socketry_executor::Cancellation::never();
 
 #[cfg(any(feature = "native", feature = "tokio"))]
-use socketry_executor::{Socket, Spawn};
+use socketry_executor::{Socket, SocketDomain, SocketProtocol, SocketType, Spawn};
 #[cfg(any(feature = "native", feature = "tokio"))]
 use std::io;
 
@@ -16,18 +16,29 @@ where
     SchedulerType: Socket + Spawn + Clone + 'static,
 {
     let listener = scheduler
-        .socket_listen("127.0.0.1:0".parse().unwrap(), &NEVER)
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Stream,
+            Some(SocketProtocol::Tcp),
+            &NEVER,
+        )
         .await?;
-    let address = scheduler.listener_addr(&listener)?;
+    scheduler
+        .socket_bind(&listener, "127.0.0.1:0".parse().unwrap(), &NEVER)
+        .await?;
+    scheduler.socket_listen(&listener, 128, &NEVER).await?;
+    let address = scheduler.socket_local_addr(&listener)?;
     let server_scheduler = scheduler.clone();
     let server = scheduler
         .spawn(async move {
-            let (socket, _) = server_scheduler.accept(&listener, &NEVER).await?;
-            let (result, buffer) = server_scheduler.io_read(&socket, vec![0; 1], &NEVER).await;
+            let (socket, _) = server_scheduler.socket_accept(&listener, &NEVER).await?;
+            let (result, buffer) = server_scheduler
+                .socket_read(&socket, vec![0; 1], &NEVER)
+                .await;
             if result? != 1 {
                 return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
             }
-            let (result, _) = server_scheduler.io_write(&socket, buffer, &NEVER).await;
+            let (result, _) = server_scheduler.socket_write(&socket, buffer, &NEVER).await;
             if result? != 1 {
                 return Err(io::Error::from(io::ErrorKind::WriteZero));
             }
@@ -35,12 +46,20 @@ where
         })
         .map_err(io::Error::other)?;
 
-    let socket = scheduler.connect(address, &NEVER).await?;
-    let (result, buffer) = scheduler.io_write(&socket, vec![42], &NEVER).await;
+    let socket = scheduler
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Stream,
+            Some(SocketProtocol::Tcp),
+            &NEVER,
+        )
+        .await?;
+    scheduler.socket_connect(&socket, address, &NEVER).await?;
+    let (result, buffer) = scheduler.socket_write(&socket, vec![42], &NEVER).await;
     if result? != 1 {
         return Err(io::Error::from(io::ErrorKind::WriteZero));
     }
-    let (result, buffer) = scheduler.io_read(&socket, buffer, &NEVER).await;
+    let (result, buffer) = scheduler.socket_read(&socket, buffer, &NEVER).await;
     if result? != 1 {
         return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
     }

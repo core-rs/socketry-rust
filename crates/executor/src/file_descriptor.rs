@@ -8,28 +8,28 @@ use std::{fs::File, sync::Arc};
 /// The backend privately retains the file while an operation uses it. Dropping an operation future does not establish completion; request cancellation and await the operation before explicitly closing the file. Ordinary handle destruction releases ownership without waiting or reporting close errors.
 ///
 /// ```compile_fail
-/// use socketry_executor::FileHandle;
-/// fn duplicate(file: &FileHandle) -> FileHandle {
+/// use socketry_executor::FileDescriptor;
+/// fn duplicate(file: &FileDescriptor) -> FileDescriptor {
 ///     file.clone() // Cloning this reference cannot produce another owned handle.
 /// }
 /// ```
 #[derive(Debug)]
-pub struct FileHandle(pub(crate) Arc<File>);
+pub struct FileDescriptor(pub(crate) Arc<File>);
 
-impl From<File> for FileHandle {
+impl From<File> for FileDescriptor {
     fn from(file: File) -> Self {
         Self(Arc::new(file))
     }
 }
 
-impl AsRef<File> for FileHandle {
+impl AsRef<File> for FileDescriptor {
     fn as_ref(&self) -> &File {
         &self.0
     }
 }
 
 #[cfg(any(feature = "native", feature = "tokio"))]
-impl FileHandle {
+impl FileDescriptor {
     pub(crate) fn retain(&self) -> Arc<File> {
         Arc::clone(&self.0)
     }

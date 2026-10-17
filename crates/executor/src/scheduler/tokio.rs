@@ -19,7 +19,7 @@ use crate::{
     Blocking, BlockingError, BlockingOptions, BlockingTask, Cancellation, FileOptions, IoBuf,
     IoBufMut, OperationResult, SocketRegistration, Spawn, SpawnError, TaskError,
 };
-use crate::{FileHandle, SyncMode};
+use crate::{FileDescriptor, SyncMode};
 use ::tokio::runtime::Handle;
 use ::tokio::task::{AbortHandle, JoinHandle};
 use event_listener::Event;
@@ -38,6 +38,33 @@ use std::time::Instant;
 
 thread_local! {
     static CURRENT_SCHEDULER: RefCell<Weak<Shared>> = const { RefCell::new(Weak::new()) };
+}
+
+mod socket_descriptor;
+pub use socket_descriptor::SocketDescriptor;
+
+async fn accept_with(
+    socket: &SocketDescriptor,
+    runtime: &Handle,
+    cancellation: &Cancellation,
+    accept: impl FnMut(&socket2::Socket) -> io::Result<(socket2::Socket, socket2::SockAddr)> + Send,
+    register: impl FnOnce(&Handle, socket2::Socket) -> io::Result<SocketDescriptor>,
+) -> OperationResult<(SocketDescriptor, SocketAddr)> {
+    let (accepted, address) =
+        cancellable(cancellation, socket.io(Interest::Readable, accept)).await?;
+    register_accepted(runtime, accepted, address, register).map_err(Into::into)
+}
+
+fn register_accepted(
+    runtime: &Handle,
+    accepted: socket2::Socket,
+    address: socket2::SockAddr,
+    register: impl FnOnce(&Handle, socket2::Socket) -> io::Result<SocketDescriptor>,
+) -> io::Result<(SocketDescriptor, SocketAddr)> {
+    Ok((
+        register(runtime, accepted)?,
+        crate::scheduler::socket_io::address(address),
+    ))
 }
 
 struct SchedulerScope(Weak<Shared>);
@@ -187,67 +214,6 @@ impl Shared {
     }
 }
 
-fn register_socket_with(
-    runtime: &Handle,
-    socket: TcpStream,
-    set_nonblocking: impl FnOnce(&TcpStream) -> io::Result<()>,
-    convert: impl FnOnce(TcpStream) -> io::Result<::tokio::net::TcpStream>,
-) -> io::Result<Socket> {
-    set_nonblocking(&socket)?;
-    let _scope = runtime.enter();
-    Ok(Socket {
-        inner: Arc::new(convert(socket)?),
-        runtime: runtime.id(),
-    })
-}
-
-fn register_listener_with(
-    runtime: &Handle,
-    listener: TcpListener,
-    set_nonblocking: impl FnOnce(&TcpListener) -> io::Result<()>,
-    convert: impl FnOnce(TcpListener) -> io::Result<::tokio::net::TcpListener>,
-) -> io::Result<Listener> {
-    set_nonblocking(&listener)?;
-    let _scope = runtime.enter();
-    Ok(Listener {
-        inner: convert(listener)?,
-        runtime: runtime.id(),
-    })
-}
-
-async fn connect_with<FutureType>(
-    runtime: Handle,
-    runtime_identifier: ::tokio::runtime::Id,
-    future: FutureType,
-) -> io::Result<Socket>
-where
-    FutureType: Future<Output = io::Result<::tokio::net::TcpStream>>,
-{
-    let inner = InRuntime { runtime, future }.await?;
-    Ok(Socket {
-        inner: Arc::new(inner),
-        runtime: runtime_identifier,
-    })
-}
-
-async fn accept_with<FutureType>(
-    runtime: Handle,
-    runtime_identifier: ::tokio::runtime::Id,
-    future: FutureType,
-) -> io::Result<(Socket, SocketAddr)>
-where
-    FutureType: Future<Output = io::Result<(::tokio::net::TcpStream, SocketAddr)>>,
-{
-    let (inner, address) = InRuntime { runtime, future }.await?;
-    Ok((
-        Socket {
-            inner: Arc::new(inner),
-            runtime: runtime_identifier,
-        },
-        address,
-    ))
-}
-
 struct Completion {
     scheduler: Weak<Shared>,
     identifier: u64,
@@ -300,6 +266,7 @@ fn abort_if_cancelled(cancelled: bool, abort: impl FnOnce()) {
     }
 }
 
+#[cfg(test)]
 async fn read_with<Read, Readable, ReadableFuture>(
     buffer: &mut [u8],
     mut read: Read,
@@ -323,6 +290,7 @@ where
     }
 }
 
+#[cfg(test)]
 async fn write_with<Write, Writable, WritableFuture>(
     buffer: &[u8],
     mut write: Write,
@@ -541,33 +509,6 @@ fn assert_outside_scheduler(shared: &Arc<Shared>) {
     );
 }
 
-/// A Tokio socket registered with the adapter's runtime.
-#[derive(Clone)]
-pub struct Socket {
-    inner: Arc<::tokio::net::TcpStream>,
-    runtime: ::tokio::runtime::Id,
-}
-
-impl Socket {
-    pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.inner.local_addr()
-    }
-    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        self.inner.peer_addr()
-    }
-}
-
-pub struct Listener {
-    inner: ::tokio::net::TcpListener,
-    runtime: ::tokio::runtime::Id,
-}
-
-impl Listener {
-    pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.inner.local_addr()
-    }
-}
-
 pin_project! {
     struct InRuntime<FutureType> {
         runtime: Handle,
@@ -585,144 +526,208 @@ impl<FutureType: Future> Future for InRuntime<FutureType> {
 }
 
 impl SocketRegistration for SchedulerHandle {
-    fn register_socket(&self, socket: TcpStream) -> io::Result<Socket> {
+    fn register_socket(&self, socket: TcpStream) -> io::Result<SocketDescriptor> {
         self.shared.check_open()?;
-        register_socket_with(
-            &self.shared.runtime,
-            socket,
-            |socket| socket.set_nonblocking(true),
-            ::tokio::net::TcpStream::from_std,
-        )
+        SocketDescriptor::new(&self.shared.runtime, socket.into())
     }
 
-    fn register_listener(&self, listener: TcpListener) -> io::Result<Listener> {
+    fn register_listener(&self, listener: TcpListener) -> io::Result<SocketDescriptor> {
         self.shared.check_open()?;
-        register_listener_with(
-            &self.shared.runtime,
-            listener,
-            |listener| listener.set_nonblocking(true),
-            ::tokio::net::TcpListener::from_std,
-        )
+        SocketDescriptor::new(&self.shared.runtime, listener.into())
     }
 }
 impl SocketOperations for SchedulerHandle {
-    type Socket = Socket;
-    type Listener = Listener;
-    async fn socket_listen(
+    type Socket = SocketDescriptor;
+
+    async fn socket_open(
         &self,
-        address: SocketAddr,
+        domain: crate::SocketDomain,
+        kind: crate::SocketType,
+        protocol: Option<crate::SocketProtocol>,
         cancellation: &Cancellation,
-    ) -> OperationResult<Listener> {
+    ) -> OperationResult<Self::Socket> {
         cancellation.check()?;
         self.shared.check_open()?;
-        self.register_listener(TcpListener::bind(address)?)
-            .map_err(Into::into)
+        crate::scheduler::socket_io::open_descriptor(
+            domain,
+            kind,
+            protocol,
+            crate::scheduler::socket_io::open,
+            |socket| SocketDescriptor::new(&self.shared.runtime, socket),
+        )
     }
-    fn listener_addr(&self, listener: &Listener) -> io::Result<SocketAddr> {
-        self.check_runtime(listener.runtime)?;
-        listener.local_addr()
-    }
-    fn socket_local_addr(&self, socket: &Socket) -> io::Result<SocketAddr> {
-        self.check_runtime(socket.runtime)?;
-        socket.local_addr()
-    }
-    fn socket_peer_addr(&self, socket: &Socket) -> io::Result<SocketAddr> {
-        self.check_runtime(socket.runtime)?;
-        socket.peer_addr()
-    }
-    async fn connect(
+
+    async fn socket_bind(
         &self,
+        socket: &Self::Socket,
         address: SocketAddr,
         cancellation: &Cancellation,
-    ) -> OperationResult<Socket> {
-        self.shared.check_open()?;
-        cancellable(
-            cancellation,
-            connect_with(
-                self.shared.runtime.clone(),
-                self.shared.runtime.id(),
-                ::tokio::net::TcpStream::connect(address),
-            ),
-        )
-        .await
+    ) -> OperationResult<()> {
+        self.check_runtime(socket.runtime())?;
+        cancellation.check()?;
+        socket.get_ref().bind(&address.into())?;
+        Ok(())
     }
-    async fn accept(
+
+    async fn socket_listen(
         &self,
-        listener: &Listener,
+        socket: &Self::Socket,
+        backlog: i32,
         cancellation: &Cancellation,
-    ) -> OperationResult<(Socket, SocketAddr)> {
-        self.check_runtime(listener.runtime)?;
-        cancellable(
-            cancellation,
-            accept_with(
-                self.shared.runtime.clone(),
-                listener.runtime,
-                listener.inner.accept(),
+    ) -> OperationResult<()> {
+        self.check_runtime(socket.runtime())?;
+        cancellation.check()?;
+        socket.get_ref().listen(backlog)?;
+        Ok(())
+    }
+
+    fn socket_local_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+        self.check_runtime(socket.runtime())?;
+        socket.local_addr()
+    }
+
+    fn socket_peer_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+        self.check_runtime(socket.runtime())?;
+        socket.peer_addr()
+    }
+
+    async fn socket_connect(
+        &self,
+        socket: &Self::Socket,
+        address: SocketAddr,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.check_runtime(socket.runtime())?;
+        cancellation.check()?;
+        let result = socket.get_ref().connect(&address.into());
+        crate::scheduler::socket_io::connect_result(
+            result,
+            cancellable(
+                cancellation,
+                socket.io(Interest::Writable, crate::scheduler::socket_io::connected),
             ),
         )
         .await
     }
-    async fn io_read<B: IoBufMut>(
+
+    async fn socket_accept(
         &self,
-        socket: &Socket,
+        socket: &Self::Socket,
+        cancellation: &Cancellation,
+    ) -> OperationResult<(Self::Socket, SocketAddr)> {
+        self.check_runtime(socket.runtime())?;
+        accept_with(
+            socket,
+            &self.shared.runtime,
+            cancellation,
+            |socket| socket.accept(),
+            Self::Socket::new,
+        )
+        .await
+    }
+
+    async fn socket_read<B: IoBufMut>(
+        &self,
+        socket: &Self::Socket,
         mut buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        if let Err(error) = self.check_runtime(socket.runtime) {
+        if let Err(error) = self.check_runtime(socket.runtime()) {
             return (Err(error.into()), buffer);
         }
         let result = cancellable(cancellation, async {
-            if buffer.as_ref().is_empty() {
-                return Ok(0);
-            }
-            read_with(
-                buffer.as_mut(),
-                |buffer| socket.inner.try_read(buffer),
-                || socket.inner.readable(),
-            )
-            .await
+            socket
+                .io(Interest::Readable, |socket| {
+                    crate::scheduler::socket_io::recv(socket, buffer.as_mut())
+                })
+                .await
         })
         .await;
         (result, buffer)
     }
-    async fn io_write<B: IoBuf>(
+
+    async fn socket_write<B: IoBuf>(
         &self,
-        socket: &Socket,
+        socket: &Self::Socket,
         buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        if let Err(error) = self.check_runtime(socket.runtime) {
+        if let Err(error) = self.check_runtime(socket.runtime()) {
             return (Err(error.into()), buffer);
         }
-        let bytes = buffer.as_ref();
-        let result = cancellable(cancellation, async {
-            if bytes.is_empty() {
-                return Ok(0);
-            }
-            write_with(
-                bytes,
-                |buffer| socket.inner.try_write(buffer),
-                || socket.inner.writable(),
-            )
-            .await
-        })
+        let send_buffer = crate::scheduler::socket_io::SendBuffer::new(&buffer);
+        let result = cancellable(
+            cancellation,
+            socket.io(Interest::Writable, move |socket| send_buffer.send(socket)),
+        )
         .await;
         (result, buffer)
     }
-    async fn io_wait(
+
+    async fn socket_wait(
         &self,
-        socket: &Socket,
+        socket: &Self::Socket,
         interest: Interest,
         cancellation: &Cancellation,
     ) -> OperationResult<()> {
-        self.check_runtime(socket.runtime)?;
-        cancellable(cancellation, async {
-            match interest {
-                Interest::Readable => socket.inner.readable().await,
-                Interest::Writable => socket.inner.writable().await,
-            }
-        })
-        .await
+        self.check_runtime(socket.runtime())?;
+        cancellable(cancellation, socket.wait(interest)).await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod socket_accept_tests {
+    use super::*;
+
+    #[test]
+    fn accepted_socket_registration_errors_are_returned() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let accepted =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        let address = socket2::SockAddr::from("127.0.0.1:1".parse::<SocketAddr>().unwrap());
+
+        assert_eq!(
+            register_accepted(runtime.handle(), accepted, address, |_, _| {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            })
+            .err()
+            .unwrap()
+            .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn accept_errors_are_returned() {
+        use std::io::Write;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (socket, _) = listener.accept().unwrap();
+        let mut peer = peer;
+        peer.write_all(b"ready").unwrap();
+        let socket = SocketDescriptor::new(runtime.handle(), socket.into()).unwrap();
+
+        let result = runtime.block_on(accept_with(
+            &socket,
+            runtime.handle(),
+            &Cancellation::never(),
+            |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            |_, _| unreachable!("accept errors before descriptor registration"),
+        ));
+
+        assert_eq!(
+            result.err().unwrap().kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 }
 
@@ -754,7 +759,7 @@ impl FileAllocate for SchedulerHandle {
 }
 
 impl File for SchedulerHandle {
-    type File = FileHandle;
+    type File = FileDescriptor;
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
         self.shared.check_open()?;
         super::file_close::close(&self.shared.cleanup, file).await
@@ -840,7 +845,7 @@ impl File for SchedulerHandle {
                 .runtime
                 .spawn_blocking(move || {
                     super::blocking::run(&cancellation, || {
-                        options.open(&path).map(FileHandle::from)
+                        options.open(&path).map(FileDescriptor::from)
                     })
                 })
                 .await,
@@ -997,22 +1002,41 @@ impl SocketRegistration for Scheduler {
     fn register_socket(&self, socket: TcpStream) -> io::Result<Self::Socket> {
         self.handle.register_socket(socket)
     }
-    fn register_listener(&self, listener: TcpListener) -> io::Result<Self::Listener> {
+    fn register_listener(&self, listener: TcpListener) -> io::Result<Self::Socket> {
         self.handle.register_listener(listener)
     }
 }
 impl SocketOperations for Scheduler {
     type Socket = <SchedulerHandle as SocketOperations>::Socket;
-    type Listener = <SchedulerHandle as SocketOperations>::Listener;
-    async fn socket_listen(
+
+    async fn socket_open(
         &self,
+        domain: crate::SocketDomain,
+        kind: crate::SocketType,
+        protocol: Option<crate::SocketProtocol>,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Socket> {
+        self.handle
+            .socket_open(domain, kind, protocol, cancellation)
+            .await
+    }
+    async fn socket_bind(
+        &self,
+        socket: &Self::Socket,
         address: SocketAddr,
         cancellation: &Cancellation,
-    ) -> OperationResult<Self::Listener> {
-        self.handle.socket_listen(address, cancellation).await
+    ) -> OperationResult<()> {
+        self.handle.socket_bind(socket, address, cancellation).await
     }
-    fn listener_addr(&self, listener: &Self::Listener) -> io::Result<SocketAddr> {
-        self.handle.listener_addr(listener)
+    async fn socket_listen(
+        &self,
+        socket: &Self::Socket,
+        backlog: i32,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.handle
+            .socket_listen(socket, backlog, cancellation)
+            .await
     }
     fn socket_local_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
         self.handle.socket_local_addr(socket)
@@ -1020,43 +1044,48 @@ impl SocketOperations for Scheduler {
     fn socket_peer_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
         self.handle.socket_peer_addr(socket)
     }
-    async fn connect(
+    async fn socket_connect(
         &self,
+        socket: &Self::Socket,
         address: SocketAddr,
         cancellation: &Cancellation,
-    ) -> OperationResult<Self::Socket> {
-        self.handle.connect(address, cancellation).await
+    ) -> OperationResult<()> {
+        self.handle
+            .socket_connect(socket, address, cancellation)
+            .await
     }
-    async fn accept(
+    async fn socket_accept(
         &self,
-        listener: &Self::Listener,
+        socket: &Self::Socket,
         cancellation: &Cancellation,
     ) -> OperationResult<(Self::Socket, SocketAddr)> {
-        self.handle.accept(listener, cancellation).await
+        self.handle.socket_accept(socket, cancellation).await
     }
-    async fn io_read<B: IoBufMut>(
+    async fn socket_read<B: IoBufMut>(
         &self,
         socket: &Self::Socket,
         buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        self.handle.io_read(socket, buffer, cancellation).await
+        self.handle.socket_read(socket, buffer, cancellation).await
     }
-    async fn io_write<B: IoBuf>(
+    async fn socket_write<B: IoBuf>(
         &self,
         socket: &Self::Socket,
         buffer: B,
         cancellation: &Cancellation,
     ) -> BufferResult<B> {
-        self.handle.io_write(socket, buffer, cancellation).await
+        self.handle.socket_write(socket, buffer, cancellation).await
     }
-    async fn io_wait(
+    async fn socket_wait(
         &self,
         socket: &Self::Socket,
         interest: Interest,
         cancellation: &Cancellation,
     ) -> OperationResult<()> {
-        self.handle.io_wait(socket, interest, cancellation).await
+        self.handle
+            .socket_wait(socket, interest, cancellation)
+            .await
     }
 }
 #[cfg(target_os = "linux")]

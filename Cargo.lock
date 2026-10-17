@@ -1008,6 +1008,7 @@ dependencies = [
  "pin-project-lite",
  "polling",
  "signal-hook",
+ "socket2",
  "tempfile",
  "tokio",
  "windows-sys 0.61.2",

@@ -2,7 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::*;
-use crate::BlockingOptions;
+use crate::{BlockingOptions, TaskError};
+use futures_channel::oneshot;
 use futures_lite::future::{block_on, poll_once};
 use std::{panic::AssertUnwindSafe, sync::Arc};
 

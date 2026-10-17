@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add required `Socket::socket_shutdown`, `socket_shutdown_submit`, `socket_close`, and `socket_close_submit` across native, Tokio, io_uring, and simulated sockets. Directional shutdown borrows the descriptor; close consumes exclusive ownership. Accepted cleanup shares bounded admission and graceful draining with file close. Add a commented half-close example and conformance/lifetime tests. External `Socket` implementations must supply all four operations.
+
 - Add required `File::file_close` and `file_close_submit`, owned non-`Clone` native/Tokio `FileDescriptor` resources, bounded cleanup admission, and graceful cleanup draining. Finish outstanding operations before explicit close; abandoned backend use causes a panic rather than implicit cancellation or joining. Add a commented cancellation/close example and release io_uring file references before completion wakeups. External `File` implementations must add both methods; concrete callers using `Arc<std::fs::File>` must migrate to `FileDescriptor`.
 
 - Add optional `FileAllocate` with `AllocationMode::Extend`/`KeepSize`, cancellation, and cursor preservation. Linux native and Tokio backends reserve space with `fallocate`; io\_uring uses native requests when supported. Other targets omit the capability, and filesystem errors remain observable.

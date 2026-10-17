@@ -284,6 +284,22 @@ cargo run -p socketry-executor --example file_close --features tokio
 
 Both close forms initially use a dedicated bounded cleanup pool, separate from arbitrary `spawn_blocking` closures. Each pool uses the configured `BlockingOptions` limits and starts workers lazily. Native io_uring close SQEs are a later optimization.
 
+### Socket shutdown and close
+
+`socket_shutdown(&socket, std::net::Shutdown::Write).await` finishes the local sending direction while keeping the socket available to receive a response. Use `Read` or `Both` for the other shutdown modes. Await preceding writes first. Shutdown borrows the descriptor; `socket_close(socket).await` consumes it and reports OS completion. Neither operation accepts cancellation. Repeated shutdown and later I/O follow platform-specific behavior, and local completion does not confirm remote application receipt.
+
+Both have exceptional `_submit` forms which await only bounded admission. Accepted work survives abandonment and shares the dedicated cleanup pool and graceful shutdown draining used for file close. Execution errors are discarded by `_submit`. Await ordinary shutdown before explicitly closing the same socket: submission alone does not establish completion, and retained backend use causes close to panic. No per-descriptor operation registry or implicit cancellation/join is added.
+
+Socket descriptors remain non-`Clone`; private references retain the registration for submitted shutdown and io_uring work. Deregistration and close execute on the cleanup worker. On Windows, the exclusively owned socket is made blocking there before close to accommodate positive linger. Ordinary `Drop` remains best-effort cleanup without joining backend work.
+
+The [commented half-close example](examples/socket_shutdown.rs) demonstrates a request followed by write shutdown, a response in the opposite direction, and explicit close after completion:
+
+```sh
+cargo run -p socketry-executor --example socket_shutdown --features tokio
+```
+
+External `Socket` implementations must provide `socket_shutdown`, `socket_shutdown_submit`, `socket_close`, and `socket_close_submit`.
+
 ### Cancellation and shutdown
 
 Pre-cancelled file/socket operations do not start. Readiness waits stop on cancellation. io\_uring requests cancellation but waits for the original completion before returning the buffer; successful progress wins a racing cancellation. Blocking jobs check cancellation again on their pool worker, before execution; a running syscall returns its actual result.

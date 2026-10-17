@@ -31,7 +31,11 @@ mod file_allocate;
 #[path = "../examples/interface_probe/tests/file_close.rs"]
 mod file_close;
 
+#[path = "../examples/interface_probe/tests/socket_lifecycle.rs"]
+mod socket_lifecycle;
+
 async fn resources<S: File + Socket>(scheduler: &S, root: &Path) {
+    socket_lifecycle::check(scheduler).await;
     file_close::check(scheduler, root).await;
     stateful_file::check(scheduler, root).await;
     file_sync::check(scheduler, root).await;
@@ -504,6 +508,7 @@ fn native_resources() {
         let fourth = tempfile::tempdir().unwrap();
         let handle = scheduler.handle();
         scheduler.block_on(file_close::check(handle.selector().unwrap(), fourth.path()));
+        scheduler.block_on(socket_lifecycle::check(handle.selector().unwrap()));
     }
 }
 

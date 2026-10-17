@@ -330,6 +330,49 @@ impl File for Scheduler {
 
 impl Socket for Scheduler {
     type Socket = SocketDescriptor;
+    async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
+        drop(socket);
+        Ok(())
+    }
+
+    async fn socket_close_submit(&self, socket: Self::Socket) -> io::Result<()> {
+        self.socket_close(socket).await
+    }
+
+    async fn socket_shutdown(
+        &self,
+        socket: &Self::Socket,
+        how: std::net::Shutdown,
+    ) -> io::Result<()> {
+        let (input, output) = match &*socket.state.lock().unwrap() {
+            SocketState::Connected(connection) => (
+                Arc::clone(&connection.input),
+                Arc::clone(&connection.output),
+            ),
+            _ => return Err(io::Error::from(io::ErrorKind::NotConnected)),
+        };
+        if matches!(how, std::net::Shutdown::Read | std::net::Shutdown::Both) {
+            let mut state = input.state.lock().unwrap();
+            state.reader_closed = true;
+            state.bytes.clear();
+        }
+        if matches!(how, std::net::Shutdown::Write | std::net::Shutdown::Both) {
+            output.state.lock().unwrap().writer_closed = true;
+        }
+        input.ready.notify(usize::MAX);
+        output.ready.notify(usize::MAX);
+        Ok(())
+    }
+
+    async fn socket_shutdown_submit(
+        &self,
+        socket: &Self::Socket,
+        how: std::net::Shutdown,
+    ) -> io::Result<()> {
+        // This backend completes immediately, but submission still reports admission rather than the operation's result.
+        let _ = self.socket_shutdown(socket, how).await;
+        Ok(())
+    }
 
     async fn socket_open(
         &self,
@@ -559,7 +602,8 @@ impl Socket for Scheduler {
                         let ready = input.ready.listen();
                         {
                             let state = input.state.lock().unwrap();
-                            if !state.bytes.is_empty() || state.writer_closed {
+                            if !state.bytes.is_empty() || state.writer_closed || state.reader_closed
+                            {
                                 return Ok(());
                             }
                         }
@@ -605,7 +649,11 @@ impl Socket for Scheduler {
                     .len()
                     .min(self.read_limit)
                     .min(state.bytes.len());
-                if count > 0 || buffer.as_ref().is_empty() || state.writer_closed {
+                if count > 0
+                    || buffer.as_ref().is_empty()
+                    || state.writer_closed
+                    || state.reader_closed
+                {
                     for byte in &mut buffer.as_mut()[..count] {
                         *byte = state.bytes.pop_front().unwrap();
                     }
@@ -639,7 +687,7 @@ impl Socket for Scheduler {
         let count = buffer.as_ref().len().min(self.write_limit);
         {
             let mut state = output.state.lock().unwrap();
-            if state.reader_closed {
+            if state.reader_closed || state.writer_closed {
                 return (
                     Err(io::Error::from(io::ErrorKind::BrokenPipe).into()),
                     buffer,

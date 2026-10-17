@@ -539,6 +539,40 @@ impl SocketRegistration for SchedulerHandle {
 impl SocketOperations for SchedulerHandle {
     type Socket = SocketDescriptor;
 
+    async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
+        self.check_runtime(socket.runtime())?;
+        crate::scheduler::cleanup::run(&self.shared.cleanup, socket.into_close()).await
+    }
+
+    async fn socket_close_submit(&self, socket: Self::Socket) -> io::Result<()> {
+        self.check_runtime(socket.runtime())?;
+        crate::scheduler::cleanup::submit_only(&self.shared.cleanup, socket.into_close()).await
+    }
+
+    async fn socket_shutdown(
+        &self,
+        socket: &Self::Socket,
+        how: std::net::Shutdown,
+    ) -> io::Result<()> {
+        self.check_runtime(socket.runtime())?;
+        let socket = socket.retain();
+        crate::scheduler::cleanup::run(&self.shared.cleanup, move || socket.get_ref().shutdown(how))
+            .await
+    }
+
+    async fn socket_shutdown_submit(
+        &self,
+        socket: &Self::Socket,
+        how: std::net::Shutdown,
+    ) -> io::Result<()> {
+        self.check_runtime(socket.runtime())?;
+        let socket = socket.retain();
+        crate::scheduler::cleanup::submit_only(&self.shared.cleanup, move || {
+            socket.get_ref().shutdown(how)
+        })
+        .await
+    }
+
     async fn socket_open(
         &self,
         domain: crate::SocketDomain,
@@ -1008,6 +1042,30 @@ impl SocketRegistration for Scheduler {
 }
 impl SocketOperations for Scheduler {
     type Socket = <SchedulerHandle as SocketOperations>::Socket;
+
+    async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
+        self.handle.socket_close(socket).await
+    }
+
+    async fn socket_close_submit(&self, socket: Self::Socket) -> io::Result<()> {
+        self.handle.socket_close_submit(socket).await
+    }
+
+    async fn socket_shutdown(
+        &self,
+        socket: &Self::Socket,
+        how: std::net::Shutdown,
+    ) -> io::Result<()> {
+        self.handle.socket_shutdown(socket, how).await
+    }
+
+    async fn socket_shutdown_submit(
+        &self,
+        socket: &Self::Socket,
+        how: std::net::Shutdown,
+    ) -> io::Result<()> {
+        self.handle.socket_shutdown_submit(socket, how).await
+    }
 
     async fn socket_open(
         &self,

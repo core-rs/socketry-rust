@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use crate::Interest;
-use std::{io, net::SocketAddr};
+use std::{io, net::SocketAddr, sync::Arc};
 use tokio::runtime::{Handle, Id};
 
 #[cfg(unix)]
@@ -13,9 +13,9 @@ type RegisteredSocket = async_io::Async<socket2::Socket>;
 
 /// A nonblocking socket registered with the adapter's Tokio runtime.
 ///
-/// A descriptor can represent an unconnected, bound, listening, connected, or datagram socket. It is deliberately not `Clone`; operation futures borrow it for their duration.
+/// A descriptor can represent an unconnected, bound, listening, connected, or datagram socket. It is deliberately not `Clone`; operation futures borrow it, and accepted shutdown jobs privately retain its registration until completion. Explicit close consumes exclusive ownership.
 pub struct SocketDescriptor {
-    inner: RegisteredSocket,
+    inner: Arc<RegisteredSocket>,
     runtime: Id,
 }
 
@@ -51,9 +51,33 @@ impl SocketDescriptor {
         let inner = register(runtime, socket)?;
 
         Ok(Self {
-            inner,
+            inner: Arc::new(inner),
             runtime: runtime.id(),
         })
+    }
+
+    pub(super) fn retain(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            runtime: self.runtime,
+        }
+    }
+
+    pub(super) fn into_close(self) -> impl FnOnce() -> io::Result<()> + Send + 'static {
+        let inner = Arc::try_unwrap(self.inner)
+            .expect("cannot close a socket with outstanding operations; await them first");
+        move || {
+            #[cfg(unix)]
+            {
+                crate::scheduler::socket_io::close(inner.into_inner())
+            }
+            #[cfg(windows)]
+            {
+                inner
+                    .into_inner()
+                    .and_then(crate::scheduler::socket_io::close)
+            }
+        }
     }
 
     pub(super) fn runtime(&self) -> Id {
@@ -157,6 +181,18 @@ mod tests {
 
     fn socket() -> socket2::Socket {
         socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap()
+    }
+
+    #[test]
+    fn explicit_close_rejects_retained_socket_ownership() {
+        let runtime = runtime();
+        let descriptor = SocketDescriptor::new(runtime.handle(), socket()).unwrap();
+        let retained = descriptor.retain();
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| descriptor.into_close()));
+        assert!(result.is_err());
+        assert!(retained.get_ref().set_nonblocking(true).is_ok());
+        retained.into_close()().unwrap();
     }
 
     #[test]

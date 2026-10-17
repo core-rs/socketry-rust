@@ -89,6 +89,56 @@ impl SocketRegistration for SchedulerHandle {
 impl Socket for SchedulerHandle {
     type Socket = <DefaultSelector as Socket>::Socket;
 
+    async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
+        check_open(
+            self.shared
+                .closed
+                .load(std::sync::atomic::Ordering::Acquire),
+        )?;
+        crate::scheduler::cleanup::run(&self.shared.cleanup, socket.into_close()).await
+    }
+
+    async fn socket_close_submit(&self, socket: Self::Socket) -> io::Result<()> {
+        check_open(
+            self.shared
+                .closed
+                .load(std::sync::atomic::Ordering::Acquire),
+        )?;
+        crate::scheduler::cleanup::submit_only(&self.shared.cleanup, socket.into_close()).await
+    }
+
+    async fn socket_shutdown(
+        &self,
+        socket: &Self::Socket,
+        how: std::net::Shutdown,
+    ) -> io::Result<()> {
+        check_open(
+            self.shared
+                .closed
+                .load(std::sync::atomic::Ordering::Acquire),
+        )?;
+        let socket = socket.retain();
+        crate::scheduler::cleanup::run(&self.shared.cleanup, move || socket.get_ref().shutdown(how))
+            .await
+    }
+
+    async fn socket_shutdown_submit(
+        &self,
+        socket: &Self::Socket,
+        how: std::net::Shutdown,
+    ) -> io::Result<()> {
+        check_open(
+            self.shared
+                .closed
+                .load(std::sync::atomic::Ordering::Acquire),
+        )?;
+        let socket = socket.retain();
+        crate::scheduler::cleanup::submit_only(&self.shared.cleanup, move || {
+            socket.get_ref().shutdown(how)
+        })
+        .await
+    }
+
     async fn socket_open(
         &self,
         domain: crate::SocketDomain,
@@ -331,6 +381,30 @@ impl SocketRegistration for Scheduler {
 }
 impl Socket for Scheduler {
     type Socket = <SchedulerHandle as Socket>::Socket;
+
+    async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
+        self.handle.socket_close(socket).await
+    }
+
+    async fn socket_close_submit(&self, socket: Self::Socket) -> io::Result<()> {
+        self.handle.socket_close_submit(socket).await
+    }
+
+    async fn socket_shutdown(
+        &self,
+        socket: &Self::Socket,
+        how: std::net::Shutdown,
+    ) -> io::Result<()> {
+        self.handle.socket_shutdown(socket, how).await
+    }
+
+    async fn socket_shutdown_submit(
+        &self,
+        socket: &Self::Socket,
+        how: std::net::Shutdown,
+    ) -> io::Result<()> {
+        self.handle.socket_shutdown_submit(socket, how).await
+    }
 
     async fn socket_open(
         &self,

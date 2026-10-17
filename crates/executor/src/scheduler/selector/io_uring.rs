@@ -673,6 +673,42 @@ impl SocketRegistration for Selector {
 impl SocketOperations for Selector {
     type Socket = SocketDescriptor;
 
+    async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
+        self.check_open()?;
+        crate::scheduler::cleanup::run(&self.controller.cleanup, socket.into_close()).await
+    }
+
+    async fn socket_close_submit(&self, socket: Self::Socket) -> io::Result<()> {
+        self.check_open()?;
+        crate::scheduler::cleanup::submit_only(&self.controller.cleanup, socket.into_close()).await
+    }
+
+    async fn socket_shutdown(
+        &self,
+        socket: &Self::Socket,
+        how: std::net::Shutdown,
+    ) -> io::Result<()> {
+        self.check_open()?;
+        let socket = socket.retain();
+        crate::scheduler::cleanup::run(&self.controller.cleanup, move || {
+            socket.get_ref().shutdown(how)
+        })
+        .await
+    }
+
+    async fn socket_shutdown_submit(
+        &self,
+        socket: &Self::Socket,
+        how: std::net::Shutdown,
+    ) -> io::Result<()> {
+        self.check_open()?;
+        let socket = socket.retain();
+        crate::scheduler::cleanup::submit_only(&self.controller.cleanup, move || {
+            socket.get_ref().shutdown(how)
+        })
+        .await
+    }
+
     async fn socket_open(
         &self,
         domain: crate::SocketDomain,

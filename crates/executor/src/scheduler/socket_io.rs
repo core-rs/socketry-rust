@@ -8,6 +8,42 @@ use socket2::{Domain, Protocol, Socket, Type};
 use std::future::Future;
 use std::{io, marker::PhantomData, net::SocketAddr, slice};
 
+// Called only on the cleanup pool after exclusive ownership and deregistration. Close is never retried on Unix: the descriptor may already have been released on error.
+pub(crate) fn close(socket: Socket) -> io::Result<()> {
+    #[cfg(unix)]
+    let result = {
+        use std::os::fd::IntoRawFd;
+        // SAFETY: The socket is exclusively owned and deregistered, and transferring the raw descriptor prevents a second close in Drop.
+        unsafe { libc::close(socket.into_raw_fd()) }
+    };
+    #[cfg(windows)]
+    let result = {
+        use std::os::windows::io::IntoRawSocket;
+        // Winsock cannot close a nonblocking socket with positive linger reliably. The cleanup worker may block, and no operation or readiness registration still uses this socket.
+        socket.set_nonblocking(false)?;
+        // SAFETY: Ownership is transferred out of Socket; no other backend operation retains this socket, and Drop must not close it again.
+        unsafe {
+            windows_sys::Win32::Networking::WinSock::closesocket(socket.into_raw_socket() as _)
+        }
+    };
+    close_result(result)
+}
+
+fn close_result(result: i32) -> io::Result<()> {
+    if result == 0 {
+        Ok(())
+    } else {
+        #[cfg(unix)]
+        let error = io::Error::last_os_error();
+        #[cfg(windows)]
+        // SAFETY: WSAGetLastError reads the calling thread's most recent Winsock error.
+        let error = io::Error::from_raw_os_error(unsafe {
+            windows_sys::Win32::Networking::WinSock::WSAGetLastError()
+        });
+        Err(error)
+    }
+}
+
 pub(super) struct SendBuffer<'buffer> {
     pointer: *const u8,
     length: usize,
@@ -144,6 +180,12 @@ fn connected_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_close_consumes_socket_and_preserves_error_results() {
+        close(Socket::new(Domain::IPV4, Type::STREAM, None).unwrap()).unwrap();
+        assert!(close_result(-1).is_err());
+    }
 
     #[test]
     fn socket_creation_errors_are_returned() {

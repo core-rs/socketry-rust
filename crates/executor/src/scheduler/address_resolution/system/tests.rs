@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::*;
-use crate::{BlockingOptions, BlockingTask, OperationError};
+use crate::{BlockingOptions, BlockingTask, OperationError, SocketProtocol, SocketType};
 use futures_lite::future::{block_on, poll_once};
 use std::{
     sync::{
@@ -14,10 +14,19 @@ use std::{
 };
 
 static NEVER: Cancellation = Cancellation::never();
-const OPTIONS: AddressResolveOptions = AddressResolveOptions {
-    port: 80,
-    domain: None,
-};
+fn hints() -> AddressHints {
+    AddressHints {
+        socket_type: Some(SocketType::Stream),
+        ..AddressHints::default()
+    }
+}
+fn candidate() -> AddressInfo {
+    AddressInfo {
+        address: "127.0.0.1:80".parse().unwrap(),
+        socket_type: SocketType::Stream,
+        protocol: Some(SocketProtocol::Tcp),
+    }
+}
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn pool(capacity: usize) -> BlockingPool {
@@ -55,15 +64,16 @@ fn lazy_admission_and_queued_cancellation_do_not_lookup() {
     let calls = Arc::new(AtomicUsize::new(0));
     let lookup = {
         let calls = calls.clone();
-        move |_: &str, _: u16| {
+        move |_: Option<&str>, _: &str, _: AddressHints| {
             calls.fetch_add(1, Ordering::SeqCst);
             Ok(vec![])
         }
     };
     drop(resolve_with(
         &pool,
-        "example.test",
-        OPTIONS,
+        Some("example.test"),
+        AddressService::Port(80),
+        hints(),
         &NEVER,
         lookup.clone(),
     ));
@@ -71,8 +81,9 @@ fn lazy_admission_and_queued_cancellation_do_not_lookup() {
     let cancellation = Cancellation::new();
     let mut queued = Box::pin(resolve_with(
         &pool,
-        "example.test",
-        OPTIONS,
+        Some("example.test"),
+        AddressService::Port(80),
+        hints(),
         &cancellation,
         lookup.clone(),
     ));
@@ -86,12 +97,26 @@ fn lazy_admission_and_queued_cancellation_do_not_lookup() {
     ));
 
     let (running, gate) = occupy(&pool);
-    let mut abandoned = Box::pin(resolve_with(&pool, "example.test", OPTIONS, &NEVER, lookup));
+    let mut abandoned = Box::pin(resolve_with(
+        &pool,
+        Some("example.test"),
+        AddressService::Port(80),
+        hints(),
+        &NEVER,
+        lookup,
+    ));
     assert!(block_on(poll_once(&mut abandoned)).is_none());
     drop(abandoned);
     drop(gate);
     block_on(running).unwrap();
-    block_on(resolve(&pool, "127.0.0.1", OPTIONS, &NEVER)).unwrap();
+    block_on(resolve(
+        &pool,
+        Some("127.0.0.1"),
+        AddressService::Port(80),
+        hints(),
+        &NEVER,
+    ))
+    .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
@@ -106,18 +131,19 @@ fn running_lookup_preserves_success_and_failure_after_cancellation() {
         let cancellation = Cancellation::new();
         let mut lookup = Box::pin(resolve_with(
             &pool,
-            "example.test",
-            OPTIONS,
+            Some("example.test"),
+            AddressService::Port(80),
+            hints(),
             &cancellation,
-            move |name, port| {
+            move |name, service, _| {
                 started.send(()).unwrap();
                 released.recv_timeout(TIMEOUT).unwrap();
-                assert_eq!(name, "example.test");
-                assert_eq!(port, 80);
+                assert_eq!(name, Some("example.test"));
+                assert_eq!(service, "80");
                 if fail {
                     Err(io::Error::from(io::ErrorKind::PermissionDenied))
                 } else {
-                    Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])
+                    Ok(vec![candidate()])
                 }
             },
         ));
@@ -130,10 +156,7 @@ fn running_lookup_preserves_success_and_failure_after_cancellation() {
         if fail {
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
         } else {
-            assert_eq!(
-                result.unwrap(),
-                vec![SocketAddr::from(([127, 0, 0, 1], 80))]
-            );
+            assert_eq!(result.unwrap(), vec![candidate()]);
         }
     }
 }
@@ -142,19 +165,23 @@ fn running_lookup_preserves_success_and_failure_after_cancellation() {
 fn abandonment_keeps_owned_name_and_capacity_until_lookup_finishes() {
     let pool = pool(1);
     let name = String::from("example.test");
+    let service = String::from("http");
     let (started, starting) = mpsc::channel();
     let (release, released) = mpsc::channel();
     let (finished, finishing) = mpsc::channel();
     let gate = Gate(release);
     let mut lookup = Box::pin(resolve_with(
         &pool,
-        &name,
-        OPTIONS,
+        Some(&name),
+        AddressService::Name(&service),
+        hints(),
         &NEVER,
-        move |name, port| {
+        move |name, service, _| {
             started.send(()).unwrap();
             released.recv_timeout(TIMEOUT).unwrap();
-            finished.send((name.to_owned(), port)).unwrap();
+            finished
+                .send((name.unwrap().to_owned(), service.to_owned()))
+                .unwrap();
             Ok(vec![])
         },
     ));
@@ -162,12 +189,19 @@ fn abandonment_keeps_owned_name_and_capacity_until_lookup_finishes() {
     starting.recv_timeout(TIMEOUT).unwrap();
     drop(lookup);
     drop(name);
-    let mut next = Box::pin(resolve(&pool, "127.0.0.1", OPTIONS, &NEVER));
+    drop(service);
+    let mut next = Box::pin(resolve(
+        &pool,
+        Some("127.0.0.1"),
+        AddressService::Port(80),
+        hints(),
+        &NEVER,
+    ));
     assert!(block_on(poll_once(&mut next)).is_none());
     drop(gate);
     assert_eq!(
         finishing.recv_timeout(TIMEOUT).unwrap(),
-        ("example.test".to_owned(), 80)
+        ("example.test".to_owned(), "http".to_owned())
     );
     assert_eq!(block_on(next).unwrap().len(), 1);
 }
@@ -176,7 +210,13 @@ fn abandonment_keeps_owned_name_and_capacity_until_lookup_finishes() {
 fn shutdown_rejects_admission_and_discards_queued_lookups() {
     let pool = pool(2);
     let (running, gate) = occupy(&pool);
-    let mut queued = Box::pin(resolve(&pool, "127.0.0.1", OPTIONS, &NEVER));
+    let mut queued = Box::pin(resolve(
+        &pool,
+        Some("127.0.0.1"),
+        AddressService::Port(80),
+        hints(),
+        &NEVER,
+    ));
     assert!(block_on(poll_once(&mut queued)).is_none());
     pool.close();
     assert_eq!(
@@ -184,9 +224,15 @@ fn shutdown_rejects_admission_and_discards_queued_lookups() {
         io::ErrorKind::BrokenPipe
     );
     assert_eq!(
-        block_on(resolve(&pool, "127.0.0.1", OPTIONS, &NEVER))
-            .unwrap_err()
-            .kind(),
+        block_on(resolve(
+            &pool,
+            Some("127.0.0.1"),
+            AddressService::Port(80),
+            hints(),
+            &NEVER
+        ))
+        .unwrap_err()
+        .kind(),
         io::ErrorKind::BrokenPipe
     );
     drop(gate);
@@ -198,48 +244,75 @@ fn startup_failure_is_reported_and_worker_panics_resume_at_the_caller() {
     let mut broken = pool(1);
     broken.fail_start_at = Some(0);
     assert_eq!(
-        block_on(resolve(&broken, "127.0.0.1", OPTIONS, &NEVER))
-            .unwrap_err()
-            .to_string(),
+        block_on(resolve(
+            &broken,
+            Some("127.0.0.1"),
+            AddressService::Port(80),
+            hints(),
+            &NEVER
+        ))
+        .unwrap_err()
+        .to_string(),
         "injected thread startup failure"
     );
     let pool = pool(1);
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         block_on(resolve_with(
             &pool,
-            "example.test",
-            OPTIONS,
+            Some("example.test"),
+            AddressService::Port(80),
+            hints(),
             &NEVER,
-            |_, _| panic!("resolver panic"),
+            |_, _, _| panic!("resolver panic"),
         ))
     }))
     .unwrap_err();
     assert_eq!(panic.downcast_ref::<&str>(), Some(&"resolver panic"));
     assert_eq!(
-        block_on(resolve(&pool, "127.0.0.1", OPTIONS, &NEVER))
-            .unwrap()
-            .len(),
+        block_on(resolve(
+            &pool,
+            Some("127.0.0.1"),
+            AddressService::Port(80),
+            hints(),
+            &NEVER
+        ))
+        .unwrap()
+        .len(),
         1
     );
 }
 
 #[test]
-fn filtering_preserves_order_and_duplicates() {
+fn hints_reach_lookup_and_results_keep_order_and_duplicates() {
     let pool = pool(1);
-    let expected: Vec<SocketAddr> = ["127.0.0.2:80", "127.0.0.1:80", "127.0.0.2:80"]
-        .map(|address| address.parse().unwrap())
-        .into();
-    let mut input = expected.clone();
-    input.insert(1, "[::1]:80".parse().unwrap());
+    let expected = vec![
+        candidate(),
+        AddressInfo {
+            address: "[::1]:80".parse().unwrap(),
+            socket_type: SocketType::Other(12345),
+            protocol: Some(SocketProtocol::Other(12345)),
+        },
+        candidate(),
+    ];
+    let input = expected.clone();
+    let hints = AddressHints {
+        passive: true,
+        numeric_host: true,
+        address_configured: true,
+        ..hints()
+    };
     let result = block_on(resolve_with(
         &pool,
-        "example.test",
-        AddressResolveOptions {
-            domain: Some(SocketDomain::Ipv4),
-            ..OPTIONS
-        },
+        None,
+        AddressService::Name("http"),
+        hints,
         &NEVER,
-        move |_, _| Ok(input),
+        move |name, service, received| {
+            assert_eq!(name, None);
+            assert_eq!(service, "http");
+            assert_eq!(received, hints);
+            Ok(input)
+        },
     ))
     .unwrap();
     assert_eq!(result, expected);

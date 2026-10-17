@@ -3,8 +3,8 @@
 
 // `Socket`, `AddressResolution`, and `IoBuf` are traits: importing them makes their methods available.
 use socketry::{
-    AddressResolution, AddressResolveOptions, Cancellation, IoBuf, OperationResult, Scheduler,
-    Socket, SocketDomain, SocketProtocol, SocketType,
+    AddressHints, AddressResolution, AddressService, Cancellation, IoBuf, OperationResult,
+    Scheduler, Socket, SocketDomain, SocketType,
 };
 use std::io;
 
@@ -14,13 +14,15 @@ async fn echo<S: Socket + AddressResolution>(
     mut buffer: Vec<u8>,
     cancellation: &Cancellation,
 ) -> OperationResult<Vec<u8>> {
-    // Resolve through the scheduler so the potentially blocking system lookup runs on its bounded pool. The hostname has no port; the options supply it and select IPv4 to match server.rs. Cancellation can prevent a queued lookup from starting, but cannot interrupt an already-running system resolver.
+    // Resolve through the scheduler so the potentially blocking system lookup runs on its bounded pool. The hostname has no port; the service supplies it and the hints select IPv4 to match server.rs. Cancellation can prevent a queued lookup from starting, but cannot interrupt an already-running system resolver.
     let addresses = scheduler
         .address_resolve(
-            "localhost",
-            AddressResolveOptions {
-                port: 9000,
+            Some("localhost"),
+            AddressService::Port(9000),
+            AddressHints {
                 domain: Some(SocketDomain::Ipv4),
+                socket_type: Some(SocketType::Stream),
+                ..AddressHints::default()
             },
             cancellation,
         )
@@ -33,14 +35,14 @@ async fn echo<S: Socket + AddressResolution>(
     // Open the socket first, then await the nonblocking connect operation.
     let socket = scheduler
         .socket_open(
-            SocketDomain::Ipv4,
-            SocketType::Stream,
-            Some(SocketProtocol::Tcp),
+            SocketDomain::from(address.address),
+            address.socket_type,
+            address.protocol,
             cancellation,
         )
         .await?;
     scheduler
-        .socket_connect(&socket, address, cancellation)
+        .socket_connect(&socket, address.address, cancellation)
         .await?;
 
     let length = buffer.len();

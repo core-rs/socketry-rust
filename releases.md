@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add optional `AddressResolution` with owned address results, numeric ports, and family filtering. Native and Tokio share their bounded blocking pools; started lookups preserve their actual result after cancellation. Add simulated name fixtures, shared conformance/lifetime tests, and hostname resolution in the echo client.
+- Add optional `AddressResolution` with hostname/service inputs, native resolver hints, typed resolver errors, and owned address/type/protocol candidates. Support unspecified transports, raw sockets, and platform-specific socket values. Native and Tokio share their bounded blocking pools; started lookups preserve their actual result after cancellation. Add simulated fixtures, shared conformance/lifetime tests, and hostname resolution in the echo client.
 
 - Add optional `SocketMessages` with owned scatter/gather send/receive, IP addresses, peeking, routing flags, and truncation metadata. Native readiness, Tokio, and io_uring share the buffer/cancellation contract; include conformance tests and a commented UDP example.
 

@@ -8,7 +8,7 @@
 mod simulated;
 
 use socketry_executor::{
-    AddressResolution, AddressResolveOptions, Cancellation, File, FileOptions, IoBuf,
+    AddressHints, AddressResolution, AddressService, Cancellation, File, FileOptions, IoBuf,
     OperationResult, Socket, SocketDomain, SocketProtocol, SocketType,
 };
 use std::{io, path::Path};
@@ -118,10 +118,12 @@ async fn exchange<S: Socket + AddressResolution>(scheduler: &S) -> OperationResu
         // The same hostname resolves through the system backend or the simulator's explicit table. Connection policy remains application code.
         let addresses = scheduler
             .address_resolve(
-                "localhost",
-                AddressResolveOptions {
-                    port: address.port(),
+                Some("localhost"),
+                AddressService::Port(address.port()),
+                AddressHints {
                     domain: Some(SocketDomain::Ipv4),
+                    socket_type: Some(SocketType::Stream),
+                    ..AddressHints::default()
                 },
                 &NEVER,
             )
@@ -132,13 +134,15 @@ async fn exchange<S: Socket + AddressResolution>(scheduler: &S) -> OperationResu
             .ok_or_else(|| io::Error::from(io::ErrorKind::AddrNotAvailable))?;
         let socket = scheduler
             .socket_open(
-                SocketDomain::Ipv4,
-                SocketType::Stream,
-                Some(SocketProtocol::Tcp),
+                SocketDomain::from(address.address),
+                address.socket_type,
+                address.protocol,
                 &NEVER,
             )
             .await?;
-        scheduler.socket_connect(&socket, address, &NEVER).await?;
+        scheduler
+            .socket_connect(&socket, address.address, &NEVER)
+            .await?;
         send_all(scheduler, &socket, PAYLOAD.to_vec(), &NEVER).await?;
         let mut received = Vec::new();
         while received.len() < PAYLOAD.len() {

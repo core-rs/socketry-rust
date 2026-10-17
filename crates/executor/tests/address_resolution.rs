@@ -9,7 +9,7 @@ mod support;
 
 use futures_lite::future::{block_on, poll_once};
 use socketry_executor::{
-    AddressResolution, AddressResolveOptions, Blocking, BlockingOptions, Cancellation,
+    AddressHints, AddressResolution, AddressService, Blocking, BlockingOptions, Cancellation,
     OperationError,
 };
 use std::{io, sync::mpsc};
@@ -20,17 +20,19 @@ async fn system_names(scheduler: &impl AddressResolution) {
     // localhost exercises the system resolver without depending on public DNS or a particular address ordering.
     let addresses = scheduler
         .address_resolve(
-            "localhost",
-            AddressResolveOptions {
-                port: 1234,
-                domain: None,
-            },
+            Some("localhost"),
+            AddressService::Port(1234),
+            AddressHints::default(),
             &NEVER,
         )
         .await
         .unwrap();
     assert!(!addresses.is_empty());
-    assert!(addresses.iter().all(|address| address.port() == 1234));
+    assert!(
+        addresses
+            .iter()
+            .all(|address| address.address.port() == 1234)
+    );
 }
 
 fn bounded(scheduler: &(impl AddressResolution + Blocking)) {
@@ -47,8 +49,9 @@ fn bounded(scheduler: &(impl AddressResolution + Blocking)) {
     support::receive(&starting);
     let cancellation = Cancellation::new();
     let mut lookup = Box::pin(scheduler.address_resolve(
-        "localhost",
-        AddressResolveOptions::default(),
+        Some("localhost"),
+        AddressService::Port(1234),
+        AddressHints::default(),
         &cancellation,
     ));
     assert!(block_on(poll_once(&mut lookup)).is_none());
@@ -63,9 +66,14 @@ fn bounded(scheduler: &(impl AddressResolution + Blocking)) {
 
 fn closed(scheduler: &impl AddressResolution) {
     assert_eq!(
-        block_on(scheduler.address_resolve("127.0.0.1", AddressResolveOptions::default(), &NEVER))
-            .unwrap_err()
-            .kind(),
+        block_on(scheduler.address_resolve(
+            Some("127.0.0.1"),
+            AddressService::Port(0),
+            AddressHints::default(),
+            &NEVER
+        ))
+        .unwrap_err()
+        .kind(),
         io::ErrorKind::BrokenPipe
     );
 }

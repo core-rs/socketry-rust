@@ -69,3 +69,6 @@ pub use socket_messages::SocketMessages;
 
 #[cfg(any(feature = "native", feature = "tokio"))]
 mod message_io;
+
+#[cfg(any(feature = "native", feature = "tokio"))]
+mod socket_parameters;

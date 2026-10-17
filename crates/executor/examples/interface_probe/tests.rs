@@ -474,19 +474,24 @@ mod address_resolution;
 
 #[test]
 fn simulated_resolution_contract_and_explicit_names() {
-    use socketry_executor::{AddressResolution, AddressResolveOptions};
+    use socketry_executor::{AddressHints, AddressResolution, AddressService, SocketType};
     let scheduler = simulated::Scheduler::new(2, 2);
     block_on(async {
         address_resolution::check(&scheduler).await;
         scheduler.insert_addresses("loopback.test", vec!["127.0.0.1".parse().unwrap()]);
         address_resolution::connection(&scheduler, "loopback.test").await;
-        let options = AddressResolveOptions {
-            port: 80,
-            domain: None,
+        let options = AddressHints {
+            socket_type: Some(SocketType::Stream),
+            ..AddressHints::default()
         };
         assert_eq!(
             scheduler
-                .address_resolve("service.test", options, &NEVER)
+                .address_resolve(
+                    Some("service.test"),
+                    AddressService::Port(80),
+                    options,
+                    &NEVER
+                )
                 .await
                 .unwrap_err()
                 .kind(),
@@ -497,10 +502,20 @@ fn simulated_resolution_contract_and_explicit_names() {
             "::1".parse().unwrap(),
             "127.0.0.2".parse().unwrap(),
         ];
-        let unpolled = scheduler.address_resolve("service.test", options, &NEVER);
+        let unpolled = scheduler.address_resolve(
+            Some("service.test"),
+            AddressService::Port(80),
+            options,
+            &NEVER,
+        );
         scheduler.insert_addresses("service.test", addresses);
         assert_eq!(
-            unpolled.await.unwrap(),
+            unpolled
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|candidate| candidate.address)
+                .collect::<Vec<_>>(),
             vec![
                 "127.0.0.2:80".parse::<std::net::SocketAddr>().unwrap(),
                 "[::1]:80".parse().unwrap(),
@@ -510,10 +525,102 @@ fn simulated_resolution_contract_and_explicit_names() {
         scheduler.insert_addresses("service.test", vec![]);
         assert!(
             scheduler
-                .address_resolve("service.test", options, &NEVER)
+                .address_resolve(
+                    Some("service.test"),
+                    AddressService::Port(80),
+                    options,
+                    &NEVER
+                )
                 .await
-                .unwrap()
-                .is_empty()
+                .is_err()
         );
+    });
+}
+
+#[test]
+fn simulated_services_transports_and_configured_families() {
+    use socketry_executor::{
+        AddressHints, AddressResolution, AddressResolveError, AddressResolveErrorKind as Kind,
+        AddressService, SocketProtocol, SocketType,
+    };
+    let scheduler = simulated::Scheduler::new(2, 2);
+    block_on(async {
+        for (service, count, port) in [("http", 1, 80), ("domain", 2, 53)] {
+            let result = scheduler
+                .address_resolve(
+                    Some("127.0.0.1"),
+                    AddressService::Name(service),
+                    AddressHints {
+                        address_configured: true,
+                        ..AddressHints::default()
+                    },
+                    &NEVER,
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.len(), count);
+            assert!(result.iter().all(|info| info.address.port() == port));
+        }
+        let raw = scheduler
+            .address_resolve(
+                Some("127.0.0.1"),
+                AddressService::Port(0),
+                AddressHints {
+                    socket_type: Some(SocketType::Raw),
+                    ..AddressHints::default()
+                },
+                &NEVER,
+            )
+            .await
+            .unwrap();
+        assert_eq!(raw[0].socket_type, SocketType::Raw);
+        assert_eq!(raw[0].protocol, None);
+        for (service, hints, kind) in [
+            (
+                AddressService::Name("unknown"),
+                AddressHints::default(),
+                Kind::ServiceUnavailable,
+            ),
+            (
+                AddressService::Name("http"),
+                AddressHints {
+                    socket_type: Some(SocketType::Datagram),
+                    ..AddressHints::default()
+                },
+                Kind::ServiceUnavailable,
+            ),
+            (
+                AddressService::Port(80),
+                AddressHints {
+                    socket_type: Some(SocketType::Other(12345)),
+                    ..AddressHints::default()
+                },
+                Kind::InvalidHints,
+            ),
+            (
+                AddressService::Port(80),
+                AddressHints {
+                    socket_type: Some(SocketType::Stream),
+                    protocol: Some(SocketProtocol::Udp),
+                    ..AddressHints::default()
+                },
+                Kind::InvalidHints,
+            ),
+        ] {
+            let error = scheduler
+                .address_resolve(Some("127.0.0.1"), service, hints, &NEVER)
+                .await
+                .unwrap_err();
+            let socketry_executor::OperationError::Io(error) = error else {
+                panic!("expected resolver failure")
+            };
+            let detail = error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<AddressResolveError>()
+                .unwrap();
+            assert_eq!(detail.kind, kind);
+            assert_eq!(detail.code, None);
+        }
     });
 }

@@ -7,7 +7,11 @@
 //! Task handles own execution lifetimes; dropping one abandons its task.
 #![doc = include_str!("../readme.md")]
 
-mod address_resolve_options;
+mod address_hints;
+mod address_info;
+mod address_resolve_error;
+mod address_resolve_error_kind;
+mod address_service;
 mod allocation_mode;
 mod blocking;
 mod blocking_error;
@@ -43,7 +47,11 @@ mod task;
 mod tcp_no_delay;
 mod worker;
 
-pub use address_resolve_options::AddressResolveOptions;
+pub use address_hints::AddressHints;
+pub use address_info::AddressInfo;
+pub use address_resolve_error::AddressResolveError;
+pub use address_resolve_error_kind::AddressResolveErrorKind;
+pub use address_service::AddressService;
 pub use allocation_mode::AllocationMode;
 pub use blocking::Blocking;
 pub use blocking_error::BlockingError;

@@ -1451,14 +1451,16 @@ impl SocketMessages for Scheduler {
 impl crate::AddressResolution for SchedulerHandle {
     async fn address_resolve(
         &self,
-        name: &str,
-        options: crate::AddressResolveOptions,
+        name: Option<&str>,
+        service: crate::AddressService<'_>,
+        hints: crate::AddressHints,
         cancellation: &Cancellation,
-    ) -> OperationResult<Vec<SocketAddr>> {
+    ) -> OperationResult<Vec<crate::AddressInfo>> {
         crate::scheduler::address_resolution::system::resolve(
             &self.shared.blocking,
             name,
-            options,
+            service,
+            hints,
             cancellation,
         )
         .await
@@ -1468,12 +1470,13 @@ impl crate::AddressResolution for SchedulerHandle {
 impl crate::AddressResolution for Scheduler {
     async fn address_resolve(
         &self,
-        name: &str,
-        options: crate::AddressResolveOptions,
+        name: Option<&str>,
+        service: crate::AddressService<'_>,
+        hints: crate::AddressHints,
         cancellation: &Cancellation,
-    ) -> OperationResult<Vec<SocketAddr>> {
+    ) -> OperationResult<Vec<crate::AddressInfo>> {
         self.handle
-            .address_resolve(name, options, cancellation)
+            .address_resolve(name, service, hints, cancellation)
             .await
     }
 }

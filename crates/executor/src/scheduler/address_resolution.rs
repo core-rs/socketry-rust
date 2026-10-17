@@ -1,32 +1,33 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use crate::{AddressResolveOptions, Cancellation, OperationResult};
-use std::{future::Future, net::SocketAddr};
+use crate::{AddressHints, AddressInfo, AddressService, Cancellation, OperationResult};
+use std::future::Future;
 
 #[cfg(any(feature = "native", feature = "tokio"))]
 pub(crate) mod system;
 
-/// Optional hostname resolution, independent of socket creation and connection.
-///
-/// Consumers require this capability explicitly; implementing `Socket` does not require a resolver. Implementations may use a system resolver, an asynchronous resolver, or a deterministic table. Resolution policy and address ordering belong to the implementation.
+/// Optional IP endpoint resolution, independent of socket creation and connection. Implementations may use a system resolver, an asynchronous resolver, or a deterministic table.
 ///
 /// ```compile_fail
-/// use socketry_executor::{AddressResolution, AddressResolveOptions, Cancellation, Socket};
+/// use socketry_executor::{AddressResolution, AddressHints, AddressService, Cancellation, Socket};
 /// async fn resolve<S: Socket>(scheduler: &S) {
-///     scheduler.address_resolve("localhost", AddressResolveOptions::default(), &Cancellation::never()).await;
+///     scheduler.address_resolve(Some("localhost"), AddressService::Port(80), AddressHints::default(), &Cancellation::never()).await;
 /// }
 /// ```
 pub trait AddressResolution: Send + Sync {
-    /// Resolve a hostname or numeric IP literal to owned socket addresses.
+    /// Resolve a hostname and service to owned endpoints and socket creation parameters using typed resolver hints.
     ///
-    /// `name` contains no port; IPv6 literals use the unbracketed `IpAddr` syntax. Empty names and embedded NUL bytes return `InvalidInput`. Other name syntax and resolver errors are implementation-specific. No implicit IDNA conversion, service-name lookup, caching, sorting, deduplication, or connection attempts are required. Results may be empty, including when the family filter removes every address. Every result has the requested port and family; duplicates and resolver order are preserved.
+    /// Names contain no port. An absent name selects wildcard addresses with `passive`, or loopback without it. Empty names/services and embedded NUL bytes return `InvalidInput`. Numeric ports avoid named-service lookup. `numeric_host` prevents hostname lookup. Family, type, protocol, and address-configuration hints apply during resolution. With unspecified type/protocol the resolver can return multiple transports, including raw sockets. Preserve candidate ordering, duplicates, scope identifiers, and native type/protocol values. Successful results may be empty; no matching family or transport may instead be a resolver error, depending on the backend.
     ///
-    /// Futures are lazy. Pre-cancellation wins over validation. Cancellation may prevent queued work from starting; implementations using a blocking system resolver await its actual result once started. A cancellation request does not promise prompt completion. Dropping a future may abandon a running lookup, which retains its inputs and bounded capacity until completion. Await lookups before shutting down their scheduler for graceful completion.
+    /// Resolver failures are carried by `AddressResolveError` inside `OperationError::Io`, retaining a portable category and any native resolver code. Lookup and service databases are implementation-specific; there is no implicit connection policy, Socketry cache, canonical-name query, or IDNA normalization guarantee.
+    ///
+    /// Futures are lazy; pre-cancellation wins over validation. Cancellation can prevent admission or queued execution. Started blocking lookups return their actual result, and cancellation does not promise prompt completion. Dropping a future may abandon a running lookup, whose worker retains both inputs and its bounded capacity until completion. Await lookups before scheduler shutdown for graceful completion.
     fn address_resolve(
         &self,
-        name: &str,
-        options: AddressResolveOptions,
+        name: Option<&str>,
+        service: AddressService<'_>,
+        hints: AddressHints,
         cancellation: &Cancellation,
-    ) -> impl Future<Output = OperationResult<Vec<SocketAddr>>> + Send;
+    ) -> impl Future<Output = OperationResult<Vec<AddressInfo>>> + Send;
 }

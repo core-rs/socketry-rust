@@ -43,17 +43,21 @@ Blocking scheduler entry points panic on worker threads. Ordinary blocking syste
 Use the optional `AddressResolution` capability to resolve a hostname before creating or connecting a socket:
 
 ```rust
-use socketry_executor::{AddressResolution, AddressResolveOptions, Cancellation, OperationResult};
-use std::net::SocketAddr;
+use socketry_executor::{AddressHints, AddressInfo, AddressResolution, AddressService, Cancellation, OperationResult, SocketType};
 
-async fn addresses<S: AddressResolution>(scheduler: &S, cancellation: &Cancellation) -> OperationResult<Vec<SocketAddr>> {
-    scheduler.address_resolve("localhost", AddressResolveOptions { port: 9000, domain: None }, cancellation).await
+async fn addresses<S: AddressResolution>(scheduler: &S, cancellation: &Cancellation) -> OperationResult<Vec<AddressInfo>> {
+    scheduler.address_resolve(
+        Some("localhost"),
+        AddressService::Port(9000),
+        AddressHints { socket_type: Some(SocketType::Stream), ..AddressHints::default() },
+        cancellation,
+    ).await
 }
 ```
 
-Native and Tokio schedulers and their handles use their existing bounded blocking pools, sharing capacity with `spawn_blocking`. Names have no port; numeric IPv6 literals have no brackets. `domain` optionally filters to `SocketDomain::Ipv4` or `Ipv6`; `None` accepts both. Results preserve resolver order and duplicates and may be empty. Applications choose connection candidates and retry policy explicitly.
+Native and Tokio schedulers and their handles call the system resolver through their existing bounded blocking pools, sharing capacity with `spawn_blocking`. Hints select IP family, socket type, protocol, passive binding, numeric-only hosts, and configured families during lookup. Services can be ports or names. An absent hostname selects loopback addresses, or wildcard addresses with `passive`. Each result carries its address, socket type, and protocol for `socket_open`; unspecified types can include raw sockets and platform-specific native values. Results preserve resolver order and duplicates. Applications choose connection candidates and retry policy explicitly.
 
-An unpolled future does no work. Cancellation can prevent admission or queued execution; once a system lookup starts, its actual result is returned. Dropping a future abandons its result while running work retains its owned inputs and capacity until completion. Await lookup before shutting down the scheduler for graceful completion. The simulator supplies deterministic exact-name fixtures. Service names, advanced resolver flags, and DNS-specific behavior remain future extensions.
+Resolver failures retain typed `AddressResolveError` details inside `OperationError::Io`, including a portable category and native resolver code. Validation and pool errors remain ordinary I/O errors. An unpolled future does no work. Cancellation can prevent admission or queued execution; once a system lookup starts, its actual result is returned. Dropping a future abandons its result while running work retains its owned inputs and capacity until completion. Await lookup before shutting down the scheduler for graceful completion. The simulator supplies deterministic name and service fixtures. Canonical names, reverse lookup, IDNA normalization guarantees, caching, and connection racing remain separate concerns.
 
 ## Blocking work
 

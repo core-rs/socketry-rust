@@ -91,14 +91,8 @@ pub(super) fn open(
         SocketDomain::Ipv4 => Domain::IPV4,
         SocketDomain::Ipv6 => Domain::IPV6,
     };
-    let kind = match kind {
-        SocketType::Stream => Type::STREAM,
-        SocketType::Datagram => Type::DGRAM,
-    };
-    let protocol = protocol.map(|protocol| match protocol {
-        SocketProtocol::Tcp => Protocol::TCP,
-        SocketProtocol::Udp => Protocol::UDP,
-    });
+    let kind = Type::from(super::socket_parameters::socket_type(kind));
+    let protocol = protocol.map(|value| Protocol::from(super::socket_parameters::protocol(value)));
     open_with(domain, kind, protocol, Socket::new, set_nonblocking)
 }
 

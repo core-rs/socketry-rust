@@ -6,13 +6,14 @@
 
 pub use socketry_executor as executor;
 pub use socketry_executor::{
-    AddressResolution, AddressResolveOptions, AllocationMode, Blocking, BlockingError,
-    BlockingOptions, BlockingTask, BufferResult, BufferSlice, Cancellation, Cancelled, Clock, File,
-    FileAllocate, FileDescriptor, FileOptions, Interest, IoBuf, IoBufMut, Notify, OperationError,
-    OperationResult, Scheduler, SchedulerHandle, Signals, Socket, SocketDomain, SocketKeepalive,
-    SocketMessage, SocketMessages, SocketOption, SocketOptions, SocketProtocol, SocketRecvFlags,
-    SocketRecvResult, SocketRegistration, SocketReuseAddress, SocketSendFlags, SocketType, Spawn,
-    SpawnError, SyncMode, Task, TaskError, TaskHandle, TcpNoDelay, defer_cancel, yield_now,
+    AddressHints, AddressInfo, AddressResolution, AddressResolveError, AddressResolveErrorKind,
+    AddressService, AllocationMode, Blocking, BlockingError, BlockingOptions, BlockingTask,
+    BufferResult, BufferSlice, Cancellation, Cancelled, Clock, File, FileAllocate, FileDescriptor,
+    FileOptions, Interest, IoBuf, IoBufMut, Notify, OperationError, OperationResult, Scheduler,
+    SchedulerHandle, Signals, Socket, SocketDomain, SocketKeepalive, SocketMessage, SocketMessages,
+    SocketOption, SocketOptions, SocketProtocol, SocketRecvFlags, SocketRecvResult,
+    SocketRegistration, SocketReuseAddress, SocketSendFlags, SocketType, Spawn, SpawnError,
+    SyncMode, Task, TaskError, TaskHandle, TcpNoDelay, defer_cancel, yield_now,
 };
 
 #[cfg(all(unix, feature = "signals", any(feature = "native", feature = "tokio")))]

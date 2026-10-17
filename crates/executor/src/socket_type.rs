@@ -8,4 +8,8 @@ pub enum SocketType {
     Stream,
     /// Datagrams, normally UDP. Connected datagram reads and writes preserve message boundaries; message/address APIs remain separate extensions.
     Datagram,
+    /// Raw IP packets. Opening these sockets may require privileges.
+    Raw,
+    /// A platform-native socket type, preserved by resolution and forwarded unchanged to socket creation. Native values are not portable between operating systems.
+    Other(i32),
 }

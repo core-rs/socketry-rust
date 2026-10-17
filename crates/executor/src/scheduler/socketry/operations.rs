@@ -6,7 +6,7 @@ use super::{Scheduler, SchedulerHandle};
 use crate::scheduler::selector::DefaultSelector;
 use crate::scheduler::{BufferResult, Clock, File, Interest, Socket};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
-use std::io;
+use std::io::{self, SeekFrom};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::time::Instant;
@@ -151,6 +151,17 @@ impl Socket for SchedulerHandle {
 }
 impl File for SchedulerHandle {
     type File = <DefaultSelector as File>::File;
+    async fn file_seek(
+        &self,
+        file: &Self::File,
+        position: SeekFrom,
+        cancellation: &Cancellation,
+    ) -> OperationResult<u64> {
+        self.selector()?
+            .file_seek(file, position, cancellation)
+            .await
+    }
+
     async fn file_open(
         &self,
         path: &Path,
@@ -297,6 +308,15 @@ impl Socket for Scheduler {
 }
 impl File for Scheduler {
     type File = <SchedulerHandle as File>::File;
+    async fn file_seek(
+        &self,
+        file: &Self::File,
+        position: SeekFrom,
+        cancellation: &Cancellation,
+    ) -> OperationResult<u64> {
+        self.handle.file_seek(file, position, cancellation).await
+    }
+
     async fn file_open(
         &self,
         path: &Path,

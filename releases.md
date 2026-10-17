@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add required `File::file_seek` with `std::io::SeekFrom`, explicit cancellation, and the resulting byte offset across native, Tokio, io\_uring, and simulated files. External `File` implementations must provide this method.
+
 - Add shared-cursor `File::file_read` and `file_write` with owned buffers and cancellation across native, Tokio, io\_uring, and simulated files. Implementers of `File` must now provide both methods; callers await operations sequentially when cursor ordering matters.
 
 - Add `Blocking::spawn_blocking` with cancellable bounded admission and owning completion handles. Native and Tokio schedulers use configurable dedicated pools; queued work can be cancelled, while started closures retain their inputs and finish independently.

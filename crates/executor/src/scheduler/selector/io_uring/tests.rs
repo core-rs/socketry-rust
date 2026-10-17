@@ -287,6 +287,15 @@ fn closed_selector_rejects_its_direct_network_operations() {
                 .is_err()
         );
         assert!(!path.exists());
+        let file = Arc::new(tempfile::tempfile().unwrap());
+        assert_eq!(
+            selector
+                .file_seek(&file, SeekFrom::Start(1), &NEVER)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
         assert!(selector.connect(address, &NEVER).await.is_err());
         assert!(selector.accept(&listener, &NEVER).await.is_err());
         assert!(

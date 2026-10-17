@@ -38,7 +38,7 @@ Resource creation belongs inside the corresponding capability. `File` declares a
 
 The interface does not require `Arc` around every resource. Concrete implementations choose their resource representation and how to retain it during in-flight work. They may use OS handles, registered-resource tables, shared ownership, or simulated resource identifiers. Taking a resource by reference does not remove the backend's obligation to retain everything still accessible by a submitted operation after its waiting future is dropped.
 
-These resource contracts are implemented. `File::file_open` accepts public `FileOptions`; stateful and positioned operations borrow `&Self::File`. The native and Tokio implementations choose `Arc<std::fs::File>` internally. `Socket` includes listener/local/peer address inspection. Optional `SocketRegistration` imports existing `std::net` resources and is not required of simulated implementations.
+These resource contracts are implemented. `File::file_open` accepts public `FileOptions`; seeking, stateful, and positioned operations borrow `&Self::File`. The native and Tokio implementations choose `Arc<std::fs::File>` internally. `Socket` includes listener/local/peer address inspection. Optional `SocketRegistration` imports existing `std::net` resources and is not required of simulated implementations.
 
 ## Platform support and fallbacks
 
@@ -185,6 +185,7 @@ The intended low-level shape for ordinary I/O is a method on the scheduler capab
 scheduler.file_open(path, options, cancellation)
 scheduler.file_read(file, buffer, cancellation)
 scheduler.file_read_at(file, buffer, offset, cancellation)
+scheduler.file_seek(file, position, cancellation)
 scheduler.socket_accept(listener, cancellation)
 scheduler.socket_sendmsg(socket, message, flags, cancellation)
 scheduler.address_resolve(name, options, cancellation)
@@ -193,7 +194,7 @@ scheduler.sleep_until(deadline, cancellation)
 scheduler.sleep(duration, cancellation)
 ```
 
-This list includes proposed extensions. The implemented `File` methods are `file_open`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at`. The implemented TCP methods are `socket_listen`, `connect`, `accept`, `io_read`, `io_write`, and `io_wait`, plus synchronous `listener_addr`, `socket_local_addr`, and `socket_peer_addr`. Async I/O methods take `&Cancellation`; buffer operations return `(OperationResult<usize>, B)` on success, error, and cancellation.
+This list includes proposed extensions. The implemented `File` methods are `file_open`, `file_seek`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at`. The implemented TCP methods are `socket_listen`, `connect`, `accept`, `io_read`, `io_write`, and `io_wait`, plus synchronous `listener_addr`, `socket_local_addr`, and `socket_peer_addr`. Async I/O methods take `&Cancellation`; buffer operations return `(OperationResult<usize>, B)` on success, error, and cancellation.
 
 An optional context pairing a scheduler reference with a cancellation signal could reduce repetitive arguments. Such a context should preserve explicit dependency and cancellation boundaries; it is a convenience, not a new computation abstraction.
 
@@ -304,6 +305,13 @@ pub trait File: Send + Sync {
         options: FileOptions,
         cancellation: &Cancellation,
     ) -> impl Future<Output = OperationResult<Self::File>> + Send;
+
+    fn file_seek(
+        &self,
+        file: &Self::File,
+        position: std::io::SeekFrom,
+        cancellation: &Cancellation,
+    ) -> impl Future<Output = OperationResult<u64>> + Send;
 
     fn file_read<B: IoBufMut>(
         &self,
@@ -666,11 +674,15 @@ Not every useful scheduler operation has an io\_uring opcode; seek and address r
 
 ### File semantics
 
+Implemented `file_seek(file, SeekFrom, cancellation)` returns the resulting `u64` byte offset. `std::io::SeekFrom` supports absolute positions, signed offsets from the current cursor, and signed offsets from EOF; `Current(0)` queries the position. Seeking past EOF does not extend the file. Absolute positions above `i64::MAX` return `InvalidInput`; invalid relative results and filesystem limits return OS errors. A failed seek on a regular file leaves its cursor unchanged. Seeking does not require write permission.
+
+Seeks are lazy and check cancellation both before dispatch and on the blocking worker before execution. Once started, they preserve the actual result, and dropping a submitted future cannot undo a cursor change. Native readiness and io\_uring use the existing blocking file fallback; Tokio uses its runtime's blocking pool. The fallback retains the file until its syscall ends, even if the caller disappears. Await any earlier cursor operation before seeking when ordering matters. A seek followed by a read/write is not atomic with respect to other users of the same resource; use positioned I/O for an explicit offset. The simulator models the same seek contract with its per-open cursor. Native backends add no cursor tracking or per-file serialization.
+
 Implemented `file_read` and `file_write` use and advance the file's shared cursor by the transferred byte count. Native and Tokio fallbacks execute ordinary `std::io::Read`/`Write` calls on their existing backend pools; io\_uring uses current-position SQEs. There is no additional scheduler-side cursor or per-file serialization. Await operations in order when ordering matters: concurrent cursor operations have no portable ordering or non-overlap guarantee. A dropped submitted future can still transfer bytes and advance the cursor; cancellation cannot roll back that progress. Positioned operations correspond to `pread`/`pwrite` and should leave that cursor unchanged. Expose both explicitly rather than encoding stateful access through a magic public offset. io\_uring internally supports current-position reads using offset `-1`; its documentation warns that asynchronous shared-cursor access requires serialization for predictable behaviour. See [io\_uring\_prep\_read](https://man7.org/linux/man-pages/man3/io_uring_prep_read.3.html).
 
 Allocation is distinct from truncation. An allocation interface needs to account for an offset, length, and supported modes. Platform-specific modes may require an extension rather than a universal flags type. See [io\_uring\_prep\_fallocate](https://man7.org/linux/man-pages/man3/io_uring_prep_fallocate.3.html).
 
-Current `File` opens regular files and provides shared-cursor and positioned reads and writes, using explicit offsets that fit in `i64`. The internal io\_uring representation distinguishes a shared cursor from a supplied offset, so `file_read_at(..., u64::MAX, ...)` remains invalid rather than selecting stateful access. Each call can complete with a short transfer; read returns zero at EOF. Buffers and their allocations are returned on success, error, and cancellation. Separate opens start with independent cursors; aliases of the same resource share one. `FileOptions` omits append mode so writes respect their supplied offsets. Its Windows fallback uses `seek_read`/`seek_write`, which update the shared cursor according to [Windows FileExt](https://doc.rust-lang.org/std/os/windows/fs/trait.FileExt.html). Resolving this difference is required before promising uniform cursor-preserving semantics.
+Current `File` opens regular files and provides seeking, shared-cursor and positioned reads and writes, using explicit offsets that fit in `i64`. The internal io\_uring representation distinguishes a shared cursor from a supplied offset, so `file_read_at(..., u64::MAX, ...)` remains invalid rather than selecting stateful access. Each call can complete with a short transfer; read returns zero at EOF. Buffers and their allocations are returned on success, error, and cancellation. Separate opens start with independent cursors; aliases of the same resource share one. `FileOptions` omits append mode so writes respect their supplied offsets. Its Windows fallback uses `seek_read`/`seek_write`, which update the shared cursor according to [Windows FileExt](https://doc.rust-lang.org/std/os/windows/fs/trait.FileExt.html). Resolving this difference is required before promising uniform cursor-preserving semantics.
 
 ### Syscall proximity and messages
 
@@ -765,7 +777,7 @@ The initial public contracts now cover associated resources and creation, owned 
 
 Remaining design work includes:
 
-1. **Resource lifecycle and wider I/O:** separate socket creation/options, file seeking, explicit close/submission, message I/O, and extension boundaries.
+1. **Resource lifecycle and wider I/O:** separate socket creation/options, explicit close/submission, message I/O, and extension boundaries.
 2. **Blocking pool integration:** the public `Blocking` capability now provides bounded admission and owned completion. Existing file fallbacks still use backend pools; sharing, idle thread retirement, and further scheduling policies remain separate decisions.
 3. **Backend retirement:** account for all accepted work, including future `_submit` jobs without application waiters. Application completion remains explicit through owned task handles; there is no implicit graceful join of all spawned work.
 4. **Timer engine integration:** the monotonic `Clock` and cancellable deadline contract are implemented. Native waits still use async-io, and the adapter uses its selected Tokio runtime, including paused time. Integrating `socketry-timers` into scheduler driving and parking remains separate work.
@@ -802,7 +814,7 @@ The simulator has bounded in-memory file sizes and unbounded byte queues. It doe
 | Capabilities | Public `File`, `Socket`, `SocketRegistration`, `Clock`, `Spawn`, and `Blocking`; associated resources and initial file/TCP creation implemented. Broader hooks remain design work. |
 | Blocking execution | Dedicated native/Tokio pools, configurable worker and admission limits, queued cancellation, and owning completion handles implemented. Started closures finish independently; graceful completion requires awaiting them. |
 | Linked operations | Prepared chains and `Linked` remain proposed; native linking, whole-chain blocking jobs, and readiness sequencing are not implemented. |
-| File operations | `file_open`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at` implemented with owned buffers. Seeking, explicit close, allocation, and metadata hooks pending. |
+| File operations | `file_open`, `file_seek`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at` implemented with owned buffers. Explicit close, allocation, and metadata hooks pending. |
 | Submission and completion | Close, socket shutdown, and advice pairs remain proposed; their admission, `_submit`, and safe CQE suppression are pending. The public blocking pool has its own bounded admission. |
 | Socket operations | TCP listen, connect, accept, address inspection, generic read/write, readiness, and optional OS registration implemented. General sockets and message I/O pending. |
 | Backends | Native readiness, blocking file fallbacks, Linux io_uring, and an adapter to an existing Tokio runtime implemented; the example simulator implements the public I/O traits. |

@@ -51,6 +51,15 @@ struct FailingFiles {
 impl File for FailingFiles {
     type File = <simulated::Scheduler as File>::File;
 
+    async fn file_seek(
+        &self,
+        file: &Self::File,
+        position: std::io::SeekFrom,
+        cancellation: &Cancellation,
+    ) -> OperationResult<u64> {
+        self.scheduler.file_seek(file, position, cancellation).await
+    }
+
     async fn file_open(
         &self,
         path: &Path,

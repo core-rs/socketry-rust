@@ -179,6 +179,8 @@ Read/write operations take an owned `IoBuf` (`IoBufMut` for reads) and return `B
 
 `File::file_read` and `file_write` borrow `&Self::File` and advance its shared cursor by the transferred byte count. `file_read_at` and `file_write_at` take an explicit offset instead. Await cursor operations sequentially when ordering matters; concurrent calls have no portable ordering or non-overlap guarantee. Dropping an admitted operation can still advance the cursor. Each call can transfer fewer bytes than requested, and a read returns zero at EOF. `file_open(path, FileOptions, cancellation)` creates the associated resource. Current native/Tokio backends internally retain an `Arc<std::fs::File>`; generic callers do not require that representation. The readiness and Tokio implementations use blocking pools; io\_uring uses current-position SQEs for stateful access. There is no scheduler-side cursor or extra per-file locking. Use ordinary files opened without append mode, and offsets fitting i64. Unix positioned operations leave the shared cursor unchanged; the Windows blocking fallback updates it according to std's seek\_read/seek\_write semantics.
 
+`file_seek(file, std::io::SeekFrom, cancellation)` repositions the shared cursor and returns its resulting `u64` offset. Use `Start(offset)` for an absolute position, `Current(delta)` for a relative move, or `End(delta)` for a position relative to EOF. `Current(0)` queries the position. Seeking past EOF does not extend the file; absolute offsets must fit in `i64`, and invalid positions or filesystem limits return errors. Seeks use blocking file pools on every current native backend, including io\_uring, and Tokio's blocking pool in the adapter. Cancellation before execution prevents seeking; a started seek preserves its actual result. Await seeks and other cursor operations sequentially when their ordering matters. A seek/read pair is not atomic with respect to other users of the resource.
+
 Repeated calls to `file_read` continue from the position reached by the previous call. For example, this helper returns one chunk, which can be shorter than 4096 bytes:
 
 ```rust
@@ -190,6 +192,24 @@ async fn read_chunk<S: File>(
     cancellation: &Cancellation,
 ) -> OperationResult<Vec<u8>> {
     let (result, mut buffer) = scheduler.file_read(file, vec![0; 4096], cancellation).await;
+    buffer.truncate(result?);
+    Ok(buffer)
+}
+```
+
+To rewind an existing file and read from its beginning:
+
+```rust
+use socketry_executor::{Cancellation, File, OperationResult};
+use std::io::SeekFrom;
+
+async fn read_header<S: File>(
+    scheduler: &S,
+    file: &S::File,
+    cancellation: &Cancellation,
+) -> OperationResult<Vec<u8>> {
+    scheduler.file_seek(file, SeekFrom::Start(0), cancellation).await?;
+    let (result, mut buffer) = scheduler.file_read(file, vec![0; 16], cancellation).await;
     buffer.truncate(result?);
     Ok(buffer)
 }

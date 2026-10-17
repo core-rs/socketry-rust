@@ -608,7 +608,7 @@ fn a_task_can_shut_down_another_scheduler_on_the_same_runtime() {
 }
 
 #[test]
-fn cancelling_queued_blocking_work_preserves_buffers_and_prevents_creation() {
+fn cancelling_queued_blocking_work_preserves_buffers_cursor_and_prevents_creation() {
     let runtime = ::tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .max_blocking_threads(1)
@@ -636,9 +636,11 @@ fn cancelling_queued_blocking_work_preserves_buffers_and_prevents_creation() {
         let allocation = buffer.as_ptr();
         let mut write = Box::pin(handle.file_write_at(&file, buffer, 0, &cancellation));
         let mut open = Box::pin(handle.file_open(&path, FileOptions::CREATE, &cancellation));
+        let mut seek = Box::pin(handle.file_seek(&file, SeekFrom::Start(7), &cancellation));
         std::future::poll_fn(|context| {
             assert!(write.as_mut().poll(context).is_pending());
             assert!(open.as_mut().poll(context).is_pending());
+            assert!(seek.as_mut().poll(context).is_pending());
             Poll::Ready(())
         })
         .await;
@@ -652,6 +654,17 @@ fn cancelling_queued_blocking_work_preserves_buffers_and_prevents_creation() {
             open.await,
             Err(crate::OperationError::Cancelled(_))
         ));
+        assert!(matches!(
+            seek.await,
+            Err(crate::OperationError::Cancelled(_))
+        ));
+        assert_eq!(
+            handle
+                .file_seek(&file, SeekFrom::Current(0), &NEVER)
+                .await
+                .unwrap(),
+            0
+        );
         blocker.await.unwrap();
     });
     assert!(!path.exists());

@@ -639,12 +639,17 @@ fn cancelling_queued_blocking_work_preserves_buffers_cursor_and_prevents_creatio
         let mut seek = Box::pin(handle.file_seek(&file, SeekFrom::Start(7), &cancellation));
         let mut sync = Box::pin(handle.file_sync(&file, SyncMode::All, &cancellation));
         let mut truncate = Box::pin(handle.file_truncate(&file, 13, &cancellation));
+        #[cfg(target_os = "linux")]
+        let mut allocate =
+            Box::pin(handle.file_allocate(&file, 0, 4096, AllocationMode::Extend, &cancellation));
         std::future::poll_fn(|context| {
             assert!(write.as_mut().poll(context).is_pending());
             assert!(open.as_mut().poll(context).is_pending());
             assert!(seek.as_mut().poll(context).is_pending());
             assert!(sync.as_mut().poll(context).is_pending());
             assert!(truncate.as_mut().poll(context).is_pending());
+            #[cfg(target_os = "linux")]
+            assert!(allocate.as_mut().poll(context).is_pending());
             Poll::Ready(())
         })
         .await;
@@ -675,6 +680,11 @@ fn cancelling_queued_blocking_work_preserves_buffers_cursor_and_prevents_creatio
         ));
         assert!(matches!(
             truncate.await,
+            Err(crate::OperationError::Cancelled(_))
+        ));
+        #[cfg(target_os = "linux")]
+        assert!(matches!(
+            allocate.await,
             Err(crate::OperationError::Cancelled(_))
         ));
         blocker.await.unwrap();

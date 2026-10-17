@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add optional `FileAllocate` with `AllocationMode::Extend`/`KeepSize`, cancellation, and cursor preservation. Linux native and Tokio backends reserve space with `fallocate`; io\_uring uses native requests when supported. Other targets omit the capability, and filesystem errors remain observable.
+
 - Add required `File::file_truncate` to resize writable files with cancellation, zero-filled extension, and cursor preservation. Use native io\_uring truncation when supported, otherwise blocking file pools. External `File` implementations must provide this method.
 
 - Add required `File::file_sync` with `SyncMode::All`/`Data`, cancellation, and completion/error reporting. io\_uring uses native synchronization; readiness and Tokio use blocking file pools. External `File` implementations must provide this method.

@@ -6,6 +6,8 @@ use super::{Scheduler, SchedulerHandle};
 use crate::SyncMode;
 use crate::scheduler::selector::DefaultSelector;
 use crate::scheduler::{BufferResult, Clock, File, Interest, Socket};
+#[cfg(target_os = "linux")]
+use crate::{AllocationMode, FileAllocate};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
 use std::io::{self, SeekFrom};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -150,6 +152,22 @@ impl Socket for SchedulerHandle {
             .await
     }
 }
+#[cfg(target_os = "linux")]
+impl FileAllocate for SchedulerHandle {
+    async fn file_allocate(
+        &self,
+        file: &Self::File,
+        offset: u64,
+        length: u64,
+        mode: AllocationMode,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.selector()?
+            .file_allocate(file, offset, length, mode, cancellation)
+            .await
+    }
+}
+
 impl File for SchedulerHandle {
     type File = <DefaultSelector as File>::File;
     async fn file_truncate(
@@ -327,6 +345,22 @@ impl Socket for Scheduler {
         self.handle.io_wait(socket, interest, cancellation).await
     }
 }
+#[cfg(target_os = "linux")]
+impl FileAllocate for Scheduler {
+    async fn file_allocate(
+        &self,
+        file: &Self::File,
+        offset: u64,
+        length: u64,
+        mode: AllocationMode,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.handle
+            .file_allocate(file, offset, length, mode, cancellation)
+            .await
+    }
+}
+
 impl File for Scheduler {
     type File = <SchedulerHandle as File>::File;
     async fn file_truncate(

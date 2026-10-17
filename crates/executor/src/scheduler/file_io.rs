@@ -1,9 +1,59 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Blocking truncation, synchronization, shared-cursor, and positioned file operations shared by selector adapters.
+//! Blocking allocation, truncation, synchronization, shared-cursor, and positioned file operations shared by selector adapters.
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+
+#[cfg(target_os = "linux")]
+pub(crate) fn validate_allocation(offset: u64, length: u64) -> io::Result<()> {
+    if length == 0
+        || offset
+            .checked_add(length)
+            .is_none_or(|end| end > i64::MAX as u64)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "allocation length must be positive and range end must fit in i64",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn allocation_flags(mode: crate::AllocationMode) -> libc::c_int {
+    match mode {
+        crate::AllocationMode::Extend => 0,
+        crate::AllocationMode::KeepSize => libc::FALLOC_FL_KEEP_SIZE,
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn allocate(
+    file: &File,
+    offset: u64,
+    length: u64,
+    mode: crate::AllocationMode,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    validate_allocation(offset, length)?;
+    retry_interrupted(|| {
+        // SAFETY: The borrowed file retains a valid descriptor throughout this synchronous call. Validation ensures both conversions fit, including on 32-bit Linux where fallocate64 provides explicit 64-bit offsets.
+        let result = unsafe {
+            libc::fallocate64(
+                file.as_raw_fd(),
+                allocation_flags(mode),
+                offset as i64,
+                length as i64,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    })
+}
 
 pub(crate) fn validate_length(length: u64) -> io::Result<()> {
     if length > i64::MAX as u64 {

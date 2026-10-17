@@ -487,6 +487,19 @@ mod native {
                 io::ErrorKind::BrokenPipe
             );
             assert_eq!(resize_file.metadata().unwrap().len(), 0);
+            #[cfg(target_os = "linux")]
+            {
+                use socketry_executor::{AllocationMode, FileAllocate};
+                assert_eq!(
+                    handle
+                        .file_allocate(&resize_file, 0, 4096, AllocationMode::Extend, &NEVER)
+                        .await
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::BrokenPipe
+                );
+                assert_eq!(resize_file.metadata().unwrap().len(), 0);
+            }
 
             for mode in [SyncMode::All, SyncMode::Data] {
                 assert_eq!(
@@ -840,6 +853,19 @@ mod tokio_adapter {
                 io::ErrorKind::BrokenPipe
             );
             assert_eq!(resize_file.metadata().unwrap().len(), 0);
+            #[cfg(target_os = "linux")]
+            {
+                use socketry_executor::{AllocationMode, FileAllocate};
+                assert_eq!(
+                    handle
+                        .file_allocate(&resize_file, 0, 4096, AllocationMode::Extend, &NEVER)
+                        .await
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::BrokenPipe
+                );
+                assert_eq!(resize_file.metadata().unwrap().len(), 0);
+            }
 
             for mode in [SyncMode::All, SyncMode::Data] {
                 assert_eq!(

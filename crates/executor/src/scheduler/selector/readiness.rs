@@ -11,6 +11,8 @@ use crate::SyncMode;
 use crate::scheduler::file_io::{read_at, write_at};
 use crate::scheduler::operation::cancellable;
 use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
+#[cfg(target_os = "linux")]
+use crate::{AllocationMode, FileAllocate};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
 use async_io::Async;
 use std::fs::File as StdFile;
@@ -161,6 +163,28 @@ impl SocketOperations for Selector {
                 Interest::Readable => socket.0.readable().await,
                 Interest::Writable => socket.0.writable().await,
             }
+        })
+        .await
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl FileAllocate for Selector {
+    async fn file_allocate(
+        &self,
+        file: &Self::File,
+        offset: u64,
+        length: u64,
+        mode: AllocationMode,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        let file = Arc::clone(file);
+        let cancellation = cancellation.clone();
+        blocking::unblock(move || {
+            crate::scheduler::blocking::run(&cancellation, || {
+                crate::scheduler::file_io::allocate(&file, offset, length, mode)
+            })
         })
         .await
     }

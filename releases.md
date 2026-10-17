@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add optional `AddressResolution` with owned address results, numeric ports, and family filtering. Native and Tokio share their bounded blocking pools; started lookups preserve their actual result after cancellation. Add simulated name fixtures, shared conformance/lifetime tests, and hostname resolution in the echo client.
+
 - Add optional `SocketMessages` with owned scatter/gather send/receive, IP addresses, peeking, routing flags, and truncation metadata. Native readiness, Tokio, and io_uring share the buffer/cancellation contract; include conformance tests and a commented UDP example.
 
 - Add typed `SocketOptions<O>` get/set capabilities with `SocketReuseAddress`, `SocketKeepalive`, and `TcpNoDelay`. Native, Tokio, io_uring, and simulated backends support lazy cancellable configuration; generic consumers require each option at compile time. Add shared contract tests and a commented listener configuration example.

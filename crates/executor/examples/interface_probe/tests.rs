@@ -468,3 +468,52 @@ fn simulated_allocation_reserves_space_and_preserves_file_contracts() {
     });
     assert_eq!(scheduler.open_files(), 0);
 }
+
+#[path = "tests/address_resolution.rs"]
+mod address_resolution;
+
+#[test]
+fn simulated_resolution_contract_and_explicit_names() {
+    use socketry_executor::{AddressResolution, AddressResolveOptions};
+    let scheduler = simulated::Scheduler::new(2, 2);
+    block_on(async {
+        address_resolution::check(&scheduler).await;
+        scheduler.insert_addresses("loopback.test", vec!["127.0.0.1".parse().unwrap()]);
+        address_resolution::connection(&scheduler, "loopback.test").await;
+        let options = AddressResolveOptions {
+            port: 80,
+            domain: None,
+        };
+        assert_eq!(
+            scheduler
+                .address_resolve("service.test", options, &NEVER)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        let addresses = vec![
+            "127.0.0.2".parse().unwrap(),
+            "::1".parse().unwrap(),
+            "127.0.0.2".parse().unwrap(),
+        ];
+        let unpolled = scheduler.address_resolve("service.test", options, &NEVER);
+        scheduler.insert_addresses("service.test", addresses);
+        assert_eq!(
+            unpolled.await.unwrap(),
+            vec![
+                "127.0.0.2:80".parse::<std::net::SocketAddr>().unwrap(),
+                "[::1]:80".parse().unwrap(),
+                "127.0.0.2:80".parse().unwrap()
+            ]
+        );
+        scheduler.insert_addresses("service.test", vec![]);
+        assert!(
+            scheduler
+                .address_resolve("service.test", options, &NEVER)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    });
+}

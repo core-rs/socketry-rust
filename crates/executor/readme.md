@@ -38,6 +38,23 @@ Workers poll pinned `Send + 'static` futures on ordinary thread stacks. A task m
 
 Blocking scheduler entry points panic on worker threads. Ordinary blocking system calls still block a worker, and CPU-intensive code must yield explicitly.
 
+## Address resolution
+
+Use the optional `AddressResolution` capability to resolve a hostname before creating or connecting a socket:
+
+```rust
+use socketry_executor::{AddressResolution, AddressResolveOptions, Cancellation, OperationResult};
+use std::net::SocketAddr;
+
+async fn addresses<S: AddressResolution>(scheduler: &S, cancellation: &Cancellation) -> OperationResult<Vec<SocketAddr>> {
+    scheduler.address_resolve("localhost", AddressResolveOptions { port: 9000, domain: None }, cancellation).await
+}
+```
+
+Native and Tokio schedulers and their handles use their existing bounded blocking pools, sharing capacity with `spawn_blocking`. Names have no port; numeric IPv6 literals have no brackets. `domain` optionally filters to `SocketDomain::Ipv4` or `Ipv6`; `None` accepts both. Results preserve resolver order and duplicates and may be empty. Applications choose connection candidates and retry policy explicitly.
+
+An unpolled future does no work. Cancellation can prevent admission or queued execution; once a system lookup starts, its actual result is returned. Dropping a future abandons its result while running work retains its owned inputs and capacity until completion. Await lookup before shutting down the scheduler for graceful completion. The simulator supplies deterministic exact-name fixtures. Service names, advanced resolver flags, and DNS-specific behavior remain future extensions.
+
 ## Blocking work
 
 Use `Blocking::spawn_blocking` for an owned synchronous closure that should run on a dedicated thread. Both schedulers and their handles implement this optional capability; generic libraries can require `S: Blocking`.

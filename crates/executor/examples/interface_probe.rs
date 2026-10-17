@@ -1,15 +1,15 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The same generic application using the public File and Socket capabilities.
+//! The same generic application using the public File, Socket, and AddressResolution capabilities.
 //! Run with `--features tokio` for native, Tokio, and simulated I/O.
 //! With `--no-default-features`, only the in-memory implementation runs.
 #[path = "interface_probe/simulated.rs"]
 mod simulated;
 
 use socketry_executor::{
-    Cancellation, File, FileOptions, IoBuf, OperationResult, Socket, SocketDomain, SocketProtocol,
-    SocketType,
+    AddressResolution, AddressResolveOptions, Cancellation, File, FileOptions, IoBuf,
+    OperationResult, Socket, SocketDomain, SocketProtocol, SocketType,
 };
 use std::{io, path::Path};
 static NEVER: Cancellation = Cancellation::never();
@@ -101,7 +101,7 @@ async fn serve<S: Socket>(scheduler: &S, listener: &S::Socket) -> OperationResul
     }
 }
 
-async fn exchange<S: Socket>(scheduler: &S) -> OperationResult<()> {
+async fn exchange<S: Socket + AddressResolution>(scheduler: &S) -> OperationResult<()> {
     let address = "127.0.0.1:0".parse().unwrap();
     let listener = scheduler
         .socket_open(
@@ -115,6 +115,21 @@ async fn exchange<S: Socket>(scheduler: &S) -> OperationResult<()> {
     scheduler.socket_listen(&listener, 128, &NEVER).await?;
     let address = scheduler.socket_local_addr(&listener)?;
     let client = async {
+        // The same hostname resolves through the system backend or the simulator's explicit table. Connection policy remains application code.
+        let addresses = scheduler
+            .address_resolve(
+                "localhost",
+                AddressResolveOptions {
+                    port: address.port(),
+                    domain: Some(SocketDomain::Ipv4),
+                },
+                &NEVER,
+            )
+            .await?;
+        let address = addresses
+            .into_iter()
+            .next()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::AddrNotAvailable))?;
         let socket = scheduler
             .socket_open(
                 SocketDomain::Ipv4,
@@ -147,7 +162,7 @@ async fn exchange<S: Socket>(scheduler: &S) -> OperationResult<()> {
     Ok(())
 }
 
-async fn exercise<S: File + Socket>(
+async fn exercise<S: File + Socket + AddressResolution>(
     scheduler: &S,
     source: &Path,
     destination: &Path,
@@ -162,6 +177,7 @@ async fn exercise<S: File + Socket>(
 fn main() -> io::Result<()> {
     let simulated = simulated::Scheduler::new(3, 2);
     simulated.insert(Path::new("source"), PAYLOAD);
+    simulated.insert_addresses("localhost", vec!["127.0.0.1".parse().unwrap()]);
     futures_lite::future::block_on(exercise(&simulated, Path::new("source"), Path::new("copy")))?;
     assert_eq!(simulated.contents(Path::new("copy")), PAYLOAD);
     println!(

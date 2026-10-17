@@ -38,6 +38,8 @@ See the [executor package](crates/executor/readme.md) for scheduling, ownership,
 cargo run --package socketry-executor --example work_stealing
 ```
 
+`AddressResolution` adds explicit hostname lookup through the scheduler, with owned results, a numeric port, and optional IPv4/IPv6 filtering. Native and Tokio use bounded blocking execution; the [echo client](examples/echo/client.rs) resolves `localhost` before connecting.
+
 ## Cooperative cancellation
 
 `Cancellation` signals a shutdown request without destroying futures. Clones share the request; `child()` creates a boundary that receives parent cancellation without cancelling its parent or siblings. Use one root for application shutdown and children for independently stoppable services. Dropping a signal does not cancel it.

@@ -18,6 +18,9 @@ use std::{
     task::Poll,
 };
 
+#[path = "simulated/address_resolution.rs"]
+mod address_resolution;
+
 type Bytes = Arc<Mutex<Vec<u8>>>;
 
 fn available_port(
@@ -49,6 +52,7 @@ fn reserve_address(
 }
 
 pub struct Scheduler {
+    names: Mutex<HashMap<String, Vec<std::net::IpAddr>>>,
     files: Mutex<HashMap<PathBuf, Bytes>>,
     reservations: Mutex<HashMap<SocketAddr, Weak<Reservation>>>,
     listeners: Mutex<HashMap<SocketAddr, Weak<Incoming>>>,
@@ -135,6 +139,7 @@ impl Scheduler {
     pub fn new(read_limit: usize, write_limit: usize) -> Self {
         assert!(read_limit > 0 && write_limit > 0);
         Self {
+            names: Mutex::new(HashMap::new()),
             files: Mutex::new(HashMap::new()),
             reservations: Mutex::new(HashMap::new()),
             listeners: Mutex::new(HashMap::new()),

@@ -1,20 +1,36 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-// `Socket` and `IoBuf` are traits: importing them makes their methods available.
+// `Socket`, `AddressResolution`, and `IoBuf` are traits: importing them makes their methods available.
 use socketry::{
-    Cancellation, IoBuf, OperationResult, Scheduler, Socket, SocketDomain, SocketProtocol,
-    SocketType,
+    AddressResolution, AddressResolveOptions, Cancellation, IoBuf, OperationResult, Scheduler,
+    Socket, SocketDomain, SocketProtocol, SocketType,
 };
 use std::io;
 
-// This function works with any scheduler implementing the `Socket` trait. `&S` and `&Cancellation` borrow values owned by `main()`. The `Vec` is owned by this future and returned with the echoed bytes.
-async fn echo<S: Socket>(
+// This function works with any scheduler implementing the `Socket` and `AddressResolution` traits. `&S` and `&Cancellation` borrow values owned by `main()`. The `Vec` is owned by this future and returned with the echoed bytes.
+async fn echo<S: Socket + AddressResolution>(
     scheduler: &S,
     mut buffer: Vec<u8>,
     cancellation: &Cancellation,
 ) -> OperationResult<Vec<u8>> {
-    // This is the address used by `server.rs`. Open the socket first, then await the nonblocking connect operation.
+    // Resolve through the scheduler so the potentially blocking system lookup runs on its bounded pool. The hostname has no port; the options supply it and select IPv4 to match server.rs. Cancellation can prevent a queued lookup from starting, but cannot interrupt an already-running system resolver.
+    let addresses = scheduler
+        .address_resolve(
+            "localhost",
+            AddressResolveOptions {
+                port: 9000,
+                domain: Some(SocketDomain::Ipv4),
+            },
+            cancellation,
+        )
+        .await?;
+    // This local demonstration chooses the first IPv4 result. A general client should define its own retry or connection-racing policy over the returned candidates.
+    let address = addresses
+        .into_iter()
+        .next()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::AddrNotAvailable))?;
+    // Open the socket first, then await the nonblocking connect operation.
     let socket = scheduler
         .socket_open(
             SocketDomain::Ipv4,
@@ -24,7 +40,7 @@ async fn echo<S: Socket>(
         )
         .await?;
     scheduler
-        .socket_connect(&socket, "127.0.0.1:9000".parse().unwrap(), cancellation)
+        .socket_connect(&socket, address, cancellation)
         .await?;
 
     let length = buffer.len();

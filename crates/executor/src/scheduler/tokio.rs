@@ -1447,3 +1447,33 @@ impl SocketMessages for Scheduler {
             .await
     }
 }
+
+impl crate::AddressResolution for SchedulerHandle {
+    async fn address_resolve(
+        &self,
+        name: &str,
+        options: crate::AddressResolveOptions,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Vec<SocketAddr>> {
+        crate::scheduler::address_resolution::system::resolve(
+            &self.shared.blocking,
+            name,
+            options,
+            cancellation,
+        )
+        .await
+    }
+}
+
+impl crate::AddressResolution for Scheduler {
+    async fn address_resolve(
+        &self,
+        name: &str,
+        options: crate::AddressResolveOptions,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Vec<SocketAddr>> {
+        self.handle
+            .address_resolve(name, options, cancellation)
+            .await
+    }
+}

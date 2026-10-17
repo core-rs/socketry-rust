@@ -20,7 +20,7 @@ Pass the implementation into libraries explicitly. A library should require the 
 
 ## Capability traits and static dispatch
 
-`File`, `Socket`, and `Clock` name scheduler capabilities. `Spawn` provides primitive task dispatch and returns an owning task handle. `Blocking` adds optional execution of owned synchronous closures with bounded asynchronous admission. `File::File` and `Socket::Socket` are associated resource types chosen by each implementation. Native and Tokio use concrete `FileDescriptor` and `SocketDescriptor` types. `Socket` replaces the earlier capability name `Network`.
+`File`, `Socket`, and `Clock` name scheduler capabilities. `Spawn` provides primitive task dispatch and returns an owning task handle. `Blocking` adds optional execution of owned synchronous closures with bounded asynchronous admission. `AddressResolution` adds hostname lookup independently of `Socket`. `File::File` and `Socket::Socket` are associated resource types chosen by each implementation. Native and Tokio use concrete `FileDescriptor` and `SocketDescriptor` types. `Socket` replaces the earlier capability name `Network`.
 
 Prefer generic trait bounds, concrete resource types, and concrete future types. These allow compile-time capability checking, monomorphization, and inlining without requiring a boxed future for each operation. The compiler decides which calls to inline; the interface should make that optimization possible.
 
@@ -95,6 +95,26 @@ io_uring submits native `SendMsg`/`RecvMsg` requests and probes both opcodes at 
 
 The [message example](examples/socket_messages.rs) demonstrates a generic scatter/gather UDP exchange. Shared contracts exercise IPv4/IPv6 addresses, connected sends, peeking, truncation, empty messages, buffer views, non-`Sync` buffers, cancellation, stream reads/EOF, and resource cleanup across concrete backends. Native tests also check invalid states, closed schedulers, and foreign Tokio runtimes.
 
+
+## Address resolution
+
+`AddressResolution` is an optional capability implemented by native and Tokio schedulers and their handles, plus the example simulator. It is independent of `Socket`, `Blocking`, and the I/O selector at the public boundary. A consumer can require `S: AddressResolution + Socket` without imposing how lookup is implemented.
+
+```rust,ignore
+let addresses = scheduler.address_resolve(
+    "localhost",
+    AddressResolveOptions { port: 9000, domain: Some(SocketDomain::Ipv4) },
+    &cancellation,
+).await?;
+```
+
+The result is `OperationResult<Vec<SocketAddr>>`. `AddressResolveOptions` supplies a numeric port and an optional family filter; its default accepts both families with port zero. Names are hostnames or unbracketed numeric IP literals, without a port. Empty names and embedded NUL bytes return `InvalidInput`. Every returned address has the requested port and matches the family filter. An empty list is valid, including when filtering removes every address. Resolver order and duplicates are preserved. Connection attempts and connection-racing policy belong above this primitive.
+
+Native and Tokio use `std::net::ToSocketAddrs` on their existing bounded blocking pool, sharing admission limits with `spawn_blocking`. This preserves system resolver policy, including hosts-file lookup; it is not a DNS-only interface. The family option filters results after system lookup, rather than promising family-specific queries. Service names, explicit resolver flags, canonical names, reverse lookup, IDNA conversion, and a Socketry cache are outside this initial contract. Resolver errors retain their standard-library representation; error kinds and messages can vary by OS. A later asynchronous resolver can implement the same capability independently.
+
+Resolution is lazy and checks cancellation before validation and admission. A worker checks it again before starting. Queued cancellation can take until a worker reaches the job. Once lookup starts, its actual success or failure wins a racing cancellation; it cannot be forcibly interrupted. Dropping the future prevents queued execution when observed in time, or abandons the result of a running lookup. The worker owns the name and retains its capacity until completion. Graceful callers await lookup before scheduler shutdown. Shutdown rejects admission and discards queued lookups with `BrokenPipe`, or cancellation when that signal is also set; started lookups finish independently. Tokio lookup uses the adapter's pool and does not need its runtime to be driven.
+
+The simulator resolves numeric literals or exact names from an explicit table. Unknown names return `NotFound`; configured empty results are valid. It models neither DNS timing nor system search policy. Shared contracts cover IPv4/IPv6 literals, family filtering, cancellation, invalid input, and composing lookup with socket connection. Controlled blocking lookups test queueing, abandonment, completion races, shutdown, and retained capacity without external DNS. The [echo client](../../examples/echo/client.rs) demonstrates resolving `localhost` before connecting.
 
 ## Platform support and fallbacks
 
@@ -513,7 +533,7 @@ Additional capability shapes follow the same convention:
 | File allocation (`FileAllocate`, implemented on Linux) | `file_allocate(file, offset, length, mode, cancellation)` | `OperationResult<()>` |
 | Message send | `socket_sendmsg(socket, owned_message, flags, cancellation)` | Transfer result together with the owned message |
 | Message receive | `socket_recvmsg(socket, owned_buffers, flags, cancellation)` | Copied byte count, sender address and truncation status, together with the owned buffers; ancillary data is a future extension |
-| Address resolution | `address_resolve(name, options, cancellation)` | `OperationResult<ResolvedAddresses>` |
+| Address resolution | `address_resolve(name, options, cancellation)` | `OperationResult<Vec<SocketAddr>>` |
 
 These rows identify extension capabilities; they do not require every scheduler to implement every operation. Synchronization builds on ordinary futures and wakers, with lost-wakeup protection inside each primitive. `Spawn::spawn(future)` is primitive dispatch with no group or owner argument. It returns an awaitable task handle; dispatch failures are reported before execution. Grouping and group lifecycle belong above this interface.
 
@@ -946,12 +966,13 @@ The simulator has bounded in-memory file sizes and unbounded byte queues. It doe
 | Cancellation | `Cancellation`, `Cancelled`, `defer_cancel`, and cancellation-aware file/socket operations implemented. Application shutdown is cooperative. |
 | Signal notifications | `Notify<Value>`, `Signals`, and optional Unix registration guards implemented for native and Tokio; each guard owns its dispatch task. |
 | Runtime lifetime | Application waits are explicit. Runtime shutdown abandons futures; backend retention protects submitted I/O. Accepted file-close and socket-close/shutdown submissions survive abandonment and are drained by graceful shutdown. |
-| Capabilities | Public `File`, `Socket`, `SocketOptions<O>`, `SocketRegistration`, `Clock`, `Spawn`, and `Blocking`; associated resources and initial file/socket creation implemented. Broader hooks remain design work. |
+| Capabilities | Public `File`, `Socket`, `SocketOptions<O>`, `SocketMessages`, `SocketRegistration`, `AddressResolution`, `Clock`, `Spawn`, and `Blocking`; associated resources and initial file/socket creation implemented. Broader hooks remain design work. |
 | Blocking execution | Dedicated native/Tokio pools, configurable worker and admission limits, queued cancellation, and owning completion handles implemented. Started closures finish independently; graceful completion requires awaiting them. |
 | Linked operations | Prepared chains and `Linked` remain proposed; native linking, whole-chain blocking jobs, and readiness sequencing are not implemented. |
 | File operations | `file_open`, `file_seek`, `file_sync`, `file_truncate`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at` implemented with owned buffers. Optional `FileAllocate` implemented on Linux with `Extend` and `KeepSize`. `file_close`/`file_close_submit` implemented with exclusive ownership and bounded cleanup; metadata hooks pending. |
 | Submission and completion | File close and socket close/shutdown pairs share bounded admission and persistent cleanup jobs. Advice pairs and safe CQE suppression remain proposed. The public blocking pool has its own bounded admission. |
-| Socket operations | `socket_open`, `socket_bind`, syscall-like `socket_listen`, `socket_connect`, `socket_accept`, address inspection, read/write, and readiness implemented for IPv4/IPv6 stream and datagram sockets. Directional shutdown and explicit close, with completion and admission-only forms, are implemented. Typed `SocketOptions<O>` adds get/set for address reuse, keepalive, and TCP no-delay. Message/address I/O remains pending. |
+| Socket operations | `socket_open`, `socket_bind`, syscall-like `socket_listen`, `socket_connect`, `socket_accept`, address inspection, read/write, and readiness implemented for IPv4/IPv6 stream and datagram sockets. Directional shutdown and explicit close, with completion and admission-only forms, are implemented. Typed `SocketOptions<O>` adds get/set for address reuse, keepalive, and TCP no-delay. `SocketMessages` implements owned scatter/gather payload/address I/O; ancillary data remains pending. |
+| Address resolution | Optional `AddressResolution` returns owned IP socket addresses with a numeric port and optional family filter. Native/Tokio share their bounded blocking pools; the simulator uses an explicit name table. |
 | Backends | Native readiness, blocking file fallbacks, Linux io_uring, and an adapter to an existing Tokio runtime implemented. Tokio uses `AsyncFd` on Unix and async-io readiness on Windows; the example simulator implements the public I/O traits. |
 | Buffers | Unsafe `IoBuf`/`IoBufMut`, `Vec<u8>`, `Box<[u8]>`, and owned `BufferSlice` implemented. Registered leases and pools remain proposed. |
 | Buffer forwarding | `with_previous_buffer` is hypothetical, with no selected implementation target. |

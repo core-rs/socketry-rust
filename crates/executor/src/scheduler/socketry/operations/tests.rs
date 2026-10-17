@@ -9,8 +9,8 @@ use crate::scheduler::{Clock, File, Interest, Socket};
 use std::fs::OpenOptions;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, atomic::AtomicU64};
 use std::time::Duration;
 
 fn listening_socket() -> (TcpListener, SocketAddr) {
@@ -147,7 +147,7 @@ fn scheduler_and_handle_forward_network_file_and_clock_operations() {
         NEXT_FILE.fetch_add(1, Ordering::Relaxed)
     ));
     let _cleanup = Cleanup(path.clone());
-    let file = Arc::new(
+    let file = crate::FileHandle::from(
         OpenOptions::new()
             .create_new(true)
             .read(true)
@@ -180,24 +180,20 @@ fn scheduler_and_handle_forward_network_file_and_clock_operations() {
         assert_eq!(buffer, vec![43]);
 
         let (result, buffer) = scheduler
-            .file_write_at(&Arc::clone(&file), b"data".to_vec(), 0, &NEVER)
+            .file_write_at(&file, b"data".to_vec(), 0, &NEVER)
             .await;
         assert_eq!(result.unwrap(), 4);
         assert_eq!(buffer, b"data".to_vec());
-        let (result, buffer) = handle
-            .file_read_at(&Arc::clone(&file), vec![0; 4], 0, &NEVER)
-            .await;
+        let (result, buffer) = handle.file_read_at(&file, vec![0; 4], 0, &NEVER).await;
         assert_eq!(result.unwrap(), 4);
         assert_eq!(buffer, b"data".to_vec());
 
         let (result, buffer) = handle
-            .file_write_at(&Arc::clone(&file), b"test".to_vec(), 4, &NEVER)
+            .file_write_at(&file, b"test".to_vec(), 4, &NEVER)
             .await;
         assert_eq!(result.unwrap(), 4);
         assert_eq!(buffer, b"test".to_vec());
-        let (result, buffer) = scheduler
-            .file_read_at(&Arc::clone(&file), vec![0; 4], 4, &NEVER)
-            .await;
+        let (result, buffer) = scheduler.file_read_at(&file, vec![0; 4], 4, &NEVER).await;
         assert_eq!(result.unwrap(), 4);
         assert_eq!(buffer, b"test".to_vec());
 

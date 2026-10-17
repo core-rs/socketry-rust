@@ -28,7 +28,11 @@ mod file_truncate;
 #[path = "../examples/interface_probe/tests/file_allocate.rs"]
 mod file_allocate;
 
+#[path = "../examples/interface_probe/tests/file_close.rs"]
+mod file_close;
+
 async fn resources<S: File + Socket>(scheduler: &S, root: &Path) {
+    file_close::check(scheduler, root).await;
     stateful_file::check(scheduler, root).await;
     file_sync::check(scheduler, root).await;
     file_truncate::check(scheduler, root).await;
@@ -251,6 +255,12 @@ fn native_resources() {
     let third = tempfile::tempdir().unwrap();
     let readiness = socketry_executor::scheduler::selector::readiness::Selector::new().unwrap();
     scheduler.block_on(resources(&readiness, third.path()));
+    #[cfg(all(feature = "io-uring", target_os = "linux"))]
+    {
+        let fourth = tempfile::tempdir().unwrap();
+        let handle = scheduler.handle();
+        scheduler.block_on(file_close::check(handle.selector().unwrap(), fourth.path()));
+    }
 }
 
 #[test]

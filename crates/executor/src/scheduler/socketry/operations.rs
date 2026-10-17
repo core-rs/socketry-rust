@@ -170,6 +170,24 @@ impl FileAllocate for SchedulerHandle {
 
 impl File for SchedulerHandle {
     type File = <DefaultSelector as File>::File;
+    async fn file_close(&self, file: Self::File) -> io::Result<()> {
+        check_open(
+            self.shared
+                .closed
+                .load(std::sync::atomic::Ordering::Acquire),
+        )?;
+        crate::scheduler::file_close::close(&self.shared.cleanup, file).await
+    }
+
+    async fn file_close_submit(&self, file: Self::File) -> io::Result<()> {
+        check_open(
+            self.shared
+                .closed
+                .load(std::sync::atomic::Ordering::Acquire),
+        )?;
+        crate::scheduler::file_close::submit_only(&self.shared.cleanup, file).await
+    }
+
     async fn file_truncate(
         &self,
         file: &Self::File,
@@ -363,6 +381,14 @@ impl FileAllocate for Scheduler {
 
 impl File for Scheduler {
     type File = <SchedulerHandle as File>::File;
+    async fn file_close(&self, file: Self::File) -> io::Result<()> {
+        self.handle.file_close(file).await
+    }
+
+    async fn file_close_submit(&self, file: Self::File) -> io::Result<()> {
+        self.handle.file_close_submit(file).await
+    }
+
     async fn file_truncate(
         &self,
         file: &Self::File,

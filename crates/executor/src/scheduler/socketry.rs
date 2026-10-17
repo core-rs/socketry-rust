@@ -44,6 +44,8 @@ struct Registry {
 pub(crate) struct Shared {
     blocking: BlockingPool,
     #[cfg(feature = "native")]
+    cleanup: BlockingPool,
+    #[cfg(feature = "native")]
     selector: std::sync::OnceLock<io::Result<super::selector::DefaultSelector>>,
     registry: Mutex<Registry>,
     pub(crate) ready: Injector<Runnable>,
@@ -168,6 +170,8 @@ impl Shared {
             .collect::<Vec<_>>();
         drop(registry);
         self.blocking.close();
+        #[cfg(feature = "native")]
+        self.cleanup.close();
         for waker in wakers {
             waker.wake();
         }
@@ -329,7 +333,7 @@ impl Scheduler {
         Self::with_workers_and_blocking(worker_count, BlockingOptions::default())
     }
 
-    /// Configure future workers and the separate, lazily started blocking pool.
+    /// Configure future workers and the separate, lazily started blocking and cleanup pools. Each pool has these limits.
     pub fn with_workers_and_blocking(
         worker_count: usize,
         blocking: BlockingOptions,
@@ -356,6 +360,8 @@ impl Scheduler {
         let queues: Vec<_> = (0..worker_count).map(|_| Worker::new_fifo()).collect();
         let shared = Arc::new(Shared {
             blocking: BlockingPool::new(blocking),
+            #[cfg(feature = "native")]
+            cleanup: BlockingPool::new(blocking),
             #[cfg(feature = "native")]
             selector: std::sync::OnceLock::new(),
             registry: Mutex::new(Registry {
@@ -456,13 +462,16 @@ impl Scheduler {
 
     /// Close admission, cancel all future tasks, and join their worker threads. In-progress polls must return; this cannot interrupt a blocking call.
     ///
-    /// Queued blocking jobs are discarded. Started blocking jobs finish independently; await their handles first for graceful shutdown.
+    /// Queued `spawn_blocking` jobs are discarded. Started blocking jobs finish independently; await their handles first for graceful shutdown. Accepted file-close jobs always finish; shutdown outside a worker waits for them.
     ///
     /// # Panics
-    /// Panics on a Socketry worker. Dropping a scheduler on a worker instead
-    /// requests shutdown without joining, allowing that worker to finish.
+    /// Panics on a Socketry future or blocking-pool worker. Dropping a scheduler on either kind of worker instead requests shutdown without joining or draining, allowing that worker to finish.
     pub fn shutdown(self) {
         worker::assert_outside_worker();
+        assert!(
+            !crate::blocking_pool::is_worker(),
+            "cannot synchronously shut down a scheduler on a blocking-pool worker"
+        );
         drop(self);
     }
 }
@@ -488,10 +497,12 @@ impl Spawn for Scheduler {
 impl Drop for Scheduler {
     fn drop(&mut self) {
         self.handle.shared.close();
-        if !worker::is_worker() {
+        if !worker::is_worker() && !crate::blocking_pool::is_worker() {
             for worker in self.workers.drain(..) {
                 let _ = worker.join();
             }
+            #[cfg(feature = "native")]
+            self.handle.shared.cleanup.wait_submitted_blocking();
             #[cfg(all(feature = "io-uring", target_os = "linux"))]
             if let Some(Ok(selector)) = self.handle.shared.selector.get() {
                 selector.wait_closed();

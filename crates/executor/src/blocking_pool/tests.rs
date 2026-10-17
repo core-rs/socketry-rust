@@ -9,6 +9,79 @@ use std::time::Duration;
 static NEVER: Cancellation = Cancellation::never();
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+#[test]
+fn submitted_jobs_survive_abandonment_and_shutdown_with_bounded_admission() {
+    let pool = BlockingPool::new(BlockingOptions {
+        threads: 1,
+        capacity: 2,
+    });
+    let (started, start) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let running = block_on(pool.spawn(
+        move || {
+            started.send(()).unwrap();
+            released.recv_timeout(TIMEOUT).unwrap();
+        },
+        &NEVER,
+    ))
+    .unwrap();
+    start.recv_timeout(TIMEOUT).unwrap();
+    let (completed, completion) = mpsc::channel();
+    let submitted = block_on(pool.submit(move || completed.send(()).unwrap())).unwrap();
+    // Dropping a cleanup result cannot abandon execution, even while it remains queued.
+    drop(submitted);
+    let mut waiting = Box::pin(pool.submit(|| panic!("unadmitted job must not run")));
+    assert!(block_on(poll_once(&mut waiting)).is_none());
+    let mut drained = Box::pin(pool.wait_submitted());
+    assert!(block_on(poll_once(&mut drained)).is_none());
+    pool.close();
+    assert!(matches!(
+        block_on(waiting),
+        Err(BlockingError::SchedulerClosed)
+    ));
+    assert!(completion.try_recv().is_err());
+    release.send(()).unwrap();
+    block_on(running).unwrap();
+    block_on(drained);
+    completion.recv_timeout(TIMEOUT).unwrap();
+    pool.wait_submitted_blocking();
+}
+
+#[test]
+fn submitted_jobs_release_capacity_and_blocking_drain_waits_for_execution() {
+    let pool = BlockingPool::new(BlockingOptions {
+        threads: 1,
+        capacity: 1,
+    });
+    let (started, start) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let first = block_on(pool.submit(move || {
+        started.send(()).unwrap();
+        released.recv_timeout(TIMEOUT).unwrap();
+    }))
+    .unwrap();
+    start.recv_timeout(TIMEOUT).unwrap();
+    let mut waiting = Box::pin(pool.submit(|| 42));
+    assert!(block_on(poll_once(&mut waiting)).is_none());
+    thread::scope(|scope| {
+        let drain = scope.spawn(|| pool.wait_submitted_blocking());
+        let deadline = std::time::Instant::now() + TIMEOUT;
+        // One listener belongs to the suspended admission future; wait until the drain registers its second listener before releasing the worker.
+        while pool.shared.capacity.total_listeners() < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "drain did not start waiting"
+            );
+            thread::yield_now();
+        }
+        release.send(()).unwrap();
+        assert_eq!(block_on(block_on(waiting).unwrap()).unwrap().unwrap(), 42);
+        drain.join().unwrap();
+    });
+    block_on(first).unwrap().unwrap();
+    block_on(pool.wait_submitted());
+}
+
 struct DropGate {
     started: mpsc::Sender<()>,
     released: mpsc::Receiver<()>,

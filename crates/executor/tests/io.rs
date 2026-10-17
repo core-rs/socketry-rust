@@ -378,8 +378,26 @@ mod native {
         let socket = handle.register_socket(client).unwrap();
         let (raw_listener, address) = listening_socket();
         let registered_listener = handle.register_listener(raw_listener).unwrap();
-        let file = Arc::new(StdFile::open(std::env::current_exe().unwrap()).unwrap());
+        let file = socketry_executor::FileHandle::from(
+            StdFile::open(std::env::current_exe().unwrap()).unwrap(),
+        );
         scheduler.shutdown();
+        futures_lite::future::block_on(async {
+            let close_file = socketry_executor::FileHandle::from(tempfile::tempfile().unwrap());
+            assert_eq!(
+                handle.file_close(close_file).await.unwrap_err().kind(),
+                io::ErrorKind::BrokenPipe
+            );
+            let close_file = socketry_executor::FileHandle::from(tempfile::tempfile().unwrap());
+            assert_eq!(
+                handle
+                    .file_close_submit(close_file)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::BrokenPipe
+            );
+        });
 
         let (client, _peer) = socket_pair();
         assert!(matches!(
@@ -457,14 +475,10 @@ mod native {
             let (result, buffer) = handle.io_write(&socket, vec![3, 4], &NEVER).await;
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
             assert_eq!(buffer, vec![3, 4]);
-            let (result, buffer) = handle
-                .file_read_at(&Arc::clone(&file), vec![5], 0, &NEVER)
-                .await;
+            let (result, buffer) = handle.file_read_at(&file, vec![5], 0, &NEVER).await;
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
             assert_eq!(buffer, vec![5]);
-            let (result, buffer) = handle
-                .file_write_at(&Arc::clone(&file), vec![6], 0, &NEVER)
-                .await;
+            let (result, buffer) = handle.file_write_at(&file, vec![6], 0, &NEVER).await;
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
             assert_eq!(buffer, vec![6]);
 
@@ -477,7 +491,7 @@ mod native {
                 io::ErrorKind::BrokenPipe
             );
 
-            let resize_file = Arc::new(tempfile::tempfile().unwrap());
+            let resize_file = socketry_executor::FileHandle::from(tempfile::tempfile().unwrap());
             assert_eq!(
                 handle
                     .file_truncate(&resize_file, 13, &NEVER)
@@ -486,7 +500,7 @@ mod native {
                     .kind(),
                 io::ErrorKind::BrokenPipe
             );
-            assert_eq!(resize_file.metadata().unwrap().len(), 0);
+            assert_eq!(resize_file.as_ref().metadata().unwrap().len(), 0);
             #[cfg(target_os = "linux")]
             {
                 use socketry_executor::{AllocationMode, FileAllocate};
@@ -498,7 +512,7 @@ mod native {
                         .kind(),
                     io::ErrorKind::BrokenPipe
                 );
-                assert_eq!(resize_file.metadata().unwrap().len(), 0);
+                assert_eq!(resize_file.as_ref().metadata().unwrap().len(), 0);
             }
 
             for mode in [SyncMode::All, SyncMode::Data] {
@@ -752,8 +766,28 @@ mod tokio_adapter {
         let socket = handle.register_socket(client).unwrap();
         let (listener, address) = listening_socket();
         let listener = handle.register_listener(listener).unwrap();
-        let file = Arc::new(StdFile::open(std::env::current_exe().unwrap()).unwrap());
+        let file = socketry_executor::FileHandle::from(
+            StdFile::open(std::env::current_exe().unwrap()).unwrap(),
+        );
         runtime.block_on(scheduler.shutdown());
+        runtime.block_on(async {
+            assert_eq!(
+                handle
+                    .file_close(tempfile::tempfile().unwrap().into())
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::BrokenPipe
+            );
+            assert_eq!(
+                handle
+                    .file_close_submit(tempfile::tempfile().unwrap().into())
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::BrokenPipe
+            );
+        });
 
         let (new_socket, _) = socket_pair();
         assert_eq!(
@@ -823,14 +857,10 @@ mod tokio_adapter {
             let (result, buffer) = handle.io_write(&socket, vec![2], &NEVER).await;
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
             assert_eq!(buffer, vec![2]);
-            let (result, buffer) = handle
-                .file_read_at(&Arc::clone(&file), vec![3], 0, &NEVER)
-                .await;
+            let (result, buffer) = handle.file_read_at(&file, vec![3], 0, &NEVER).await;
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
             assert_eq!(buffer, vec![3]);
-            let (result, buffer) = handle
-                .file_write_at(&Arc::clone(&file), vec![4], 0, &NEVER)
-                .await;
+            let (result, buffer) = handle.file_write_at(&file, vec![4], 0, &NEVER).await;
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
             assert_eq!(buffer, vec![4]);
 
@@ -843,7 +873,7 @@ mod tokio_adapter {
                 io::ErrorKind::BrokenPipe
             );
 
-            let resize_file = Arc::new(tempfile::tempfile().unwrap());
+            let resize_file = socketry_executor::FileHandle::from(tempfile::tempfile().unwrap());
             assert_eq!(
                 handle
                     .file_truncate(&resize_file, 13, &NEVER)
@@ -852,7 +882,7 @@ mod tokio_adapter {
                     .kind(),
                 io::ErrorKind::BrokenPipe
             );
-            assert_eq!(resize_file.metadata().unwrap().len(), 0);
+            assert_eq!(resize_file.as_ref().metadata().unwrap().len(), 0);
             #[cfg(target_os = "linux")]
             {
                 use socketry_executor::{AllocationMode, FileAllocate};
@@ -864,7 +894,7 @@ mod tokio_adapter {
                         .kind(),
                     io::ErrorKind::BrokenPipe
                 );
-                assert_eq!(resize_file.metadata().unwrap().len(), 0);
+                assert_eq!(resize_file.as_ref().metadata().unwrap().len(), 0);
             }
 
             for mode in [SyncMode::All, SyncMode::Data] {
@@ -1003,14 +1033,14 @@ fn ring_shutdown_racing_submissions_returns_owned_buffers() {
 }
 
 #[cfg(unix)]
-async fn sync_errors<S: File<File = Arc<StdFile>>>(scheduler: &S) {
+async fn sync_errors<S: File<File = socketry_executor::FileHandle>>(scheduler: &S) {
     use std::os::{fd::OwnedFd, unix::net::UnixStream};
     let (socket, _peer) = UnixStream::pair().unwrap();
-    let file = Arc::new(StdFile::from(OwnedFd::from(socket)));
+    let file = socketry_executor::FileHandle::from(StdFile::from(OwnedFd::from(socket)));
     for mode in [SyncMode::All, SyncMode::Data] {
         let expected = match mode {
-            SyncMode::All => file.sync_all(),
-            SyncMode::Data => file.sync_data(),
+            SyncMode::All => file.as_ref().sync_all(),
+            SyncMode::Data => file.as_ref().sync_data(),
         }
         .unwrap_err();
         let actual = scheduler.file_sync(&file, mode, &NEVER).await.unwrap_err();

@@ -5,6 +5,90 @@ static NEVER: crate::Cancellation = crate::Cancellation::never();
 
 use super::*;
 
+struct ExclusiveOnWake {
+    file: std::sync::Weak<StdFile>,
+    wakes: std::sync::atomic::AtomicUsize,
+}
+
+impl std::task::Wake for ExclusiveOnWake {
+    fn wake(self: Arc<Self>) {
+        assert_eq!(
+            self.file.strong_count(),
+            1,
+            "completion woke the caller before releasing backend ownership"
+        );
+        self.wakes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn completion_releases_file_ownership_before_waking_close_callers() {
+    use std::task::{Context, Waker};
+    for transfer in [false, true] {
+        for queued_drop in [false, true] {
+            let file = Arc::new(tempfile::tempfile().unwrap());
+            let observer = Arc::new(ExclusiveOnWake {
+                file: Arc::downgrade(&file),
+                wakes: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let waker = Waker::from(Arc::clone(&observer));
+            let mut context = Context::from_waker(&waker);
+            if transfer {
+                let (mut request, mut result) = request(1);
+                request.resource = Some(Resource::File(Arc::clone(&file), Some(0)));
+                assert!(
+                    std::pin::Pin::new(&mut result)
+                        .poll(&mut context)
+                        .is_pending()
+                );
+                if queued_drop {
+                    drop(request);
+                } else {
+                    request.finish(Ok(0));
+                }
+            } else {
+                let (mut request, mut result) = sync_request(1);
+                request.file = Some(Arc::clone(&file));
+                assert!(
+                    std::pin::Pin::new(&mut result)
+                        .poll(&mut context)
+                        .is_pending()
+                );
+                if queued_drop {
+                    drop(request);
+                } else {
+                    Box::new(request).finish(Ok(0));
+                }
+            }
+            assert_eq!(observer.wakes.load(Ordering::SeqCst), 1);
+        }
+    }
+}
+
+#[test]
+fn close_rejects_a_stopped_selector() {
+    async_io::block_on(async {
+        let selector = Selector::new().unwrap();
+        selector.shutdown().await;
+        assert_eq!(
+            selector
+                .file_close(tempfile::tempfile().unwrap().into())
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(
+            selector
+                .file_close_submit(tempfile::tempfile().unwrap().into())
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    });
+}
+
 #[test]
 fn queued_request_returns_its_buffer_if_the_selector_exits() {
     let (reply, mut result) = oneshot::channel();
@@ -12,10 +96,10 @@ fn queued_request_returns_its_buffer_if_the_selector_exits() {
     let allocation = buffer.as_ptr();
     let request = Request {
         identifier: 0,
-        resource: Resource::File(
+        resource: Some(Resource::File(
             Arc::new(StdFile::open(std::env::current_exe().unwrap()).unwrap()),
             Some(0),
-        ),
+        )),
         buffer: Some(buffer),
         pointer: |buffer| buffer.as_mut_ptr(),
         write: false,
@@ -73,7 +157,10 @@ fn request(identifier: u64) -> (Request, oneshot::Receiver<RawBufferResult>) {
     (
         Request {
             identifier,
-            resource: Resource::File(Arc::new(tempfile::tempfile().unwrap()), Some(0)),
+            resource: Some(Resource::File(
+                Arc::new(tempfile::tempfile().unwrap()),
+                Some(0),
+            )),
             buffer: Some(vec![1]),
             pointer: |buffer| buffer.as_mut_ptr(),
             write: false,
@@ -93,6 +180,7 @@ fn disconnected_selector() -> (Selector, UnixStream) {
             supports_file_truncate: true,
             supports_file_allocate: true,
             controller: Arc::new(Controller {
+                cleanup: crate::blocking_pool::BlockingPool::new(crate::BlockingOptions::default()),
                 commands,
                 notification,
                 next_identifier: AtomicU64::new(0),
@@ -168,16 +256,12 @@ fn initialization_propagates_each_system_failure() {
 fn rejected_operations_preserve_buffer_allocations() {
     async_io::block_on(async {
         let (selector, _peer) = disconnected_selector();
-        let file = Arc::new(tempfile::tempfile().unwrap());
-        let (_, buffer) = selector
-            .file_read_at(&Arc::clone(&file), Vec::new(), 0, &NEVER)
-            .await;
+        let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
+        let (_, buffer) = selector.file_read_at(&file, Vec::new(), 0, &NEVER).await;
         assert!(buffer.is_empty());
         let buffer = vec![7; 8];
         let allocation = buffer.as_ptr();
-        let (result, returned) = selector
-            .file_read_at(&Arc::clone(&file), buffer, 0, &NEVER)
-            .await;
+        let (result, returned) = selector.file_read_at(&file, buffer, 0, &NEVER).await;
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
         assert_eq!(returned.as_ptr(), allocation);
         selector
@@ -200,7 +284,7 @@ fn rejected_operations_preserve_buffer_allocations() {
 #[test]
 fn failure_retains_in_flight_resources_before_notifying_callers() {
     let (request, mut receiver) = request(0);
-    let Resource::File(file, _) = &request.resource else {
+    let Some(Resource::File(file, _)) = &request.resource else {
         panic!("file request")
     };
     let retained = Arc::downgrade(file);
@@ -290,7 +374,7 @@ fn closed_selector_rejects_its_direct_network_operations() {
                 .is_err()
         );
         assert!(!path.exists());
-        let file = Arc::new(tempfile::tempfile().unwrap());
+        let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
         assert_eq!(
             selector
                 .file_seek(&file, SeekFrom::Start(1), &NEVER)
@@ -319,7 +403,7 @@ fn closed_selector_rejects_its_direct_network_operations() {
                 io::ErrorKind::BrokenPipe
             );
         }
-        assert_eq!(file.metadata().unwrap().len(), 0);
+        assert_eq!(file.as_ref().metadata().unwrap().len(), 0);
         assert!(selector.connect(address, &NEVER).await.is_err());
         assert!(selector.accept(&listener, &NEVER).await.is_err());
         assert!(
@@ -512,6 +596,9 @@ fn cooperative_cancellation_waits_for_original_completion_and_preserves_progress
                 supports_file_truncate: true,
                 supports_file_allocate: true,
                 controller: Arc::new(Controller {
+                    cleanup: crate::blocking_pool::BlockingPool::new(
+                        crate::BlockingOptions::default(),
+                    ),
                     commands,
                     notification,
                     next_identifier: AtomicU64::new(0),
@@ -522,7 +609,7 @@ fn cooperative_cancellation_waits_for_original_completion_and_preserves_progress
                     }),
                 }),
             };
-            let file = Arc::new(tempfile::tempfile().unwrap());
+            let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
             let cancelled = Cancellation::new();
             let dropped = Arc::new(AtomicUsize::new(0));
             let buffer = CountedBuffer {
@@ -575,7 +662,7 @@ fn cancellation_before_submission_and_retry_returns_owned_buffers() {
         let cancellation = Cancellation::new();
         cancellation.cancel();
         let (selector, _peer) = disconnected_selector();
-        let file = Arc::new(tempfile::tempfile().unwrap());
+        let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
         let buffer = vec![5; 3];
         let allocation = buffer.as_ptr();
         let (result, buffer) = selector
@@ -603,7 +690,7 @@ fn sync_request(identifier: u64) -> (FileRequest, oneshot::Receiver<io::Result<(
     (
         FileRequest {
             identifier,
-            file: Arc::new(tempfile::tempfile().unwrap()),
+            file: Some(Arc::new(tempfile::tempfile().unwrap())),
             operation: FileOperation::Sync(SyncMode::All),
             reply: Some(reply),
             cancelling: false,
@@ -615,7 +702,7 @@ fn sync_request(identifier: u64) -> (FileRequest, oneshot::Receiver<io::Result<(
 #[test]
 fn queued_sync_releases_its_file_and_reports_selector_exit() {
     let (request, mut result) = sync_request(0);
-    let retained = Arc::downgrade(&request.file);
+    let retained = Arc::downgrade(request.file.as_ref().unwrap());
     drop(request);
     assert_eq!(retained.strong_count(), 0);
     assert_eq!(
@@ -627,7 +714,7 @@ fn queued_sync_releases_its_file_and_reports_selector_exit() {
 #[test]
 fn failed_selector_retains_in_flight_sync_file_before_notifying_caller() {
     let (request, mut result) = sync_request(0);
-    let retained = Arc::downgrade(&request.file);
+    let retained = Arc::downgrade(request.file.as_ref().unwrap());
     let mut in_flight = InFlight::default();
     in_flight.0.insert(0, Box::new(request));
     drop(in_flight);
@@ -639,7 +726,7 @@ fn failed_selector_retains_in_flight_sync_file_before_notifying_caller() {
 fn sync_rejects_disconnected_and_exhausted_selectors() {
     async_io::block_on(async {
         let (selector, _peer) = disconnected_selector();
-        let file = Arc::new(tempfile::tempfile().unwrap());
+        let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
         assert_eq!(
             selector
                 .file_sync(&file, SyncMode::All, &NEVER)
@@ -667,7 +754,7 @@ fn sync_rejects_disconnected_and_exhausted_selectors() {
 fn pending_and_in_flight_sync_cancellation_preserve_retirement() {
     let (mut reactor, commands, _notification) = new_reactor();
     let (pending, mut pending_result) = sync_request(1);
-    let pending_file = Arc::downgrade(&pending.file);
+    let pending_file = Arc::downgrade(pending.file.as_ref().unwrap());
     reactor.pending.push_back(Box::new(pending));
     reactor.cancel(1);
     assert_eq!(
@@ -682,7 +769,7 @@ fn pending_and_in_flight_sync_cancellation_preserve_retirement() {
     assert_eq!(pending_file.strong_count(), 0);
 
     let (mut request, mut result) = sync_request(2);
-    let retained = Arc::downgrade(&request.file);
+    let retained = Arc::downgrade(request.file.as_ref().unwrap());
     let entry = request.entry();
     reactor.in_flight.0.insert(2, Box::new(request));
     // SAFETY: The in-flight map owns the file until the original completion is consumed.
@@ -729,6 +816,9 @@ fn buffer_free_file_operations_are_lazy_and_retain_the_file_until_original_compl
                         supports_file_truncate: true,
                         supports_file_allocate: true,
                         controller: Arc::new(Controller {
+                            cleanup: crate::blocking_pool::BlockingPool::new(
+                                crate::BlockingOptions::default(),
+                            ),
                             commands,
                             notification,
                             next_identifier: AtomicU64::new(0),
@@ -739,7 +829,7 @@ fn buffer_free_file_operations_are_lazy_and_retain_the_file_until_original_compl
                             }),
                         }),
                     };
-                    let file = Arc::new(tempfile::tempfile().unwrap());
+                    let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
                     let cancellation = Cancellation::new();
                     drop(run_file_operation(
                         &selector,
@@ -748,7 +838,7 @@ fn buffer_free_file_operations_are_lazy_and_retain_the_file_until_original_compl
                         &cancellation,
                     ));
                     assert!(incoming.try_recv().is_err());
-                    assert_eq!(Arc::strong_count(&file), 1);
+                    assert_eq!(Arc::strong_count(&file.0), 1);
                     let mut sync = Box::pin(run_file_operation(
                         &selector,
                         &file,
@@ -765,7 +855,7 @@ fn buffer_free_file_operations_are_lazy_and_retain_the_file_until_original_compl
                     assert!(
                         matches!(incoming.try_recv().unwrap(), Command::Cancel(value) if value == identifier)
                     );
-                    assert_eq!(Arc::strong_count(&file), 2);
+                    assert_eq!(Arc::strong_count(&file.0), 2);
                     let completion = if complete {
                         Ok(0)
                     } else {
@@ -773,7 +863,7 @@ fn buffer_free_file_operations_are_lazy_and_retain_the_file_until_original_compl
                     };
                     if abandon {
                         drop(sync);
-                        assert_eq!(Arc::strong_count(&file), 2);
+                        assert_eq!(Arc::strong_count(&file.0), 2);
                         request.finish(completion);
                     } else {
                         request.finish(completion);
@@ -784,7 +874,7 @@ fn buffer_free_file_operations_are_lazy_and_retain_the_file_until_original_compl
                             assert!(matches!(result, Err(crate::OperationError::Cancelled(_))));
                         }
                     }
-                    assert_eq!(Arc::strong_count(&file), 1);
+                    assert_eq!(Arc::strong_count(&file.0), 1);
                 }
             }
         }
@@ -793,7 +883,7 @@ fn buffer_free_file_operations_are_lazy_and_retain_the_file_until_original_compl
 
 async fn run_file_operation(
     selector: &Selector,
-    file: &Arc<StdFile>,
+    file: &FileHandle,
     operation: FileOperation,
     cancellation: &Cancellation,
 ) -> OperationResult<()> {
@@ -837,7 +927,7 @@ fn truncate_capability_fallback_preserves_length_cursor_and_errors() {
                 .await
                 .unwrap();
             backend.file_truncate(&file, 5, &NEVER).await.unwrap();
-            assert_eq!(file.metadata().unwrap().len(), 5);
+            assert_eq!(file.as_ref().metadata().unwrap().len(), 5);
             assert_eq!(
                 backend
                     .file_seek(&file, SeekFrom::Current(0), &NEVER)
@@ -849,7 +939,7 @@ fn truncate_capability_fallback_preserves_length_cursor_and_errors() {
             assert_eq!(result.unwrap(), 2);
             assert_eq!(bytes, [0, 0]);
             backend.file_truncate(&file, 1, &NEVER).await.unwrap();
-            assert_eq!(file.metadata().unwrap().len(), 1);
+            assert_eq!(file.as_ref().metadata().unwrap().len(), 1);
             assert_eq!(
                 backend
                     .file_seek(&file, SeekFrom::Current(0), &NEVER)
@@ -879,7 +969,7 @@ fn truncate_capability_fallback_preserves_length_cursor_and_errors() {
                 backend.file_truncate(&reader, 0, &NEVER).await,
                 Err(crate::OperationError::Io(_))
             ));
-            assert_eq!(file.metadata().unwrap().len(), 1);
+            assert_eq!(file.as_ref().metadata().unwrap().len(), 1);
         }
         selector.shutdown().await;
     });
@@ -894,9 +984,9 @@ fn truncate_preparation_is_inert_and_failed_admission_preserves_file() {
         let entry = request.entry();
         assert_eq!(entry.get_user_data(), 123);
         assert_eq!(entry.get_opcode(), u32::from(opcode::Ftruncate::CODE));
-        assert_eq!(request.file.metadata().unwrap().len(), 0);
+        assert_eq!(request.file.as_ref().unwrap().metadata().unwrap().len(), 0);
         let (selector, _peer) = disconnected_selector();
-        let file = Arc::new(tempfile::tempfile().unwrap());
+        let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
         assert_eq!(
             selector
                 .file_truncate(&file, 13, &NEVER)
@@ -917,7 +1007,7 @@ fn truncate_preparation_is_inert_and_failed_admission_preserves_file() {
                 .to_string()
                 .contains("identifiers exhausted")
         );
-        assert_eq!(file.metadata().unwrap().len(), 0);
+        assert_eq!(file.as_ref().metadata().unwrap().len(), 0);
     });
 }
 
@@ -938,18 +1028,18 @@ fn allocation_native_and_fallback_preserve_contract_and_reserve_blocks() {
         for backend in [&selector, &fallback] {
             let directory = tempfile::tempdir().unwrap();
             allocation_contract::check(backend, directory.path()).await;
-            let file = Arc::new(tempfile::tempfile().unwrap());
-            let before = file.metadata().unwrap().blocks();
+            let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
+            let before = file.as_ref().metadata().unwrap().blocks();
             backend
                 .file_allocate(&file, 4096, 128 * 1024, AllocationMode::KeepSize, &NEVER)
                 .await
                 .unwrap();
-            assert_eq!(file.metadata().unwrap().len(), 0);
-            assert!(file.metadata().unwrap().blocks() > before);
+            assert_eq!(file.as_ref().metadata().unwrap().len(), 0);
+            assert!(file.as_ref().metadata().unwrap().blocks() > before);
         }
         selector.shutdown().await;
         for backend in [&selector, &fallback] {
-            let file = Arc::new(tempfile::tempfile().unwrap());
+            let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
             assert_eq!(
                 backend
                     .file_allocate(&file, 0, 4096, AllocationMode::Extend, &NEVER)
@@ -958,7 +1048,7 @@ fn allocation_native_and_fallback_preserve_contract_and_reserve_blocks() {
                     .kind(),
                 io::ErrorKind::BrokenPipe
             );
-            assert_eq!(file.metadata().unwrap().len(), 0);
+            assert_eq!(file.as_ref().metadata().unwrap().len(), 0);
         }
     });
 }
@@ -976,10 +1066,10 @@ fn allocation_preparation_is_inert_and_failed_admission_preserves_file() {
             let entry = request.entry();
             assert_eq!(entry.get_user_data(), 123);
             assert_eq!(entry.get_opcode(), u32::from(opcode::Fallocate::CODE));
-            assert_eq!(request.file.metadata().unwrap().len(), 0);
+            assert_eq!(request.file.as_ref().unwrap().metadata().unwrap().len(), 0);
         }
         let (selector, _peer) = disconnected_selector();
-        let file = Arc::new(tempfile::tempfile().unwrap());
+        let file = crate::FileHandle::from(tempfile::tempfile().unwrap());
         assert_eq!(
             selector
                 .file_allocate(&file, 0, 4096, AllocationMode::Extend, &NEVER)
@@ -1000,6 +1090,6 @@ fn allocation_preparation_is_inert_and_failed_admission_preserves_file() {
                 .to_string()
                 .contains("identifiers exhausted")
         );
-        assert_eq!(file.metadata().unwrap().len(), 0);
+        assert_eq!(file.as_ref().metadata().unwrap().len(), 0);
     });
 }

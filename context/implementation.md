@@ -23,7 +23,7 @@ This guide describes the current implementation and its boundaries. Read [the de
 - Task cancellation sets a flag and wakes it. The future is destroyed after an in-progress poll returns. TaskHandle::cancel awaits that destruction.
 - Awaited task results report cancellation or the original panic payload. Scheduler::run does not aggregate task errors.
 - Dispatch takes a future and returns a handle without a group or owner argument. There is no implicit task tree: destruction drops handles still owned by a future; transferred handles remain owned elsewhere. Higher-level groups belong above Spawn and are outside the executor for now.
-- Scheduler Drop cancels all tasks, joining threads outside a worker. On a worker it requests shutdown without joining. Surviving handles reject spawn.
+- Scheduler Drop cancels all tasks, joining threads outside future and blocking-pool workers. On either kind of worker it requests shutdown without joining or draining; explicit synchronous shutdown panics in those contexts. Surviving handles reject spawn.
 
 ## Blocking work
 
@@ -32,7 +32,7 @@ This guide describes the current implementation and its boundaries. Read [the de
 - The pool uses a mutex-protected queue, a condition variable for workers, and event listeners for asynchronous admission. Register listeners before inspecting capacity; never invoke wakers or destroy user captures/results under the queue lock.
 - Check cancellation before admission and again with abandonment before calling the closure. Queued cancellation need not complete until dequeued. Once started, preserve the real output; closures can cooperate explicitly using a captured signal. Catch job panics and release capacity even when abandoned result destructors panic.
 - Close admission and discard queued jobs at scheduler shutdown; started jobs retain their data and finish independently. Do not join pool threads or implicitly drain jobs in `Scheduler::run`. Applications await them before shutting down services. Partial thread startup failure closes the pool and releases already-started workers.
-- Existing file fallbacks stay on their backend pools. The general pool does not yet supply detached `_submit` semantics, public pool sharing, or idle thread retirement.
+- Existing file fallbacks stay on their backend pools. File close uses a separate cleanup pool built from the same internal implementation: accepted jobs survive abandonment/closure and graceful shutdown drains them. Each pool uses the configured `BlockingOptions` limits. Public pool sharing and idle thread retirement remain separate work.
 
 ## Cooperative cancellation
 
@@ -92,3 +92,11 @@ Public behavior is covered in crates/executor/tests. Deterministic channels forc
 ThreadSanitizer loads `.github/tsan-suppressions.txt` to suppress Crossbeam's internal queue `Buffer::read` and `Buffer::write` race reports. Crossbeam reads slots speculatively and discards values when atomic validation fails. Its non-atomic volatile accesses remain a known Rust memory-model limitation; the suppression accepts that limitation rather than fixing it. See the [upstream discussion](https://github.com/crossbeam-rs/crossbeam/issues/589#issuecomment-720972996). Keep suppression patterns scoped to those buffer accesses and reassess them when updating Crossbeam. Other race reports continue to fail the sanitizer job.
 
 Coverage measures source regions for native and Tokio schedulers on each supported OS and architecture, plus Linux io\_uring and FreeBSD. Executor-only and Tokio-only feature selections receive separate compilation checks.
+
+## Explicit file closure
+
+- Native and Tokio `File::File` is an owned, non-`Clone` `FileHandle`. Backend retention uses a private `Arc<std::fs::File>`; consuming it for close uses `Arc::try_unwrap` and panics on outstanding use. Do not cancel or wait for other operations during close.
+- `file_close` awaits bounded admission and execution; `file_close_submit` awaits only admission. Neither accepts cancellation. Accepted close jobs survive waiter destruction and run on a dedicated cleanup pool independent of user blocking closures. Native shutdown outside future and blocking-pool workers and awaited Tokio shutdown drain them. Completion and capacity wakeups run in blocking-pool worker context, so reentrant scheduler destruction requests shutdown without waiting on its own cleanup queue.
+- All operation result notifications must follow release of backend file references, including cancellation and requests discarded before submission. io_uring still retains published requests until original terminal CQEs; cancellation CQEs cannot release them.
+- `examples/file_close.rs` explains cancellation clones, keeping the operation future alive through cancellation, completion races, and explicit close before propagating an I/O result. Dropping an operation future abandons completion and may leave backend work running; io_uring requests cancellation, but immediate close can still panic until backend access ends.
+- Close consumes the OS handle once and reports syscall errors without retrying. `_submit` execution errors are currently discarded. Ordinary resource destruction remains best effort; native close SQEs/CQE suppression and richer debug tracking are deferred.

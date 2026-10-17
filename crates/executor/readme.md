@@ -266,6 +266,22 @@ async fn read_header<S: File>(
 
 `Clock::now()` returns a monotonic `std::time::Instant` in the selected scheduler's clock domain. `sleep_until(deadline, cancellation)` and `sleep(duration, cancellation)` return `OperationResult<()>`. Relative waits start on first poll; pre-cancelled waits do not register, even for elapsed deadlines. Overflow returns `InvalidInput`. After registration, expiry wins a same-poll cancellation race. Obtain time through the scheduler to preserve simulation and Tokio paused-time behaviour. Native waits use async-io timers; the adapter uses its selected Tokio runtime. The independent `socketry-timers` crate implements the io-event timer algorithm; integration with the scheduler clock remains pending. The independent `Blocking` capability supplies general synchronous jobs as described above.
 
+### Explicit file close
+
+`File::file_close(file).await` consumes the handle, waits for bounded admission and OS completion, and reports close errors. `file_close_submit(file).await` waits only for admission; accepted work finishes even if its waiter is dropped, and graceful scheduler shutdown drains it. Neither form takes a cancellation token. Close does not synchronize data and does not retry an OS close error. `_submit` execution errors are discarded in the current backends.
+
+Native and Tokio resources are owned, non-`Clone` `FileHandle` values with private backend retention. Existing concrete callers using `Arc<std::fs::File>` must instead move an OS file into `FileHandle::from(file)` or use `file_open`. `AsRef<std::fs::File>` permits synchronous platform access; generic consumers continue to use `S::File`. External `File` implementations must provide both close methods.
+
+Finish outstanding operations before explicit close. Request cancellation, keep awaiting the operation, then close; dropping its future alone does not establish that the kernel or blocking worker has finished. Closing a handle still retained by an abandoned operation panics. Ordinary `Drop` is a fallback that releases ownership and discards close errors without joining outstanding operations.
+
+The [commented example](examples/file_close.rs) explains shared cancellation clones, completion racing with cancellation, buffer ownership, and closing before propagating the operation result:
+
+```sh
+cargo run -p socketry-executor --example file_close --features tokio
+```
+
+Both close forms initially use a dedicated bounded cleanup pool, separate from arbitrary `spawn_blocking` closures. Each pool uses the configured `BlockingOptions` limits and starts workers lazily. Native io_uring close SQEs are a later optimization.
+
 ### Cancellation and shutdown
 
 Pre-cancelled file/socket operations do not start. Readiness waits stop on cancellation. io\_uring requests cancellation but waits for the original completion before returning the buffer; successful progress wins a racing cancellation. Blocking jobs check cancellation again on their pool worker, before execution; a running syscall returns its actual result.

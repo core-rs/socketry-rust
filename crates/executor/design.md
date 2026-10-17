@@ -38,7 +38,7 @@ Resource creation belongs inside the corresponding capability. `File` declares a
 
 The interface does not require `Arc` around every resource. Concrete implementations choose their resource representation and how to retain it during in-flight work. They may use OS handles, registered-resource tables, shared ownership, or simulated resource identifiers. Taking a resource by reference does not remove the backend's obligation to retain everything still accessible by a submitted operation after its waiting future is dropped.
 
-These resource contracts are implemented. `File::file_open` accepts public `FileOptions`; seeking, stateful, and positioned operations borrow `&Self::File`. The native and Tokio implementations choose `Arc<std::fs::File>` internally. `Socket` includes listener/local/peer address inspection. Optional `SocketRegistration` imports existing `std::net` resources and is not required of simulated implementations.
+These resource contracts are implemented. `File::file_open` accepts public `FileOptions`; seeking, stateful, and positioned operations borrow `&Self::File`. The native and Tokio implementations return an owned, non-`Clone` `FileHandle`, with private `Arc<std::fs::File>` retention for backend access. `Socket` includes listener/local/peer address inspection. Optional `SocketRegistration` imports existing `std::net` resources and is not required of simulated implementations.
 
 ## Platform support and fallbacks
 
@@ -269,7 +269,7 @@ Timeouts, intervals, retry policies, and callback scheduling are higher-level op
 
 ## High-level interface sketch
 
-The results, owned-buffer, and clock contracts below are implemented. The wider capability sketch includes proposed syscall-oriented socket names and flags; consult the operation list above or the exported traits for the current subset. Pool, close/submission, and prepared-chain examples remain proposals.
+The results, owned-buffer, and clock contracts below are implemented. The wider capability sketch includes proposed syscall-oriented socket names and flags; consult the operation list above or the exported traits for the current subset. Buffer-pool and prepared-chain examples remain proposals; file close and submission are implemented.
 
 ### Results and ownership
 
@@ -423,7 +423,7 @@ These rows identify extension capabilities; they do not require every scheduler 
 
 ### Completion and explicit submission
 
-Cleanup and selected request operations have two proposed forms:
+Cleanup and selected request operations have two forms. The file-close pair is implemented; socket close/shutdown and advice remain proposed:
 
 | Await admission and completion | Await admission only | Resource input |
 | --- | --- | --- |
@@ -444,13 +444,17 @@ scheduler.file_close(file).await?; // Completed; execution errors reported.
 scheduler.file_close_submit(file).await?; // Accepted for execution.
 ```
 
-All four operation pairs use the same admission queue and job ownership mechanism. Close consumes its handle, while shutdown and advice retain the borrowed resource's underlying backend ownership for the job. This contract does not require a separate per-fd retirement mechanism. Queue capacity and fairness remain implementation choices; bounding a scheduler queue does not itself bound the number of caller-owned futures waiting for admission.
+The operation pairs share an admission queue and job ownership mechanism; file close establishes the first implementation. Close consumes its handle, while shutdown and advice retain the borrowed resource's underlying backend ownership for the job. This contract does not require a separate per-fd retirement mechanism. Queue capacity and fairness remain implementation choices; bounding a scheduler queue does not itself bound the number of caller-owned futures waiting for admission.
 
-These methods omit cancellation inputs. Before acceptance, the admission future owns its inputs: dropping it, or rejecting admission, releases those inputs according to their ordinary destruction rules. For close, this means dropping the consumed handle; no asynchronous close job has been accepted. The resource's ordinary destruction policy remains to be specified and is not replaced by constructing a close future.
+These methods omit cancellation inputs. Before acceptance, the admission future owns its inputs: dropping it, or rejecting admission, releases those inputs according to their ordinary destruction rules. For close, this means dropping the consumed handle; no asynchronous close job has been accepted. For current file handles, ordinary destruction releases ownership and lets the last backend reference perform best-effort synchronous destruction; it cannot report close errors. Constructing a close future does not change this fallback policy.
 
 Once the scheduler accepts the job, it must carry out the request even if the caller drops either form's future or its cancellation scope is cancelled. Acceptance is the ownership boundary even if the caller abandons the future before observing its result. Dropping a waiter after acceptance does not return a consumed handle or undo submission.
 
-Submitting work does not establish completion order. Preserve the required dependencies on earlier I/O through operation tracking or explicit chains, especially for close and write-side shutdown. Retain underlying resources until dependent backend access ends, and do not reuse a registered descriptor slot merely because close was queued. Graceful runtime draining must include outstanding submitted jobs even when they have no application waiter.
+Submitting work does not establish completion order. Explicit file close requires exclusive ownership: applications must finish all operations using the handle first. It never cancels, interrupts, or waits for other operations. Native backends use `Arc::try_unwrap` to transfer private ownership and panic on outstanding use, without a per-fd registry. An optional debug implementation may add operation tracking and diagnostics. This exclusivity check and kernel-resource retention remain active in release builds. Dependencies for future socket shutdown and registered-descriptor reuse must also be explicit. Graceful runtime draining must include outstanding submitted jobs even when they have no application waiter.
+
+Dropping an in-flight io_uring operation requests cancellation, but its file and buffer remain owned by the selector until the original terminal completion. The caller needing an orderly close must request cancellation and continue awaiting the operation. Returning an operation result (including cancellation) releases its backend file ownership before waking the caller. This differs from dropping the operation future, which cannot await cleanup and gives up the completion notification. Started blocking file calls may run to completion despite cancellation. See the commented [file-close example](examples/file_close.rs).
+
+File close initially uses a bounded blocking cleanup pool for native and Tokio schedulers, including the io_uring scheduler. Both variants use the same path. This pool reuses the internal blocking-pool implementation but has separate workers from arbitrary `spawn_blocking` closures, so shutdown draining does not depend on a user closure that might itself destroy the scheduler. Both pools start lazily and each uses the configured `BlockingOptions` limits. Accepted close jobs survive waiter and scheduler destruction. Native shutdown/destruction outside future and blocking-pool workers waits for cleanup; native destruction on either kind of worker only requests shutdown. Explicit synchronous shutdown panics on either kind of worker to avoid waiting for its own completion. Tokio destruction requests shutdown, and its awaited `shutdown` drains cleanup. Standalone io_uring selectors own a cleanup pool drained by their shutdown; standalone readiness selectors use a process-wide bounded fallback, like their other file operations. The simulator completes close immediately. `_submit` execution errors are currently discarded; use ordinary close for diagnostics. Native close SQEs and CQE suppression remain later optimizations.
 
 Shutdown completion confirms the local shutdown operation, not remote receipt or processing. Advice completion confirms that the hint was processed, not that all requested data was prefetched; `WILLNEED` initiates nonblocking read-ahead. See [shutdown](https://man7.org/linux/man-pages/man2/shutdown.2.html) and [file advice](https://man7.org/linux/man-pages/man2/posix_fadvise.2.html).
 
@@ -806,7 +810,7 @@ Remaining design work includes:
 
 1. **Resource lifecycle and wider I/O:** separate socket creation/options, explicit close/submission, message I/O, and extension boundaries.
 2. **Blocking pool integration:** the public `Blocking` capability now provides bounded admission and owned completion. Existing file fallbacks still use backend pools; sharing, idle thread retirement, and further scheduling policies remain separate decisions.
-3. **Backend retirement:** account for all accepted work, including future `_submit` jobs without application waiters. Application completion remains explicit through owned task handles; there is no implicit graceful join of all spawned work.
+3. **Backend retirement:** account for all accepted work, including `_submit` jobs without application waiters. File-close cleanup is now accounted for; extend this to subsequent submission-only operations. Application completion remains explicit through owned task handles; there is no implicit graceful join of all spawned work.
 4. **Timer engine integration:** the monotonic `Clock` and cancellable deadline contract are implemented. Native waits still use async-io, and the adapter uses its selected Tokio runtime, including paused time. Integrating `socketry-timers` into scheduler driving and parking remains separate work.
 
 Process creation/waiting and pipes remain useful optional extensions. Prepared linking, registered buffers, and pools remain separate later work.
@@ -837,12 +841,12 @@ The simulator has bounded in-memory file sizes and unbounded byte queues. It doe
 | Executor | Future workers, work stealing, primitive `Spawn`, and owning handles implemented. Await joins; move transfers ownership; drop abandons unfinished work. Task groups remain above the primitives. |
 | Cancellation | `Cancellation`, `Cancelled`, `defer_cancel`, and cancellation-aware file/socket operations implemented. Application shutdown is cooperative. |
 | Signal notifications | `Notify<Value>`, `Signals`, and optional Unix registration guards implemented for native and Tokio; each guard owns its dispatch task. |
-| Runtime lifetime | Application waits are explicit. Runtime shutdown abandons futures; backend retention protects submitted I/O. Future submission-only jobs need further draining/accounting design. |
+| Runtime lifetime | Application waits are explicit. Runtime shutdown abandons futures; backend retention protects submitted I/O. Accepted file-close submissions survive abandonment and are drained by graceful shutdown. |
 | Capabilities | Public `File`, `Socket`, `SocketRegistration`, `Clock`, `Spawn`, and `Blocking`; associated resources and initial file/TCP creation implemented. Broader hooks remain design work. |
 | Blocking execution | Dedicated native/Tokio pools, configurable worker and admission limits, queued cancellation, and owning completion handles implemented. Started closures finish independently; graceful completion requires awaiting them. |
 | Linked operations | Prepared chains and `Linked` remain proposed; native linking, whole-chain blocking jobs, and readiness sequencing are not implemented. |
-| File operations | `file_open`, `file_seek`, `file_sync`, `file_truncate`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at` implemented with owned buffers. Optional `FileAllocate` implemented on Linux with `Extend` and `KeepSize`. Explicit close and metadata hooks pending. |
-| Submission and completion | Close, socket shutdown, and advice pairs remain proposed; their admission, `_submit`, and safe CQE suppression are pending. The public blocking pool has its own bounded admission. |
+| File operations | `file_open`, `file_seek`, `file_sync`, `file_truncate`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at` implemented with owned buffers. Optional `FileAllocate` implemented on Linux with `Extend` and `KeepSize`. `file_close`/`file_close_submit` implemented with exclusive ownership and bounded cleanup; metadata hooks pending. |
+| Submission and completion | File close and its `_submit` variant share bounded admission and persistent cleanup jobs. Socket shutdown/close, advice pairs, and safe CQE suppression remain proposed. The public blocking pool has its own bounded admission. |
 | Socket operations | TCP listen, connect, accept, address inspection, generic read/write, readiness, and optional OS registration implemented. General sockets and message I/O pending. |
 | Backends | Native readiness, blocking file fallbacks, Linux io_uring, and an adapter to an existing Tokio runtime implemented; the example simulator implements the public I/O traits. |
 | Buffers | Unsafe `IoBuf`/`IoBufMut`, `Vec<u8>`, `Box<[u8]>`, and owned `BufferSlice` implemented. Registered leases and pools remain proposed. |

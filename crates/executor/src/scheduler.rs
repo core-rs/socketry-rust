@@ -7,6 +7,8 @@ pub mod selector;
 pub mod socketry;
 
 #[cfg(any(feature = "native", feature = "tokio"))]
+mod file_close;
+#[cfg(any(feature = "native", feature = "tokio"))]
 mod file_io;
 
 #[cfg(feature = "tokio")]

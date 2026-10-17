@@ -19,6 +19,22 @@ pub trait File: Send + Sync {
         cancellation: &Cancellation,
     ) -> impl Future<Output = OperationResult<Self::File>> + Send;
 
+    /// Consume an exclusively owned handle, wait for bounded admission and OS close completion, and report admission or close errors. This future is lazy and takes no cancellation token. Close does not synchronize file contents and is never retried after an error.
+    ///
+    /// Finish all operations using the file first. Requesting cancellation or dropping an operation future alone does not establish that backend access has ended. Once admitted, close runs even if this future is dropped. Before admission, dropping the future releases the handle through ordinary destruction.
+    ///
+    /// # Panics
+    /// Backends may panic if an abandoned operation still retains the file. Close never interrupts or joins other operations.
+    fn file_close(&self, file: Self::File) -> impl Future<Output = std::io::Result<()>> + Send;
+
+    /// Consume an exclusively owned handle and wait only for bounded admission. The scheduler then owns completion even if this future is dropped. Errors report admission failure, not OS close failure; await `file_close` when execution errors matter.
+    ///
+    /// The ownership, laziness, and outstanding-operation preconditions are the same as [`File::file_close`]. Graceful scheduler shutdown drains accepted close jobs.
+    fn file_close_submit(
+        &self,
+        file: Self::File,
+    ) -> impl Future<Output = std::io::Result<()>> + Send;
+
     /// Set the logical file length, discarding bytes when shrinking and filling an extension with zeros. The file must be open for writing. Lengths must fit in `i64`; filesystem limits and other OS errors are reported. The shared cursor is unchanged, even when it ends up past EOF.
     ///
     /// The future is lazy. Cancellation before dispatch prevents submission; blocking workers check again before execution. Once submitted, cancellation is best effort and successful completion wins a concurrent request. The backend retains the file until access ends, and dropping a waiter cannot undo a completed resize.

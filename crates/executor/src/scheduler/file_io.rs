@@ -5,6 +5,31 @@
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
+/// Consume the OS handle exactly once. In particular, never retry `close` after `EINTR`: the descriptor may already have been reused.
+pub(crate) fn close(file: File) -> io::Result<()> {
+    #[cfg(unix)]
+    let succeeded = {
+        use std::os::fd::IntoRawFd;
+        // SAFETY: Ownership has been removed from `File`, and the caller established that no operation retains it. This is the only close attempt.
+        unsafe { libc::close(file.into_raw_fd()) == 0 }
+    };
+    #[cfg(windows)]
+    let succeeded = {
+        use std::os::windows::io::IntoRawHandle;
+        // SAFETY: Ownership has been transferred from `File`, and no backend operation retains this handle. Do not run the ordinary destructor as well.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(file.into_raw_handle()) != 0 }
+    };
+    close_result(succeeded)
+}
+
+fn close_result(succeeded: bool) -> io::Result<()> {
+    if succeeded {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn validate_allocation(offset: u64, length: u64) -> io::Result<()> {
     if length == 0

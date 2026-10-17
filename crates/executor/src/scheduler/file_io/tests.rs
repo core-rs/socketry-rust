@@ -8,6 +8,26 @@ use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[test]
+fn close_consumes_the_handle_and_preserves_system_errors() {
+    let file = tempfile::tempfile().unwrap();
+    super::close(file).unwrap();
+    // Exercise an OS error without manufacturing an invalid owned `File` (which would violate IO safety).
+    #[cfg(unix)]
+    unsafe {
+        libc::close(-1);
+    }
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::Foundation::SetLastError(6);
+    }
+    let expected = io::Error::last_os_error();
+    assert_eq!(
+        super::close_result(false).unwrap_err().raw_os_error(),
+        expected.raw_os_error()
+    );
+}
+
+#[test]
 fn read_and_write_reject_offsets_outside_the_platform_range() {
     let file = File::open(std::env::current_exe().unwrap()).unwrap();
 

@@ -23,19 +23,22 @@ pin-project-lite = "0.2.17"
 tokio = { version = "1.53.1", optional = true, features = ["rt", "net", "fs", "time", "io-util"] }
 
 [target.'cfg(unix)'.dependencies]
+libc = { version = "0.2.189", optional = true }
 signal-hook = { version = "0.4.5", optional = true, default-features = false, features = ["iterator"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", optional = true, features = ["Win32_Foundation"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
-libc = { version = "0.2.189", optional = true }
 io-uring = { version = "0.7.11", optional = true, features = ["io_safety"] }
 polling = { version = "3.11.0", optional = true }
 
 [features]
 default = ["native"]
-native = ["dep:async-io", "dep:blocking", "dep:libc"]
+native = ["dep:async-io", "dep:blocking", "dep:libc", "dep:windows-sys"]
 io-uring = ["native", "dep:io-uring", "dep:libc", "dep:polling"]
 signals = ["dep:signal-hook"]
-tokio = ["dep:tokio", "dep:libc"]
+tokio = ["dep:tokio", "dep:libc", "dep:windows-sys"]
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["test-util"] }

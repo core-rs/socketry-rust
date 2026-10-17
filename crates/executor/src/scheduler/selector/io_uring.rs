@@ -660,6 +660,35 @@ fn operation_result<T>(result: io::Result<T>, cancellation: &Cancellation) -> Op
         result => result.map_err(Into::into),
     }
 }
+impl<O: crate::scheduler::native_socket_option::NativeSocketOption> crate::SocketOptions<O>
+    for Selector
+{
+    async fn socket_get_option(
+        &self,
+        socket: &Self::Socket,
+        option: O,
+        cancellation: &Cancellation,
+    ) -> OperationResult<O::Value> {
+        self.check_open()?;
+        readiness::Selector
+            .socket_get_option(socket, option, cancellation)
+            .await
+    }
+
+    async fn socket_set_option(
+        &self,
+        socket: &Self::Socket,
+        option: O,
+        value: O::Value,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.check_open()?;
+        readiness::Selector
+            .socket_set_option(socket, option, value, cancellation)
+            .await
+    }
+}
+
 impl SocketRegistration for Selector {
     fn register_socket(&self, socket: TcpStream) -> io::Result<SocketDescriptor> {
         self.check_open()?;

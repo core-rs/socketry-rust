@@ -78,6 +78,34 @@ impl SchedulerHandle {
     }
 }
 
+impl<O: crate::SocketOption> crate::SocketOptions<O> for SchedulerHandle
+where
+    DefaultSelector: crate::SocketOptions<O>,
+{
+    async fn socket_get_option(
+        &self,
+        socket: &Self::Socket,
+        option: O,
+        cancellation: &Cancellation,
+    ) -> OperationResult<O::Value> {
+        self.selector()?
+            .socket_get_option(socket, option, cancellation)
+            .await
+    }
+
+    async fn socket_set_option(
+        &self,
+        socket: &Self::Socket,
+        option: O,
+        value: O::Value,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.selector()?
+            .socket_set_option(socket, option, value, cancellation)
+            .await
+    }
+}
+
 impl SocketRegistration for SchedulerHandle {
     fn register_socket(&self, socket: TcpStream) -> io::Result<Self::Socket> {
         self.selector()?.register_socket(socket)
@@ -371,6 +399,34 @@ impl Clock for SchedulerHandle {
         crate::scheduler::clock::native_sleep_until(deadline, cancellation).await
     }
 }
+impl<O: crate::SocketOption> crate::SocketOptions<O> for Scheduler
+where
+    SchedulerHandle: crate::SocketOptions<O>,
+{
+    async fn socket_get_option(
+        &self,
+        socket: &Self::Socket,
+        option: O,
+        cancellation: &Cancellation,
+    ) -> OperationResult<O::Value> {
+        self.handle
+            .socket_get_option(socket, option, cancellation)
+            .await
+    }
+
+    async fn socket_set_option(
+        &self,
+        socket: &Self::Socket,
+        option: O,
+        value: O::Value,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.handle
+            .socket_set_option(socket, option, value, cancellation)
+            .await
+    }
+}
+
 impl SocketRegistration for Scheduler {
     fn register_socket(&self, socket: TcpStream) -> io::Result<Self::Socket> {
         self.handle.register_socket(socket)

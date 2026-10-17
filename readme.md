@@ -82,6 +82,8 @@ Generic code can accept `Socket`, `File`, `Clock`, and `Spawn` capabilities. Soc
 
 `socket_shutdown(&socket, how)` supports directional shutdown while retaining the descriptor. `socket_close(socket)` consumes it after outstanding work has finished. Both have admission-only `_submit` forms. The [commented half-close example](crates/executor/examples/socket_shutdown.rs) sends a request, shuts down writes, receives the response, then closes.
 
+`SocketOptions<O>` adds typed, cancellable option get/set. Require `SocketReuseAddress`, `SocketKeepalive`, or `TcpNoDelay` as needed; the option selects its value type and backend capability. The [listener configuration example](crates/executor/examples/socket_options.rs) shows configuration before binding.
+
 `FileAllocate` adds optional range allocation with `AllocationMode::Extend` or `KeepSize`. Native and Tokio implementations currently provide it on Linux; unsupported targets omit the trait implementation. See the [executor I/O documentation](crates/executor/readme.md#io-and-selectors) for allocation and filesystem guarantees.
 
 `File` is the scheduler capability trait; `File::File` is its associated resource type. Generic code can create and use files without importing OS resource types:

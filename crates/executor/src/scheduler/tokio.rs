@@ -525,6 +525,33 @@ impl<FutureType: Future> Future for InRuntime<FutureType> {
     }
 }
 
+impl<O: crate::scheduler::native_socket_option::NativeSocketOption> crate::SocketOptions<O>
+    for SchedulerHandle
+{
+    async fn socket_get_option(
+        &self,
+        socket: &Self::Socket,
+        option: O,
+        cancellation: &Cancellation,
+    ) -> OperationResult<O::Value> {
+        self.check_runtime(socket.runtime())?;
+        cancellation.check()?;
+        Ok(option.get(socket.get_ref())?)
+    }
+
+    async fn socket_set_option(
+        &self,
+        socket: &Self::Socket,
+        option: O,
+        value: O::Value,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.check_runtime(socket.runtime())?;
+        cancellation.check()?;
+        Ok(option.set(socket.get_ref(), value)?)
+    }
+}
+
 impl SocketRegistration for SchedulerHandle {
     fn register_socket(&self, socket: TcpStream) -> io::Result<SocketDescriptor> {
         self.shared.check_open()?;
@@ -1029,6 +1056,34 @@ impl Spawn for SchedulerHandle {
         FutureType::Output: Send + 'static,
     {
         self.shared.spawn(future)
+    }
+}
+
+impl<O: crate::SocketOption> crate::SocketOptions<O> for Scheduler
+where
+    SchedulerHandle: crate::SocketOptions<O>,
+{
+    async fn socket_get_option(
+        &self,
+        socket: &Self::Socket,
+        option: O,
+        cancellation: &Cancellation,
+    ) -> OperationResult<O::Value> {
+        self.handle
+            .socket_get_option(socket, option, cancellation)
+            .await
+    }
+
+    async fn socket_set_option(
+        &self,
+        socket: &Self::Socket,
+        option: O,
+        value: O::Value,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        self.handle
+            .socket_set_option(socket, option, value, cancellation)
+            .await
     }
 }
 

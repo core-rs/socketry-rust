@@ -34,7 +34,18 @@ mod file_close;
 #[path = "../examples/interface_probe/tests/socket_lifecycle.rs"]
 mod socket_lifecycle;
 
-async fn resources<S: File + Socket>(scheduler: &S, root: &Path) {
+#[path = "../examples/interface_probe/tests/socket_options.rs"]
+mod socket_options;
+
+async fn resources<S>(scheduler: &S, root: &Path)
+where
+    S: File
+        + Socket
+        + socketry_executor::SocketOptions<socketry_executor::SocketReuseAddress>
+        + socketry_executor::SocketOptions<socketry_executor::SocketKeepalive>
+        + socketry_executor::SocketOptions<socketry_executor::TcpNoDelay>,
+{
+    socket_options::check(scheduler).await;
     socket_lifecycle::check(scheduler).await;
     file_close::check(scheduler, root).await;
     stateful_file::check(scheduler, root).await;
@@ -509,6 +520,7 @@ fn native_resources() {
         let handle = scheduler.handle();
         scheduler.block_on(file_close::check(handle.selector().unwrap(), fourth.path()));
         scheduler.block_on(socket_lifecycle::check(handle.selector().unwrap()));
+        scheduler.block_on(socket_options::check(handle.selector().unwrap()));
     }
 }
 

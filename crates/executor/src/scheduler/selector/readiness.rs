@@ -56,6 +56,31 @@ impl Selector {
     }
 }
 
+impl<O: crate::scheduler::native_socket_option::NativeSocketOption> crate::SocketOptions<O>
+    for Selector
+{
+    async fn socket_get_option(
+        &self,
+        socket: &Self::Socket,
+        option: O,
+        cancellation: &Cancellation,
+    ) -> OperationResult<O::Value> {
+        cancellation.check()?;
+        Ok(option.get(socket.get_ref())?)
+    }
+
+    async fn socket_set_option(
+        &self,
+        socket: &Self::Socket,
+        option: O,
+        value: O::Value,
+        cancellation: &Cancellation,
+    ) -> OperationResult<()> {
+        cancellation.check()?;
+        Ok(option.set(socket.get_ref(), value)?)
+    }
+}
+
 impl SocketRegistration for Selector {
     fn register_socket(&self, socket: TcpStream) -> io::Result<SocketDescriptor> {
         SocketDescriptor::new(socket.into())

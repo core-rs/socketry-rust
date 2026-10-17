@@ -40,6 +40,12 @@ pub use interest::Interest;
 mod socket;
 pub use socket::Socket;
 
+mod socket_options;
+pub use socket_options::SocketOptions;
+
+#[cfg(any(feature = "native", feature = "tokio"))]
+mod native_socket_option;
+
 mod file;
 pub use file::File;
 

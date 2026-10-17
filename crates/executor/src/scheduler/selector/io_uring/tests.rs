@@ -282,6 +282,27 @@ fn rejected_operations_preserve_buffer_allocations() {
 }
 
 #[test]
+fn empty_file_buffers_complete_without_selector_admission() {
+    async_io::block_on(async {
+        let (selector, _peer) = disconnected_selector();
+        let file = Arc::new(tempfile::tempfile().unwrap());
+
+        let (result, buffer) = selector
+            .operation(
+                Resource::File(file, Some(0)),
+                Vec::new(),
+                false,
+                |buffer| buffer.as_mut_ptr(),
+                &NEVER,
+            )
+            .await;
+
+        assert_eq!(result.unwrap(), 0);
+        assert!(buffer.is_empty());
+    });
+}
+
+#[test]
 fn failure_retains_in_flight_resources_before_notifying_callers() {
     let (request, mut receiver) = request(0);
     let Some(Resource::File(file, _)) = &request.resource else {
@@ -369,6 +390,18 @@ fn closed_selector_rejects_its_direct_network_operations() {
                     Some(crate::SocketProtocol::Tcp),
                     &NEVER,
                 )
+                .await
+                .is_err()
+        );
+        assert!(
+            selector
+                .socket_bind(&socket, address, &NEVER)
+                .await
+                .is_err()
+        );
+        assert!(
+            selector
+                .socket_listen(&listener, 128, &NEVER)
                 .await
                 .is_err()
         );

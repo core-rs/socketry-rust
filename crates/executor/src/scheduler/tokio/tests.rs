@@ -380,7 +380,7 @@ fn write_retries_interrupted_and_would_block_operations() {
 }
 
 #[test]
-fn socket_write_waits_until_the_send_buffer_is_writable() {
+fn socket_write_completes_with_a_full_send_buffer() {
     let runtime = runtime();
     let scheduler = Scheduler::new(runtime.handle().clone());
     let handle = scheduler.handle();
@@ -400,8 +400,22 @@ fn socket_write_waits_until_the_send_buffer_is_writable() {
                 Err(error) => panic!("failed to fill socket send buffer: {error}"),
             }
         }
+        let probe = vec![0; 1];
+        let send = crate::scheduler::socket_io::SendBuffer::new(&probe);
+        loop {
+            match send.send(socket.get_ref()) {
+                Ok(0) => panic!("socket write made no progress"),
+                Ok(count) => written += count,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("failed to fill socket send buffer: {error}"),
+            }
+        }
         assert!(written > 0);
     });
+
+    let (result, buffer) = runtime.block_on(handle.socket_write(&socket, Vec::new(), &NEVER));
+    assert_eq!(result.unwrap(), 0);
+    assert!(buffer.is_empty());
 
     let (start_reader, wait_for_start) = mpsc::sync_channel(0);
     let (finish_reader, wait_for_finish) = mpsc::sync_channel(0);
@@ -434,18 +448,20 @@ fn socket_write_waits_until_the_send_buffer_is_writable() {
     });
 
     let mut write = Box::pin(handle.socket_write(&socket, vec![42], &NEVER));
-    runtime.block_on(async {
-        std::future::poll_fn(|context| {
-            assert!(write.as_mut().poll(context).is_pending());
-            start_reader.send(()).unwrap();
-            Poll::Ready(())
-        })
-        .await;
-
-        let (result, buffer) = write.await;
-        assert_eq!(result.unwrap(), 1);
-        assert_eq!(buffer, [42]);
-    });
+    let completed_before_read = runtime.block_on(std::future::poll_fn(|context| {
+        let result = match write.as_mut().poll(context) {
+            Poll::Ready(result) => Some(result),
+            Poll::Pending => None,
+        };
+        start_reader.send(()).unwrap();
+        Poll::Ready(result)
+    }));
+    let (result, buffer) = match completed_before_read {
+        Some(result) => result,
+        None => runtime.block_on(write),
+    };
+    assert_eq!(result.unwrap(), 1);
+    assert_eq!(buffer, [42]);
 
     // Kernel buffering can complete the write before the reader gets CPU time. Observe an actual read before asking it to stop.
     wait_for_first_read

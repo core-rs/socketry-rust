@@ -21,19 +21,36 @@ use std::{
 type Bytes = Arc<Mutex<Vec<u8>>>;
 
 fn available_port(
-    listeners: &HashMap<SocketAddr, Weak<Incoming>>,
+    reservations: &HashMap<SocketAddr, Weak<Reservation>>,
     mut address: SocketAddr,
 ) -> io::Result<u16> {
     (10000..=u16::MAX)
         .find(|port| {
             address.set_port(*port);
-            !listeners.contains_key(&address)
+            !reservations.contains_key(&address)
         })
         .ok_or_else(|| io::Error::from(io::ErrorKind::AddrNotAvailable))
 }
 
+fn reserve_address(
+    reservations: &mut HashMap<SocketAddr, Weak<Reservation>>,
+    mut address: SocketAddr,
+) -> io::Result<(SocketAddr, Arc<Reservation>)> {
+    reservations.retain(|_, reservation| reservation.strong_count() > 0);
+    if address.port() == 0 {
+        address.set_port(available_port(reservations, address)?);
+    } else if reservations.contains_key(&address) {
+        return Err(io::Error::from(io::ErrorKind::AddrInUse));
+    }
+
+    let reservation = Arc::new(Reservation);
+    reservations.insert(address, Arc::downgrade(&reservation));
+    Ok((address, reservation))
+}
+
 pub struct Scheduler {
     files: Mutex<HashMap<PathBuf, Bytes>>,
+    reservations: Mutex<HashMap<SocketAddr, Weak<Reservation>>>,
     listeners: Mutex<HashMap<SocketAddr, Weak<Incoming>>>,
     read_limit: usize,
     write_limit: usize,
@@ -46,10 +63,10 @@ pub struct FileDescriptor {
     readable: bool,
 }
 
-#[derive(Default)]
 struct Incoming {
     sockets: Mutex<VecDeque<SocketDescriptor>>,
     ready: Event,
+    reservation: Arc<Reservation>,
 }
 
 pub struct SocketDescriptor {
@@ -61,6 +78,7 @@ enum SocketState {
         domain: SocketDomain,
         kind: SocketType,
         local: SocketAddr,
+        reservation: Option<Arc<Reservation>>,
     },
     Listening {
         address: SocketAddr,
@@ -87,7 +105,10 @@ struct Connection {
     output: Arc<Pipe>,
     local: SocketAddr,
     peer: SocketAddr,
+    _reservation: Option<Arc<Reservation>>,
 }
+
+struct Reservation;
 
 impl Drop for SocketDescriptor {
     fn drop(&mut self) {
@@ -106,6 +127,7 @@ impl Scheduler {
         assert!(read_limit > 0 && write_limit > 0);
         Self {
             files: Mutex::new(HashMap::new()),
+            reservations: Mutex::new(HashMap::new()),
             listeners: Mutex::new(HashMap::new()),
             read_limit,
             write_limit,
@@ -333,6 +355,7 @@ impl Socket for Scheduler {
                 domain,
                 kind,
                 local,
+                reservation: None,
             }),
         })
     }
@@ -340,7 +363,7 @@ impl Socket for Scheduler {
     async fn socket_bind(
         &self,
         socket: &SocketDescriptor,
-        mut address: SocketAddr,
+        address: SocketAddr,
         cancellation: &Cancellation,
     ) -> OperationResult<()> {
         cancellation.check()?;
@@ -349,6 +372,7 @@ impl Socket for Scheduler {
             domain,
             kind: SocketType::Stream,
             local,
+            reservation,
         } = &mut *state
         else {
             return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
@@ -359,15 +383,9 @@ impl Socket for Scheduler {
         if local.port() != 0 {
             return Err(io::Error::from(io::ErrorKind::AddrInUse).into());
         }
-        let mut listeners = self.listeners.lock().unwrap();
-        // Expired weak registrations do not reserve their former addresses.
-        listeners.retain(|_, incoming| incoming.strong_count() > 0);
-        if address.port() == 0 {
-            address.set_port(available_port(&listeners, address)?);
-        } else if listeners.contains_key(&address) {
-            return Err(io::Error::from(io::ErrorKind::AddrInUse).into());
-        }
+        let (address, binding) = reserve_address(&mut self.reservations.lock().unwrap(), address)?;
         *local = address;
+        *reservation = Some(binding);
         Ok(())
     }
 
@@ -379,22 +397,34 @@ impl Socket for Scheduler {
     ) -> OperationResult<()> {
         cancellation.check()?;
         let mut state = socket.state.lock().unwrap();
-        let (kind, mut local) = match &*state {
-            SocketState::Open { kind, local, .. } => (*kind, *local),
+        let (kind, mut local, mut reservation) = match &*state {
+            SocketState::Open {
+                kind,
+                local,
+                reservation,
+                ..
+            } => (*kind, *local, reservation.clone()),
             _ => return Err(io::Error::from(io::ErrorKind::InvalidInput).into()),
         };
         if kind != SocketType::Stream {
             return Err(io::Error::from(io::ErrorKind::Unsupported).into());
         }
+        if reservation.is_none() {
+            let (address, binding) =
+                reserve_address(&mut self.reservations.lock().unwrap(), local)?;
+            local = address;
+            reservation = Some(binding);
+        }
         let mut listeners = self.listeners.lock().unwrap();
         listeners.retain(|_, incoming| incoming.strong_count() > 0);
-        if local.port() == 0 {
-            local.set_port(available_port(&listeners, local)?);
-        }
         if listeners.contains_key(&local) {
             return Err(io::Error::from(io::ErrorKind::AddrInUse).into());
         }
-        let incoming = Arc::new(Incoming::default());
+        let incoming = Arc::new(Incoming {
+            sockets: Mutex::new(VecDeque::new()),
+            ready: Event::default(),
+            reservation: reservation.unwrap(),
+        });
         listeners.insert(local, Arc::downgrade(&incoming));
         *state = SocketState::Listening {
             address: local,
@@ -434,12 +464,13 @@ impl Socket for Scheduler {
             .ok_or_else(|| io::Error::from(io::ErrorKind::ConnectionRefused))?;
 
         let mut state = socket.state.lock().unwrap();
-        let (domain, kind, mut local) = match &*state {
+        let (domain, kind, mut local, mut reservation) = match &*state {
             SocketState::Open {
                 domain,
                 kind,
                 local,
-            } => (*domain, *kind, *local),
+                reservation,
+            } => (*domain, *kind, *local, reservation.clone()),
             _ => return Err(io::Error::from(io::ErrorKind::InvalidInput).into()),
         };
         if kind != SocketType::Stream {
@@ -450,11 +481,15 @@ impl Socket for Scheduler {
         }
         if local.port() == 0 {
             local = match domain {
-                SocketDomain::Ipv4 => SocketAddr::from(([127, 0, 0, 1], 40000)),
+                SocketDomain::Ipv4 => SocketAddr::from(([127, 0, 0, 1], 0)),
                 SocketDomain::Ipv6 => {
-                    SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 40000))
+                    SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 0))
                 }
             };
+            let (address, binding) =
+                reserve_address(&mut self.reservations.lock().unwrap(), local)?;
+            local = address;
+            reservation = Some(binding);
         }
         let input = Arc::new(Pipe::default());
         let output = Arc::new(Pipe::default());
@@ -464,6 +499,7 @@ impl Socket for Scheduler {
                 peer: local,
                 input: output.clone(),
                 output: input.clone(),
+                _reservation: Some(Arc::clone(&incoming.reservation)),
             })),
         };
         incoming.sockets.lock().unwrap().push_back(server);
@@ -473,6 +509,7 @@ impl Socket for Scheduler {
             output,
             local,
             peer: address,
+            _reservation: reservation,
         });
         Ok(())
     }

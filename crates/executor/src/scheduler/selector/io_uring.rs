@@ -554,7 +554,7 @@ impl Selector {
                 buffer,
             );
         }
-        if buffer.as_ref().is_empty() && matches!(&resource, Resource::File(_, _)) {
+        if matches!(&resource, Resource::File(_, _)) && buffer.as_ref().is_empty() {
             return (Ok(0), buffer);
         }
         let identifier = match self.next_identifier() {

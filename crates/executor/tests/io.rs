@@ -71,6 +71,44 @@ async fn connect<S: Socket>(
     Ok(socket)
 }
 
+async fn socket_variants<S: Socket>(scheduler: &S) {
+    let ipv4 = scheduler
+        .socket_open(SocketDomain::Ipv4, SocketType::Stream, None, &NEVER)
+        .await
+        .unwrap();
+    let ipv6 = scheduler
+        .socket_open(SocketDomain::Ipv6, SocketType::Stream, None, &NEVER)
+        .await
+        .unwrap();
+    scheduler
+        .socket_bind(&ipv6, "[::1]:0".parse().unwrap(), &NEVER)
+        .await
+        .unwrap();
+    assert!(scheduler.socket_local_addr(&ipv6).unwrap().is_ipv6());
+
+    let datagram = scheduler
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Datagram,
+            Some(SocketProtocol::Udp),
+            &NEVER,
+        )
+        .await
+        .unwrap();
+    scheduler
+        .socket_connect(&datagram, "127.0.0.1:9".parse().unwrap(), &NEVER)
+        .await
+        .unwrap();
+    assert!(scheduler.socket_peer_addr(&datagram).is_ok());
+    assert!(scheduler.socket_listen(&datagram, 1, &NEVER).await.is_err());
+    assert!(
+        scheduler
+            .socket_connect(&ipv4, "[::1]:9".parse().unwrap(), &NEVER)
+            .await
+            .is_err()
+    );
+}
+
 #[cfg(feature = "tokio")]
 fn error_kind<ResultType, Error: Into<io::Error>>(
     result: Result<ResultType, Error>,
@@ -263,6 +301,10 @@ mod native {
         let scheduler = Scheduler::with_workers(2).unwrap();
         let handle = scheduler.handle();
         scheduler.block_on(within(&handle, round_trip(handle.clone())));
+        scheduler.block_on(socket_variants(&handle));
+
+        let readiness = socketry_executor::scheduler::selector::readiness::Selector::new().unwrap();
+        scheduler.block_on(socket_variants(&readiness));
     }
 
     #[test]
@@ -481,6 +523,31 @@ mod native {
             };
             assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
 
+            assert_eq!(
+                handle
+                    .socket_bind(&socket, address, &NEVER)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::BrokenPipe
+            );
+            assert_eq!(
+                handle
+                    .socket_listen(&registered_listener, 128, &NEVER)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::BrokenPipe
+            );
+            assert_eq!(
+                handle
+                    .socket_connect(&socket, address, &NEVER)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::BrokenPipe
+            );
+
             let error = match handle.socket_accept(&registered_listener, &NEVER).await {
                 Ok(_) => panic!("closed scheduler accepted a listener"),
                 Err(error) => error,
@@ -588,6 +655,7 @@ mod tokio_adapter {
         let scheduler = Scheduler::new(runtime.handle().clone());
         let handle = scheduler.handle();
         runtime.block_on(within(&handle, round_trip(handle.clone())));
+        runtime.block_on(socket_variants(&handle));
         runtime.block_on(scheduler.shutdown());
     }
 
@@ -736,6 +804,10 @@ mod tokio_adapter {
                     .socket_write(&socket, vec![24], &NEVER)
                     .await;
                 assert_eq!(result.unwrap(), 1);
+                let (result, _) = server_scheduler
+                    .socket_write(&socket, vec![99], &NEVER)
+                    .await;
+                assert_eq!(result.unwrap(), 1);
             })
             .unwrap();
 
@@ -754,17 +826,19 @@ mod tokio_adapter {
             assert_eq!(result.unwrap(), 1);
             assert_eq!(buffer, vec![24]);
             scheduler
-                .socket_wait(&client, Interest::Writable, &NEVER)
-                .await
-                .unwrap();
-            scheduler
-                .sleep(std::time::Duration::ZERO, &NEVER)
+                .socket_wait(&client, Interest::Readable, &NEVER)
                 .await
                 .unwrap();
 
             let (result, buffer) = scheduler.socket_read(&client, Vec::new(), &NEVER).await;
+            #[cfg(windows)]
+            assert!(result.is_err());
+            #[cfg(not(windows))]
             assert_eq!(result.unwrap(), 0);
             assert!(buffer.is_empty());
+            let (result, buffer) = scheduler.socket_read(&client, vec![0], &NEVER).await;
+            assert_eq!(result.unwrap(), 1);
+            assert_eq!(buffer, vec![99]);
             let (result, buffer) = scheduler.socket_write(&client, Vec::new(), &NEVER).await;
             assert_eq!(result.unwrap(), 0);
             assert!(buffer.is_empty());
@@ -881,6 +955,18 @@ mod tokio_adapter {
             );
             assert_eq!(
                 error_kind(connect(&handle, address, &NEVER).await),
+                io::ErrorKind::BrokenPipe
+            );
+            assert_eq!(
+                error_kind(handle.socket_bind(&socket, address, &NEVER).await),
+                io::ErrorKind::BrokenPipe
+            );
+            assert_eq!(
+                error_kind(handle.socket_listen(&listener, 128, &NEVER).await),
+                io::ErrorKind::BrokenPipe
+            );
+            assert_eq!(
+                error_kind(handle.socket_connect(&socket, address, &NEVER).await),
                 io::ErrorKind::BrokenPipe
             );
             assert_eq!(
@@ -1007,10 +1093,60 @@ mod tokio_adapter {
         let second = Scheduler::new(second_runtime.handle().clone());
         let (client, _server) = socket_pair();
         let socket = first.register_socket(client).unwrap();
-        let (result, buffer) =
-            second_runtime.block_on(second.socket_read(&socket, vec![0; 7], &NEVER));
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(buffer.len(), 7);
+        let (raw_listener, _) = listening_socket();
+        let listener = first.register_listener(raw_listener).unwrap();
+        second_runtime.block_on(async {
+            let (result, buffer) = second.socket_read(&socket, vec![0; 7], &NEVER).await;
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(buffer.len(), 7);
+            let (result, buffer) = second.socket_write(&socket, vec![1; 7], &NEVER).await;
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(buffer, vec![1; 7]);
+            assert_eq!(
+                second
+                    .socket_bind(&socket, "127.0.0.1:0".parse().unwrap(), &NEVER)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                second
+                    .socket_listen(&listener, 128, &NEVER)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                error_kind(
+                    second
+                        .socket_connect(&socket, "127.0.0.1:9".parse().unwrap(), &NEVER)
+                        .await
+                ),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                error_kind(second.socket_accept(&listener, &NEVER).await),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                second
+                    .socket_wait(&socket, Interest::Readable, &NEVER)
+                    .await
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                second.socket_local_addr(&socket).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(
+                second.socket_peer_addr(&socket).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        });
     }
 
     #[test]

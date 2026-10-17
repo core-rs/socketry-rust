@@ -79,6 +79,25 @@ fn readiness_operations_remain_available_with_other_backends_selected() {
             received.extend_from_slice(&buffer[..count]);
         }
         assert_eq!(received, b"hello");
+        let (result, _) = selector.socket_write(&peer, vec![99], &NEVER).await;
+        assert_eq!(result.unwrap(), 1);
+        selector
+            .socket_wait(&socket, Interest::Readable, &NEVER)
+            .await
+            .unwrap();
+        let (result, buffer) = selector.socket_read(&socket, Vec::new(), &NEVER).await;
+        #[cfg(windows)]
+        assert!(result.is_err());
+        #[cfg(not(windows))]
+        assert_eq!(result.unwrap(), 0);
+        assert!(buffer.is_empty());
+        let (result, buffer) = selector.socket_read(&socket, vec![0], &NEVER).await;
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(buffer, vec![99]);
+        let (result, buffer) = selector.socket_write(&socket, Vec::new(), &NEVER).await;
+        assert_eq!(result.unwrap(), 0);
+        assert!(buffer.is_empty());
+
         let file = crate::FileDescriptor::from(tempfile::tempfile().unwrap());
         let (result, buffer) = selector
             .file_write_at(&file, b"file".to_vec(), 3, &NEVER)

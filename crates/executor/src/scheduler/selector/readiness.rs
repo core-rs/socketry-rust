@@ -22,6 +22,30 @@ use std::time::Instant;
 mod socket_descriptor;
 pub use socket_descriptor::SocketDescriptor;
 
+async fn accept_with(
+    socket: &SocketDescriptor,
+    cancellation: &Cancellation,
+    accept: impl FnMut(&socket2::Socket) -> io::Result<(socket2::Socket, socket2::SockAddr)> + Send,
+    register: impl FnOnce(socket2::Socket) -> io::Result<SocketDescriptor>,
+) -> OperationResult<(SocketDescriptor, SocketAddr)> {
+    cancellable(cancellation, async {
+        let (accepted, address) = socket.inner.read_with(accept).await?;
+        register_accepted(accepted, address, register)
+    })
+    .await
+}
+
+fn register_accepted(
+    accepted: socket2::Socket,
+    address: socket2::SockAddr,
+    register: impl FnOnce(socket2::Socket) -> io::Result<SocketDescriptor>,
+) -> io::Result<(SocketDescriptor, SocketAddr)> {
+    Ok((
+        register(accepted)?,
+        crate::scheduler::socket_io::address(address),
+    ))
+}
+
 /// Compile-time platform selection with a shared readiness reactor. All instances share registrations.
 #[derive(Clone, Copy, Default)]
 pub struct Selector;
@@ -51,9 +75,13 @@ impl SocketOperations for Selector {
         cancellation: &Cancellation,
     ) -> OperationResult<SocketDescriptor> {
         cancellation.check()?;
-        Ok(SocketDescriptor::new(crate::scheduler::socket_io::open(
-            domain, kind, protocol,
-        )?)?)
+        crate::scheduler::socket_io::open_descriptor(
+            domain,
+            kind,
+            protocol,
+            crate::scheduler::socket_io::open,
+            SocketDescriptor::new,
+        )
     }
     async fn socket_bind(
         &self,
@@ -86,32 +114,29 @@ impl SocketOperations for Selector {
         cancellation: &Cancellation,
     ) -> OperationResult<()> {
         cancellation.check()?;
-        match socket.get_ref().connect(&address.into()) {
-            Ok(()) => Ok(()),
-            Err(error) if crate::scheduler::socket_io::connect_pending(&error) => {
-                cancellable(
-                    cancellation,
-                    socket
-                        .inner
-                        .write_with(crate::scheduler::socket_io::connected),
-                )
-                .await
-            }
-            Err(error) => Err(error.into()),
-        }
+        let result = socket.get_ref().connect(&address.into());
+        crate::scheduler::socket_io::connect_result(
+            result,
+            cancellable(
+                cancellation,
+                socket
+                    .inner
+                    .write_with(crate::scheduler::socket_io::connected),
+            ),
+        )
+        .await
     }
     async fn socket_accept(
         &self,
         socket: &SocketDescriptor,
         cancellation: &Cancellation,
     ) -> OperationResult<(SocketDescriptor, SocketAddr)> {
-        cancellable(cancellation, async {
-            let (accepted, address) = socket.inner.read_with(|socket| socket.accept()).await?;
-            Ok((
-                SocketDescriptor::new(accepted)?,
-                crate::scheduler::socket_io::address(address),
-            ))
-        })
+        accept_with(
+            socket,
+            cancellation,
+            |socket| socket.accept(),
+            SocketDescriptor::new,
+        )
         .await
     }
     async fn socket_read<B: IoBufMut>(
@@ -160,6 +185,49 @@ impl SocketOperations for Selector {
         .await
     }
 }
+
+#[cfg(test)]
+mod socket_tests {
+    use super::*;
+
+    #[test]
+    fn accepted_socket_registration_errors_are_returned() {
+        let accepted =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        let address = socket2::SockAddr::from("127.0.0.1:1".parse::<SocketAddr>().unwrap());
+
+        assert_eq!(
+            register_accepted(accepted, address, |_| {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            })
+            .err()
+            .unwrap()
+            .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn accept_errors_are_returned() {
+        let socket = SocketDescriptor::new(
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap(),
+        )
+        .unwrap();
+
+        let result = futures_lite::future::block_on(accept_with(
+            &socket,
+            &Cancellation::never(),
+            |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            |_| unreachable!("accept errors before descriptor registration"),
+        ));
+
+        assert_eq!(
+            result.err().unwrap().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+}
+
 #[cfg(target_os = "linux")]
 impl FileAllocate for Selector {
     async fn file_allocate(

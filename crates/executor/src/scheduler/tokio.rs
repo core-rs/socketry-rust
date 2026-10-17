@@ -43,6 +43,30 @@ thread_local! {
 mod socket_descriptor;
 pub use socket_descriptor::SocketDescriptor;
 
+async fn accept_with(
+    socket: &SocketDescriptor,
+    runtime: &Handle,
+    cancellation: &Cancellation,
+    accept: impl FnMut(&socket2::Socket) -> io::Result<(socket2::Socket, socket2::SockAddr)> + Send,
+    register: impl FnOnce(&Handle, socket2::Socket) -> io::Result<SocketDescriptor>,
+) -> OperationResult<(SocketDescriptor, SocketAddr)> {
+    let (accepted, address) =
+        cancellable(cancellation, socket.io(Interest::Readable, accept)).await?;
+    register_accepted(runtime, accepted, address, register).map_err(Into::into)
+}
+
+fn register_accepted(
+    runtime: &Handle,
+    accepted: socket2::Socket,
+    address: socket2::SockAddr,
+    register: impl FnOnce(&Handle, socket2::Socket) -> io::Result<SocketDescriptor>,
+) -> io::Result<(SocketDescriptor, SocketAddr)> {
+    Ok((
+        register(runtime, accepted)?,
+        crate::scheduler::socket_io::address(address),
+    ))
+}
+
 struct SchedulerScope(Weak<Shared>);
 impl Drop for SchedulerScope {
     fn drop(&mut self) {
@@ -524,11 +548,13 @@ impl SocketOperations for SchedulerHandle {
     ) -> OperationResult<Self::Socket> {
         cancellation.check()?;
         self.shared.check_open()?;
-        SocketDescriptor::new(
-            &self.shared.runtime,
-            crate::scheduler::socket_io::open(domain, kind, protocol)?,
+        crate::scheduler::socket_io::open_descriptor(
+            domain,
+            kind,
+            protocol,
+            crate::scheduler::socket_io::open,
+            |socket| SocketDescriptor::new(&self.shared.runtime, socket),
         )
-        .map_err(Into::into)
     }
 
     async fn socket_bind(
@@ -573,16 +599,15 @@ impl SocketOperations for SchedulerHandle {
     ) -> OperationResult<()> {
         self.check_runtime(socket.runtime())?;
         cancellation.check()?;
-        match socket.get_ref().connect(&address.into()) {
-            Ok(()) => Ok(()),
-            Err(error) if crate::scheduler::socket_io::connect_pending(&error) => cancellable(
+        let result = socket.get_ref().connect(&address.into());
+        crate::scheduler::socket_io::connect_result(
+            result,
+            cancellable(
                 cancellation,
                 socket.io(Interest::Writable, crate::scheduler::socket_io::connected),
-            )
-            .await
-            .map_err(Into::into),
-            Err(error) => Err(error.into()),
-        }
+            ),
+        )
+        .await
     }
 
     async fn socket_accept(
@@ -591,15 +616,14 @@ impl SocketOperations for SchedulerHandle {
         cancellation: &Cancellation,
     ) -> OperationResult<(Self::Socket, SocketAddr)> {
         self.check_runtime(socket.runtime())?;
-        let accepted = cancellable(cancellation, async {
-            socket
-                .io(Interest::Readable, |socket| socket.accept())
-                .await
-        })
-        .await?;
-        let (accepted, address) = accepted;
-        let accepted = Self::Socket::new(&self.shared.runtime, accepted)?;
-        Ok((accepted, crate::scheduler::socket_io::address(address)))
+        accept_with(
+            socket,
+            &self.shared.runtime,
+            cancellation,
+            |socket| socket.accept(),
+            Self::Socket::new,
+        )
+        .await
     }
 
     async fn socket_read<B: IoBufMut>(
@@ -611,21 +635,12 @@ impl SocketOperations for SchedulerHandle {
         if let Err(error) = self.check_runtime(socket.runtime()) {
             return (Err(error.into()), buffer);
         }
-        let empty = buffer.as_ref().is_empty();
         let result = cancellable(cancellation, async {
-            let mut receive = |socket: &socket2::Socket| {
-                crate::scheduler::socket_io::recv(socket, buffer.as_mut())
-            };
-            if empty {
-                match receive(socket.get_ref()) {
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        socket.io(Interest::Readable, &mut receive).await
-                    }
-                    result => result,
-                }
-            } else {
-                socket.io(Interest::Readable, receive).await
-            }
+            socket
+                .io(Interest::Readable, |socket| {
+                    crate::scheduler::socket_io::recv(socket, buffer.as_mut())
+                })
+                .await
         })
         .await;
         (result, buffer)
@@ -641,21 +656,10 @@ impl SocketOperations for SchedulerHandle {
             return (Err(error.into()), buffer);
         }
         let send_buffer = crate::scheduler::socket_io::SendBuffer::new(&buffer);
-        let length = buffer.as_ref().len();
-        let empty = length == 0;
-        let result = cancellable(cancellation, async {
-            let mut send = move |socket: &socket2::Socket| send_buffer.send(socket);
-            if empty {
-                match send(socket.get_ref()) {
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        socket.io(Interest::Writable, &mut send).await
-                    }
-                    result => result,
-                }
-            } else {
-                socket.io(Interest::Writable, send).await
-            }
-        })
+        let result = cancellable(
+            cancellation,
+            socket.io(Interest::Writable, move |socket| send_buffer.send(socket)),
+        )
         .await;
         (result, buffer)
     }
@@ -669,6 +673,61 @@ impl SocketOperations for SchedulerHandle {
         self.check_runtime(socket.runtime())?;
         cancellable(cancellation, socket.wait(interest)).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod socket_accept_tests {
+    use super::*;
+
+    #[test]
+    fn accepted_socket_registration_errors_are_returned() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let accepted =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        let address = socket2::SockAddr::from("127.0.0.1:1".parse::<SocketAddr>().unwrap());
+
+        assert_eq!(
+            register_accepted(runtime.handle(), accepted, address, |_, _| {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            })
+            .err()
+            .unwrap()
+            .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn accept_errors_are_returned() {
+        use std::io::Write;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (socket, _) = listener.accept().unwrap();
+        let mut peer = peer;
+        peer.write_all(b"ready").unwrap();
+        let socket = SocketDescriptor::new(runtime.handle(), socket.into()).unwrap();
+
+        let result = runtime.block_on(accept_with(
+            &socket,
+            runtime.handle(),
+            &Cancellation::never(),
+            |_| Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            |_, _| unreachable!("accept errors before descriptor registration"),
+        ));
+
+        assert_eq!(
+            result.err().unwrap().kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 }
 

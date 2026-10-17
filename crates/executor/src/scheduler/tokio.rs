@@ -1381,10 +1381,7 @@ impl SocketMessages for SchedulerHandle {
             return (Err(error), message);
         }
         let address = message.address;
-        let mut message =
-            crate::scheduler::message_io::Message::new(message.buffers, address, |buffer| {
-                buffer.as_ref().as_ptr().cast_mut()
-            });
+        let mut message = crate::scheduler::message_io::Message::sending(message.buffers, address);
         let result = cancellable(
             cancellation,
             socket.io(Interest::Writable, |socket| message.send(socket, flags)),
@@ -1415,9 +1412,7 @@ impl SocketMessages for SchedulerHandle {
         {
             return (Err(error), buffers);
         }
-        let mut message = crate::scheduler::message_io::Message::new(buffers, None, |buffer| {
-            buffer.as_mut().as_mut_ptr()
-        });
+        let mut message = crate::scheduler::message_io::Message::receiving(buffers);
         let result = cancellable(
             cancellation,
             socket.io(Interest::Readable, |socket| message.recv(socket, flags)),

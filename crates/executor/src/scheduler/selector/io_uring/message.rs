@@ -135,9 +135,7 @@ impl SocketMessages for Selector {
             return (Err(error), message);
         }
         let address = message.address;
-        let message = Message::new(message.buffers, address, |buffer| {
-            buffer.as_ref().as_ptr().cast_mut()
-        });
+        let message = Message::sending(message.buffers, address);
         let (result, message) = retry_operation(
             message,
             |message| {
@@ -175,7 +173,7 @@ impl SocketMessages for Selector {
         {
             return (Err(error), buffers);
         }
-        let message = Message::new(buffers, None, |buffer| buffer.as_mut().as_mut_ptr());
+        let message = Message::receiving(buffers);
         let (result, message) = retry_operation(
             message,
             |message| {
@@ -204,6 +202,13 @@ impl SocketMessages for Selector {
 mod tests {
     use super::*;
     use futures_lite::future::{block_on, poll_once};
+
+    fn assert_cancelled<T: std::fmt::Debug>(result: OperationResult<T>) {
+        assert_eq!(
+            std::mem::discriminant(&result.unwrap_err()),
+            std::mem::discriminant(&crate::OperationError::Cancelled(crate::Cancelled)),
+        );
+    }
 
     fn harness() -> (Selector, mpsc::Receiver<Command>, UnixStream) {
         let (commands, incoming) = mpsc::channel();
@@ -286,7 +291,9 @@ mod tests {
                         let mut operation = Box::pin(run(&selector, &socket, send, &cancellation));
                         assert!(poll_once(&mut operation).await.is_none());
                         let Command::Submit(mut request) = incoming.try_recv().unwrap() else {
-                            panic!("message submission expected")
+                            unreachable!(
+                                "the first poll can only submit: this harness has not cancelled or closed the selector"
+                            )
                         };
                         assert!(!request.cancelling());
                         request.set_cancelling();
@@ -314,7 +321,7 @@ mod tests {
                             if success {
                                 assert_eq!(result.unwrap(), 0);
                             } else {
-                                assert!(matches!(result, Err(crate::OperationError::Cancelled(_))));
+                                assert_cancelled(result);
                             }
                         }
                         assert_eq!(Arc::strong_count(&socket.inner), 1);
@@ -339,15 +346,14 @@ mod tests {
                     let mut operation = Box::pin(run(&selector, &socket, send, &cancellation));
                     assert!(poll_once(&mut operation).await.is_none());
                     let Command::Submit(request) = incoming.try_recv().unwrap() else {
-                        panic!("message submission expected")
+                        unreachable!(
+                            "the first poll can only submit: this harness has not cancelled or closed the selector"
+                        )
                     };
                     request.finish(Err(io::ErrorKind::WouldBlock.into()));
                     if cancel {
                         cancellation.cancel();
-                        assert!(matches!(
-                            operation.await,
-                            Err(crate::OperationError::Cancelled(_))
-                        ));
+                        assert_cancelled(operation.await);
                     } else {
                         if !send {
                             let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -360,7 +366,7 @@ mod tests {
                             match incoming.try_recv() {
                                 Ok(Command::Submit(request)) => Poll::Ready(request),
                                 Err(mpsc::TryRecvError::Empty) => Poll::Pending,
-                                _ => panic!("retry submission expected"),
+                                _ => unreachable!("the live harness only resubmits after EAGAIN; it has not cancelled or closed the selector"),
                             }
                         })
                         .await;
@@ -390,7 +396,9 @@ mod tests {
                 ));
                 assert!(poll_once(&mut operation).await.is_none());
                 let Command::Submit(mut request) = incoming.try_recv().unwrap() else {
-                    panic!("message submission expected")
+                    unreachable!(
+                        "the first poll can only submit: this harness has not cancelled or closed the selector"
+                    )
                 };
                 if lost_completion {
                     drop(request.take_reply());

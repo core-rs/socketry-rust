@@ -495,15 +495,14 @@ impl SocketMessages for Selector {
         if let Err(error) = cancellation
             .check()
             .map_err(crate::OperationError::from)
-            .and_then(|()| super::super::message_io::validate(&message.buffers).map_err(Into::into))
+            .and_then(|()| {
+                crate::scheduler::message_io::validate(&message.buffers).map_err(Into::into)
+            })
         {
             return (Err(error), message);
         }
         let address = message.address;
-        let mut message =
-            crate::scheduler::message_io::Message::new(message.buffers, address, |buffer| {
-                buffer.as_ref().as_ptr().cast_mut()
-            });
+        let mut message = crate::scheduler::message_io::Message::sending(message.buffers, address);
         let result = cancellable(
             cancellation,
             socket
@@ -533,9 +532,7 @@ impl SocketMessages for Selector {
         {
             return (Err(error), buffers);
         }
-        let mut message = crate::scheduler::message_io::Message::new(buffers, None, |buffer| {
-            buffer.as_mut().as_mut_ptr()
-        });
+        let mut message = crate::scheduler::message_io::Message::receiving(buffers);
         let result = cancellable(
             cancellation,
             socket.inner.read_with(|socket| message.recv(socket, flags)),

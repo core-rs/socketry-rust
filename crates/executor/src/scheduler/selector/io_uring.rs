@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Linux completion reads, writes, allocation, synchronization, and truncation using a ring owned by a dedicated selector thread. Tasks communicate through owned requests and standard wakers, so operation futures remain Send and can migrate between executor workers.
+//! Linux completion reads, writes, metadata, allocation, synchronization, and truncation using a ring owned by a dedicated selector thread. Tasks communicate through owned requests and standard wakers, so operation futures remain Send and can migrate between executor workers.
 //!
 //! Socket setup, accept, readiness waits and timers currently reuse async-io.
 //! Initialization probes the required opcodes and returns an error rather than
@@ -22,6 +22,7 @@ use event_listener::{Event as CompletionEvent, Listener as _};
 use futures_channel::oneshot;
 use io_uring::{IoUring, opcode, squeue, types};
 use polling::{Event, Events, Poller};
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::fs::File as StdFile;
 use std::io::{self, Read, SeekFrom, Write};
@@ -40,6 +41,7 @@ use std::{
 };
 
 mod message;
+mod stat;
 
 const CANCEL_TAG: u64 = 1 << 63;
 const COMMAND_EVENT: usize = 0;
@@ -79,6 +81,7 @@ fn validate_operation_support(supported: impl Fn(u8) -> bool) -> io::Result<()> 
         opcode::RecvMsg::CODE,
         opcode::AsyncCancel::CODE,
         opcode::Fsync::CODE,
+        opcode::Statx::CODE,
     ] {
         if !supported(operation) {
             return Err(io::Error::new(
@@ -137,8 +140,8 @@ struct Request<B: IoBuf = Vec<u8>> {
     buffer: Option<B>,
     pointer: fn(&mut B) -> *mut u8,
     write: bool,
-    reply: Option<oneshot::Sender<RawBufferResult<B>>>,
-    cancelling: bool,
+    reply: Cell<Option<oneshot::Sender<RawBufferResult<B>>>>,
+    cancelling: Cell<bool>,
 }
 
 impl<B: IoBuf> Request<B> {
@@ -208,15 +211,15 @@ impl<B: IoBuf> Drop for Request<B> {
     }
 }
 
-// One erased request allocation lets a selector queue heterogeneous owned
-// buffer types. Its typed completion returns the exact original owner.
+// One erased request allocation lets a selector queue heterogeneous owned buffer types. Its typed completion returns the exact original owner.
+// Only entry preparation (before publication) and original completion may access the request exclusively. In-flight bookkeeping uses shared access so inline UnsafeCell output can remain kernel-accessible without creating an aliasing mutable reference.
 trait PendingRequest: Send {
     fn identifier(&self) -> u64;
     fn entry(&mut self) -> squeue::Entry;
     fn finish(self: Box<Self>, result: io::Result<usize>);
     fn cancelling(&self) -> bool;
-    fn set_cancelling(&mut self);
-    fn take_reply(&mut self) -> Option<Box<dyn Send>>;
+    fn set_cancelling(&self);
+    fn take_reply(&self) -> Option<Box<dyn Send>>;
 }
 impl<B: IoBuf> PendingRequest for Request<B> {
     fn identifier(&self) -> u64 {
@@ -229,12 +232,12 @@ impl<B: IoBuf> PendingRequest for Request<B> {
         Request::finish(*self, result);
     }
     fn cancelling(&self) -> bool {
-        self.cancelling
+        self.cancelling.get()
     }
-    fn set_cancelling(&mut self) {
-        self.cancelling = true;
+    fn set_cancelling(&self) {
+        self.cancelling.set(true);
     }
-    fn take_reply(&mut self) -> Option<Box<dyn Send>> {
+    fn take_reply(&self) -> Option<Box<dyn Send>> {
         self.reply
             .take()
             .map(|reply| Box::new(reply) as Box<dyn Send>)
@@ -257,8 +260,8 @@ struct FileRequest {
     identifier: u64,
     file: Option<Arc<StdFile>>,
     operation: FileOperation,
-    reply: Option<oneshot::Sender<io::Result<()>>>,
-    cancelling: bool,
+    reply: Cell<Option<oneshot::Sender<io::Result<()>>>>,
+    cancelling: Cell<bool>,
 }
 
 impl PendingRequest for FileRequest {
@@ -294,7 +297,7 @@ impl PendingRequest for FileRequest {
         entry.user_data(self.identifier)
     }
 
-    fn finish(mut self: Box<Self>, result: io::Result<usize>) {
+    fn finish(self: Box<Self>, result: io::Result<usize>) {
         let reply = self
             .reply
             .take()
@@ -305,14 +308,14 @@ impl PendingRequest for FileRequest {
     }
 
     fn cancelling(&self) -> bool {
-        self.cancelling
+        self.cancelling.get()
     }
 
-    fn set_cancelling(&mut self) {
-        self.cancelling = true;
+    fn set_cancelling(&self) {
+        self.cancelling.set(true);
     }
 
-    fn take_reply(&mut self) -> Option<Box<dyn Send>> {
+    fn take_reply(&self) -> Option<Box<dyn Send>> {
         self.reply
             .take()
             .map(|reply| Box::new(reply) as Box<dyn Send>)
@@ -341,7 +344,7 @@ struct InFlight(HashMap<u64, Box<dyn PendingRequest>>);
 impl Drop for InFlight {
     fn drop(&mut self) {
         let mut replies = Vec::new();
-        for (_, mut request) in self.0.drain() {
+        for (_, request) in self.0.drain() {
             replies.extend(request.take_reply());
             std::mem::forget(request);
         }
@@ -572,8 +575,8 @@ impl Selector {
             buffer: Some(buffer),
             pointer,
             write,
-            reply: Some(reply),
-            cancelling: false,
+            reply: Cell::new(Some(reply)),
+            cancelling: Cell::new(false),
         };
         self.submit(Box::new(request), result, cancellation).await
     }
@@ -592,8 +595,8 @@ impl Selector {
             identifier,
             file: Some(file.retain()),
             operation,
-            reply: Some(reply),
-            cancelling: false,
+            reply: Cell::new(Some(reply)),
+            cancelling: Cell::new(false),
         };
         operation_result(
             self.submit(Box::new(request), result, cancellation).await,
@@ -906,6 +909,7 @@ impl FileAllocate for Selector {
 
 impl File for Selector {
     type File = FileDescriptor;
+    type Metadata = crate::StatxMetadata;
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
         self.check_open()?;
         crate::scheduler::file_close::close(&self.controller.cleanup, file).await
@@ -933,6 +937,14 @@ impl File for Selector {
                 .file_truncate(file, length, cancellation)
                 .await
         }
+    }
+
+    async fn file_stat(
+        &self,
+        file: &Self::File,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Metadata> {
+        self.stat(file, cancellation).await
     }
 
     async fn file_sync(
@@ -1111,7 +1123,7 @@ impl Reactor {
                 .remove(position)
                 .expect("pending queue is unchanged since finding this position");
             request.finish(Err(io::ErrorKind::Interrupted.into()));
-        } else if let Some(request) = self.in_flight.0.get_mut(&identifier)
+        } else if let Some(request) = self.in_flight.0.get(&identifier)
             && !request.cancelling()
         {
             request.set_cancelling();
@@ -1138,7 +1150,7 @@ impl Reactor {
                         for request in self.pending.drain(..) {
                             request.finish(Err(io::ErrorKind::Interrupted.into()));
                         }
-                        for request in self.in_flight.0.values_mut() {
+                        for request in self.in_flight.0.values() {
                             if !request.cancelling() {
                                 request.set_cancelling();
                                 self.cancellations.push_back(request.identifier());

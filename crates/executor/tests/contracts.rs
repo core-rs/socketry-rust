@@ -19,6 +19,9 @@ mod simulated;
 #[path = "../examples/interface_probe/tests/stateful_file.rs"]
 mod stateful_file;
 
+#[path = "../examples/interface_probe/tests/file_stat.rs"]
+mod file_stat;
+
 #[path = "../examples/interface_probe/tests/file_sync.rs"]
 mod file_sync;
 
@@ -50,6 +53,7 @@ where
     file_close::check(scheduler, root).await;
     stateful_file::check(scheduler, root).await;
     file_sync::check(scheduler, root).await;
+    file_stat::check(scheduler, root).await;
     file_truncate::check(scheduler, root).await;
     let never = Cancellation::never();
     let cancelled = Cancellation::new();

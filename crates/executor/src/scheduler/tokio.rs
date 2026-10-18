@@ -822,6 +822,7 @@ impl FileAllocate for SchedulerHandle {
 
 impl File for SchedulerHandle {
     type File = FileDescriptor;
+    type Metadata = crate::SystemFileMetadata;
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
         self.shared.check_open()?;
         super::file_close::close(&self.shared.cleanup, file).await
@@ -852,6 +853,24 @@ impl File for SchedulerHandle {
         )
     }
 
+    async fn file_stat(
+        &self,
+        file: &Self::File,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Metadata> {
+        cancellation.check()?;
+        self.shared.check_open()?;
+        let file = file.retain();
+        let cancellation = cancellation.clone();
+        file_operation_result(
+            self.shared
+                .runtime
+                .spawn_blocking(move || {
+                    super::blocking::run(&cancellation, || super::file_io::stat(&file))
+                })
+                .await,
+        )
+    }
     async fn file_sync(
         &self,
         file: &Self::File,
@@ -1220,6 +1239,7 @@ impl FileAllocate for Scheduler {
 
 impl File for Scheduler {
     type File = <SchedulerHandle as File>::File;
+    type Metadata = <SchedulerHandle as File>::Metadata;
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
         self.handle.file_close(file).await
     }
@@ -1237,6 +1257,13 @@ impl File for Scheduler {
         self.handle.file_truncate(file, length, cancellation).await
     }
 
+    async fn file_stat(
+        &self,
+        file: &Self::File,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Metadata> {
+        self.handle.file_stat(file, cancellation).await
+    }
     async fn file_sync(
         &self,
         file: &Self::File,

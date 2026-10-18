@@ -202,6 +202,19 @@ Read/write operations take an owned `IoBuf` (`IoBufMut` for reads) and return `B
 
 `File::file_read` and `file_write` borrow `&Self::File` and advance its shared cursor by the transferred byte count. `file_read_at` and `file_write_at` take an explicit offset instead. Await cursor operations sequentially when ordering matters; concurrent calls have no portable ordering or non-overlap guarantee. Dropping an admitted operation can still advance the cursor. Each call can transfer fewer bytes than requested, and a read returns zero at EOF. `file_open(path, FileOptions, cancellation)` creates the associated resource. Current native/Tokio backends internally retain an `Arc<std::fs::File>`; generic callers do not require that representation. The readiness and Tokio implementations use blocking pools; io\_uring uses current-position SQEs for stateful access. There is no scheduler-side cursor or extra per-file locking. Use ordinary files opened without append mode, and offsets fitting i64. Unix positioned operations leave the shared cursor unchanged; the Windows blocking fallback updates it according to std's seek\_read/seek\_write semantics.
 
+`file_stat(file, cancellation)` queries an open file without changing its cursor. It returns owned `File::Metadata`; import `FileMetadata` to use its portable accessors. Fields may be unavailable, and timestamps may be unrepresentable, so accessors return `Option`. Results can reflect concurrent modifications and are not atomic snapshots. Await preceding operations when ordering matters. Querying requires no write permission, and the result remains usable after the file is closed.
+
+```rust
+use socketry_executor::{Cancellation, File, FileMetadata, OperationResult};
+
+async fn size<S: File>(scheduler: &S, file: &S::File, cancellation: &Cancellation) -> OperationResult<Option<u64>> {
+    let metadata = scheduler.file_stat(file, cancellation).await?;
+    Ok(metadata.size())
+}
+```
+
+Readiness and Tokio retain `std::fs::Metadata` in `SystemFileMetadata`; `as_std()` exposes native extensions. Linux io_uring returns `StatxMetadata`, exposing `as_statx()` and preserving the native validity mask. Its output lives inside the existing request allocation and is returned by value after completion, with no separate metadata allocation or eager conversion. Rust may eliminate intermediate copies but this is not guaranteed. The io_uring backend requires `Statx` support at initialization. See the [commented metadata example](examples/file_stat.rs). Path lookup and symlink-following policies remain separate from this descriptor-based operation.
+
 `file_seek(file, std::io::SeekFrom, cancellation)` repositions the shared cursor and returns its resulting `u64` offset. Use `Start(offset)` for an absolute position, `Current(delta)` for a relative move, or `End(delta)` for a position relative to EOF. `Current(0)` queries the position. Seeking past EOF does not extend the file; absolute offsets must fit in `i64`, and invalid positions or filesystem limits return errors. Seeks use blocking file pools on every current native backend, including io\_uring, and Tokio's blocking pool in the adapter. Cancellation before execution prevents seeking; a started seek preserves its actual result. Await seeks and other cursor operations sequentially when their ordering matters. A seek/read pair is not atomic with respect to other users of the resource.
 
 `file_truncate(file, length, cancellation)` sets the logical file length. It discards bytes when shrinking and zero-fills an extension, leaving the shared cursor unchanged even if it is now past EOF. The file must be open for writing; lengths must fit in `i64`, and filesystem limits and OS errors are reported. Await related operations in order. Truncation does not guarantee disk-space reservation or durability; await `file_sync` afterward when needed.

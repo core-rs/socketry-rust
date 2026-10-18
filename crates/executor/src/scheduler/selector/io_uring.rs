@@ -15,7 +15,7 @@
 //!
 //! Allocation and truncation use native requests when their opcodes are available, otherwise the blocking file fallback preserves the same public contract. File advice uses bounded cleanup workers so accepted jobs survive ring shutdown; native advice SQEs remain future work.
 use super::readiness::{self, SocketDescriptor};
-use crate::scheduler::{BufferResult, Clock, Interest, Socket as SocketOperations};
+use crate::scheduler::{BufferResult, Clock, Interest, SocketScheduler};
 use crate::{AllocationMode, FileAllocate, FileDescriptor, SyncMode};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
 use crate::{
@@ -710,7 +710,7 @@ impl SocketRegistration for Selector {
         readiness::Selector.register_listener(listener)
     }
 }
-impl SocketOperations for Selector {
+impl SocketScheduler for Selector {
     type Socket = SocketDescriptor;
 
     async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {

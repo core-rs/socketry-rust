@@ -154,7 +154,7 @@ pub async fn check(scheduler: &impl AddressResolution) {
 
 /// Exercise the boundary between resolution and associated socket resources through public traits only.
 pub async fn connection(
-    scheduler: &(impl AddressResolution + socketry_executor::Socket),
+    scheduler: &(impl AddressResolution + socketry_executor::SocketScheduler),
     name: &str,
 ) {
     use socketry_executor::SocketType;

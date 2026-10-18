@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use crate::{Cancellation, OperationResult, Socket, SocketOption};
+use crate::{Cancellation, OperationResult, SocketOption, SocketScheduler};
 use std::future::Future;
 
 /// Typed get/set capability for one socket option. Generic consumers require only the options they use, such as `S: SocketOptions<TcpNoDelay>`.
@@ -19,12 +19,12 @@ use std::future::Future;
 /// ```
 /// Merely supporting sockets does not imply support for every option:
 /// ```compile_fail
-/// use socketry_executor::{Cancellation, Socket, SocketOptions, TcpNoDelay};
-/// async fn configure<S: Socket>(scheduler: &S, socket: &S::Socket) {
+/// use socketry_executor::{Cancellation, SocketScheduler, SocketOptions, TcpNoDelay};
+/// async fn configure<S: SocketScheduler>(scheduler: &S, socket: &S::Socket) {
 ///     scheduler.socket_set_option(socket, TcpNoDelay, true, &Cancellation::never()).await;
 /// }
 /// ```
-pub trait SocketOptions<O: SocketOption>: Socket {
+pub trait SocketOptions<O: SocketOption>: SocketScheduler {
     /// Query the option's current value, preserving OS errors.
     fn socket_get_option(
         &self,

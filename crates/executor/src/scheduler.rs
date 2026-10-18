@@ -40,8 +40,8 @@ pub use socket_registration::SocketRegistration;
 mod interest;
 pub use interest::Interest;
 
-mod socket;
-pub use socket::Socket;
+mod socket_scheduler;
+pub use socket_scheduler::SocketScheduler;
 
 mod socket_options;
 pub use socket_options::SocketOptions;
@@ -49,8 +49,8 @@ pub use socket_options::SocketOptions;
 #[cfg(any(feature = "native", feature = "tokio"))]
 mod native_socket_option;
 
-mod file;
-pub use file::File;
+mod file_scheduler;
+pub use file_scheduler::FileScheduler;
 
 mod file_operation;
 pub use file_operation::FileOperation;

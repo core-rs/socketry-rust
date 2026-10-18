@@ -4,8 +4,8 @@
 //! Shared message contracts for backends implementing the optional capability.
 
 use socketry_executor::{
-    Cancellation, IoBuf, IoBufMut, OperationError, Socket, SocketDomain, SocketMessage,
-    SocketMessages, SocketRecvFlags, SocketSendFlags, SocketType,
+    Cancellation, IoBuf, IoBufMut, OperationError, SocketDomain, SocketMessage, SocketMessages,
+    SocketRecvFlags, SocketScheduler, SocketSendFlags, SocketType,
 };
 use std::{
     future::{Future, poll_fn},
@@ -15,7 +15,11 @@ use std::{
 
 const NEVER: Cancellation = Cancellation::never();
 
-async fn bound<S: Socket>(scheduler: &S, address: SocketAddr, kind: SocketType) -> S::Socket {
+async fn bound<S: SocketScheduler>(
+    scheduler: &S,
+    address: SocketAddr,
+    kind: SocketType,
+) -> S::Socket {
     let socket = scheduler
         .socket_open(SocketDomain::from(address), kind, None, &NEVER)
         .await

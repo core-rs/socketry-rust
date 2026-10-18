@@ -3,7 +3,7 @@
 
 //! In-memory files and duplex byte streams. No OS resources or native runtime.
 //! This is an interface probe, not a model of TCP scheduling or durability.
-use super::{Cancellation, FileOptions, OperationResult, Socket};
+use super::{Cancellation, FileOptions, OperationResult, SocketScheduler};
 use event_listener::Event;
 use socketry_executor::{AllocationMode, BufferResult, FileAllocate, SyncMode};
 use socketry_executor::{
@@ -500,7 +500,7 @@ impl FileWriteAt for Scheduler {
     }
 }
 
-impl Socket for Scheduler {
+impl SocketScheduler for Scheduler {
     type Socket = SocketDescriptor;
     async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
         drop(socket);

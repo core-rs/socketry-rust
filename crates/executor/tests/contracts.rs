@@ -2,8 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 use socketry_executor::{
-    Cancellation, File, FileOptions, Interest, IoBuf, OperationError, OperationResult, Socket,
-    SocketDomain, SocketProtocol, SocketType, Spawn,
+    Cancellation, FileOptions, FileScheduler, Interest, IoBuf, OperationError, OperationResult,
+    SocketDomain, SocketProtocol, SocketScheduler, SocketType, Spawn,
 };
 use std::{
     future::{Future, poll_fn},
@@ -42,8 +42,8 @@ mod socket_options;
 
 async fn resources<S>(scheduler: &S, root: &Path)
 where
-    S: File
-        + Socket
+    S: FileScheduler
+        + SocketScheduler
         + socketry_executor::SocketOptions<socketry_executor::SocketReuseAddress>
         + socketry_executor::SocketOptions<socketry_executor::SocketKeepalive>
         + socketry_executor::SocketOptions<socketry_executor::TcpNoDelay>,

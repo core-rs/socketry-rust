@@ -6,7 +6,7 @@ static NEVER: crate::Cancellation = crate::Cancellation::never();
 
 use super::{DefaultSelector, Scheduler, check_initialized_open, check_open};
 use crate::SocketRegistration;
-use crate::scheduler::{Clock, Interest, Socket};
+use crate::scheduler::{Clock, Interest, SocketScheduler};
 use crate::{OperationResult, SocketDomain, SocketProtocol, SocketType};
 use std::fs::OpenOptions;
 use std::io;
@@ -28,7 +28,10 @@ fn socket_pair() -> (TcpStream, TcpStream) {
     (client, server)
 }
 
-async fn connect<S: Socket>(scheduler: &S, address: SocketAddr) -> OperationResult<S::Socket> {
+async fn connect<S: SocketScheduler>(
+    scheduler: &S,
+    address: SocketAddr,
+) -> OperationResult<S::Socket> {
     let socket = scheduler
         .socket_open(
             SocketDomain::from(address),

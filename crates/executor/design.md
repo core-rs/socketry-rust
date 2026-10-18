@@ -40,7 +40,9 @@ Dedicated acceptors may reduce scheduling interference, and blocking or multisho
 
 ## Capability traits and static dispatch
 
-`File`, `Socket`, and `Clock` name scheduler capabilities. `Spawn` provides primitive task dispatch and returns an owning task handle. `Blocking` adds optional execution of owned synchronous closures with bounded asynchronous admission. `AddressResolution` adds hostname lookup independently of `Socket`. `FileOperation::File` and `Socket::Socket` are associated resource types chosen by each implementation. Native and Tokio use concrete `FileDescriptor` and `SocketDescriptor` types. `Socket` replaces the earlier capability name `Network`.
+`FileScheduler`, `SocketScheduler`, and `Clock` name scheduler capabilities. `Spawn` provides primitive task dispatch and returns an owning task handle. `Blocking` adds optional execution of owned synchronous closures with bounded asynchronous admission. `AddressResolution` adds hostname lookup independently of `SocketScheduler`. `FileOperation::File` and `SocketScheduler::Socket` are associated resource types chosen by each implementation. Native and Tokio use concrete `FileDescriptor` and `SocketDescriptor` types.
+
+Use the `Scheduler` suffix for the broad file and socket interfaces: `FileScheduler` and `SocketScheduler` replace the former `File` and `Socket` trait names. This identifies the scheduler providing those capabilities and distinguishes it from the resource and individual operation traits. `FileScheduler` is already a blanket aggregate; `SocketScheduler` still declares its methods directly until the operation-level socket split. Individual capabilities retain names such as `FileRead`, `Clock`, and `Spawn`.
 
 Prefer generic trait bounds, concrete resource types, and concrete future types. These allow compile-time capability checking, monomorphization, and inlining without requiring a boxed future for each operation. The compiler decides which calls to inline; the interface should make that optimization possible.
 
@@ -75,27 +77,27 @@ This function needs neither file creation nor writing, metadata, or close. A cop
 
 `FileClose` keeps `file_close` and `file_close_submit` together, and `FileAdvice` keeps both advice forms together. Each pair describes the same underlying operation with different completion boundaries. Retain this grouping for the socket equivalents. Audit remaining grouped capabilities, including typed socket get/set options, for independent consumer requirements; retain small cohesive groups where their shared contract is useful, such as a clock's instant type and monotonic deadline operations.
 
-`File` is a convenience aggregate of all core file operation traits, with a blanket implementation for any scheduler satisfying those bounds. It declares no methods or associated types itself. Optional allocation and advice remain outside the aggregate. Generic `S: File` code can use all core methods; narrower consumers select individual capabilities. This uses ordinary supertraits and a blanket implementation, not unstable trait aliases.
+`FileScheduler` is a convenience aggregate of all core file operation traits, with a blanket implementation for any scheduler satisfying those bounds. It declares no methods or associated types itself. Optional allocation and advice remain outside the aggregate. Generic `S: FileScheduler` code can use all core methods; narrower consumers select individual capabilities. This uses ordinary supertraits and a blanket implementation, not unstable trait aliases.
 
 These bounds are explicit capability requirements, not inferred effect tracking. Rust checks calls through the generic scheduler against its declared bounds; it does not automatically attach an I/O effect set to the returned `Future` or infer all transitive operations. A bound permits an operation without promising that every execution performs it, and it does not constrain calls through unrelated concrete APIs. No new computation trait or marker on every future is required.
 
 Native, Tokio, and simulated implementations use the file operation traits. Shared file conformance tests declare their required setup, operation, and observation capabilities. A minimal read-only implementation exercises a read-only consumer, and compile-fail documentation checks reject missing operations and optional extensions. The copy failure adapter implements only file creation and positioned reads/writes.
 
-This is a source-breaking implementor refactor. Replace `impl File` with `impl FileOperation` for `type File`, `impl FileStat` for `type Metadata` and `file_stat`, and an implementation of each supported operation trait. Do not implement the aggregate explicitly. Fully qualified associated paths become `<S as FileOperation>::File` and `<S as FileStat>::Metadata`; method paths become, for example, `FileRead::file_read`. Concrete callers import the individual operation traits for method lookup; importing only `File` no longer brings those methods into scope. Generic callers can retain `S: File` or narrow their bounds. Consumers of `FileAdvice` or `FileAllocate` must now explicitly require any additional operations they use.
+This is a source-breaking implementor refactor. Replace the former `impl File` with `impl FileOperation` for `type File`, `impl FileStat` for `type Metadata` and `file_stat`, and an implementation of each supported operation trait. Do not implement the aggregate explicitly. Fully qualified associated paths become `<S as FileOperation>::File` and `<S as FileStat>::Metadata`; method paths become, for example, `FileRead::file_read`. Concrete callers import the individual operation traits for method lookup; importing only `FileScheduler` does not bring those methods into scope. Generic callers replace `S: File` with `S: FileScheduler` or narrow their bounds. Consumers of `FileAdvice` or `FileAllocate` must now explicitly require any additional operations they use. Socket implementations and consumers rename `Socket` to `SocketScheduler`, including `<S as SocketScheduler>::Socket`; their operation requirements are unchanged.
 
 ### Follow-up: socket operation capabilities
 
-Extract `SocketOperation` and split the current `Socket` operations into capabilities such as `SocketOpen`, `SocketBind`, `SocketListen`, `SocketAccept`, `SocketRead`, and `SocketWrite`. Keep trait names aligned with current method names: single-buffer operations are `socket_read` and `socket_write`, while message operations are `socket_recvmsg` and `socket_sendmsg`. Split `SocketMessages` into receive and send capabilities so a reader need not implement sending. This refactor does not rename the operations or add a new `socket_recv` method.
+Extract `SocketOperation` and split the current `SocketScheduler` operations into capabilities such as `SocketOpen`, `SocketBind`, `SocketListen`, `SocketAccept`, `SocketRead`, and `SocketWrite`. Keep trait names aligned with current method names: single-buffer operations are `socket_read` and `socket_write`, while message operations are `socket_recvmsg` and `socket_sendmsg`. Split `SocketMessages` into receive and send capabilities so a reader need not implement sending. This refactor does not rename the operations or add a new `socket_recv` method.
 
-Make each socket operation and extension depend on `SocketOperation`, and retain `Socket` as a convenience aggregate. Migrate all backends, exports, examples, and conformance tests together. Include partial-backend and missing-capability checks, and document associated-path and concrete-method-import migration as for files.
+Make each socket operation and extension depend on `SocketOperation`, and retain `SocketScheduler` as a convenience aggregate. Migrate all backends, exports, examples, and conformance tests together. Include partial-backend and missing-capability checks, and document associated-path and concrete-method-import migration as for files.
 
 ### Common scheduler dependency and resource creation
 
-Generic code takes a scheduler such as `&S`, with bounds describing the portion of the interface it uses. A task group may require `S: Spawn`; a timed primitive may additionally require `Clock`; an HTTP server may require `Spawn + Socket`. These bounds describe the same chosen scheduler implementation. A named aggregate trait can make a standard bundle convenient once its required capabilities are settled; it should not force a task-only primitive to require file or socket support. The current public `Scheduler` is the concrete native implementation, not an aggregate scheduler trait.
+Generic code takes a scheduler such as `&S`, with bounds describing the portion of the interface it uses. A task group may require `S: Spawn`; a timed primitive may additionally require `Clock`; an HTTP server may require `Spawn + SocketScheduler`. These bounds describe the same chosen scheduler implementation. A named aggregate trait can make a standard bundle convenient once its required capabilities are settled; it should not force a task-only primitive to require file or socket support. The current public `Scheduler` is the concrete native implementation, not an aggregate scheduler trait.
 
-Resource creation belongs inside the corresponding capability. `FileOperation` declares an associated file type, and `FileOpen` returns that type. `Socket` declares one associated socket type for unconnected, bound, listening, connected, and datagram sockets. Its `socket_open`, `socket_bind`, `socket_listen`, and `socket_connect` operations follow the corresponding system-call boundaries; `socket_accept` returns another value of that same type. `socket_listen` takes an existing socket and backlog and leaves bind behavior to the operating system, including implicit binding where supported. Generic consumers use these associated resources rather than creating a `std::fs::File` or `std::net::TcpListener` themselves.
+Resource creation belongs inside the corresponding capability. `FileOperation` declares an associated file type, and `FileOpen` returns that type. `SocketScheduler` declares one associated socket type for unconnected, bound, listening, connected, and datagram sockets. Its `socket_open`, `socket_bind`, `socket_listen`, and `socket_connect` operations follow the corresponding system-call boundaries; `socket_accept` returns another value of that same type. `socket_listen` takes an existing socket and backlog and leaves bind behavior to the operating system, including implicit binding where supported. Generic consumers use these associated resources rather than creating a `std::fs::File` or `std::net::TcpListener` themselves.
 
-The initial socket arguments select IPv4 or IPv6, stream or datagram, and an optional TCP or UDP protocol. Address parameters use `std::net::SocketAddr`. `SocketOptions<O>` adds typed configuration without extending the required `Socket` surface. `SocketMessages` adds owned scatter/gather payloads, IP addresses, and portable flags. Non-IP families and ancillary data remain future extensions. File and socket descriptors remain distinct; no common descriptor trait is required. Existing std TCP resources can still enter through the optional `SocketRegistration` interoperability trait.
+The initial socket arguments select IPv4 or IPv6, stream or datagram, and an optional TCP or UDP protocol. Address parameters use `std::net::SocketAddr`. `SocketOptions<O>` adds typed configuration without extending the required `SocketScheduler` surface. `SocketMessages` adds owned scatter/gather payloads, IP addresses, and portable flags. Non-IP families and ancillary data remain future extensions. File and socket descriptors remain distinct; no common descriptor trait is required. Existing std TCP resources can still enter through the optional `SocketRegistration` interoperability trait.
 
 The interface does not require `Arc` around every resource. Concrete implementations choose their resource representation and how to retain it during in-flight work. They may use OS handles, registered-resource tables, shared ownership, or simulated resource identifiers. Taking a resource by reference does not remove the backend's obligation to retain everything still accessible by a submitted operation after its waiting future is dropped.
 
@@ -103,7 +105,7 @@ These resource contracts are implemented. `FileOpen::file_open` accepts public `
 
 ### Typed socket options
 
-`SocketOption` associates an option identifier with its `Value` type; `SocketOptions<O>: Socket` supplies `socket_get_option(socket, option, cancellation)` and `socket_set_option(socket, option, value, cancellation)`. Both return concrete `Send` futures with `OperationResult` outputs. The getter returns `O::Value`; the setter returns `()`. Generic code requires exactly the options it uses:
+`SocketOption` associates an option identifier with its `Value` type; `SocketOptions<O>: SocketScheduler` supplies `socket_get_option(socket, option, cancellation)` and `socket_set_option(socket, option, value, cancellation)`. Both return concrete `Send` futures with `OperationResult` outputs. The getter returns `O::Value`; the setter returns `()`. Generic code requires exactly the options it uses:
 
 ```rust,ignore
 async fn configure<S: SocketOptions<SocketReuseAddress> + SocketOptions<TcpNoDelay>>(
@@ -127,7 +129,7 @@ Shared tests exercise round trips, cancellation, unpolled setters, configuration
 
 ### Message/address I/O
 
-`SocketMessages: Socket` is an optional capability; existing implementations of `Socket` gain no required methods. The native readiness selectors, native scheduler/handle, io_uring selector, and Tokio scheduler/handle implement it. The stream-only example simulator does not currently implement this capability or UDP.
+`SocketMessages: SocketScheduler` is an optional capability; existing implementations of `SocketScheduler` gain no required methods. The native readiness selectors, native scheduler/handle, io_uring selector, and Tokio scheduler/handle implement it. The stream-only example simulator does not currently implement this capability or UDP.
 
 ```rust,ignore
 let message = SocketMessage {
@@ -157,7 +159,7 @@ The [message example](examples/socket_messages.rs) demonstrates a generic scatte
 
 ## Address resolution
 
-`AddressResolution` is an optional capability implemented by native and Tokio schedulers and their handles, plus the example simulator. It is independent of `Socket`, `Blocking`, and the I/O selector at the public boundary. A consumer can require `S: AddressResolution + Socket` without imposing how lookup is implemented.
+`AddressResolution` is an optional capability implemented by native and Tokio schedulers and their handles, plus the example simulator. It is independent of `SocketScheduler`, `Blocking`, and the I/O selector at the public boundary. A consumer can require `S: AddressResolution + SocketScheduler` without imposing how lookup is implemented.
 
 ```rust,ignore
 let addresses = scheduler.address_resolve(
@@ -354,7 +356,7 @@ scheduler.sleep_until(deadline, cancellation)
 scheduler.sleep(duration, cancellation)
 ```
 
-This list includes proposed extensions. The implemented `File` methods are `file_open`, `file_stat`, `file_seek`, `file_sync`, `file_truncate`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at`. The implemented `Socket` methods are `socket_open`, `socket_bind`, `socket_listen`, `socket_connect`, `socket_accept`, `socket_read`, `socket_write`, and `socket_wait`, plus synchronous `socket_local_addr` and `socket_peer_addr`. Initial creation supports IPv4/IPv6 stream and datagram sockets with TCP/UDP protocol selection. Connected UDP preserves datagram boundaries. Optional `SocketMessages` adds address-based message operations; ancillary data remains an extension. Async I/O methods take `&Cancellation`; buffer operations return `(OperationResult<usize>, B)` on success, error, and cancellation.
+This list includes proposed extensions. The implemented `FileScheduler` methods are `file_open`, `file_stat`, `file_seek`, `file_sync`, `file_truncate`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at`. The implemented `SocketScheduler` methods are `socket_open`, `socket_bind`, `socket_listen`, `socket_connect`, `socket_accept`, `socket_read`, `socket_write`, and `socket_wait`, plus synchronous `socket_local_addr` and `socket_peer_addr`. Initial creation supports IPv4/IPv6 stream and datagram sockets with TCP/UDP protocol selection. Connected UDP preserves datagram boundaries. Optional `SocketMessages` adds address-based message operations; ancillary data remains an extension. Async I/O methods take `&Cancellation`; buffer operations return `(OperationResult<usize>, B)` on success, error, and cancellation.
 
 An optional context pairing a scheduler reference with a cancellation signal could reduce repetitive arguments. Such a context should preserve explicit dependency and cancellation boundaries; it is a convenience, not a new computation abstraction.
 
@@ -551,7 +553,7 @@ pub trait FileClose: FileOperation {
     ) -> impl Future<Output = std::io::Result<()>> + Send;
 }
 
-pub trait File:
+pub trait FileScheduler:
     FileOpen
     + FileClose
     + FileStat
@@ -565,7 +567,7 @@ pub trait File:
 {
 }
 
-pub trait Socket: Send + Sync {
+pub trait SocketScheduler: Send + Sync {
     type Socket: Send + Sync;
 
     fn socket_open(
@@ -695,7 +697,7 @@ Dropping an in-flight io_uring operation requests cancellation, but its file and
 
 File close initially uses a bounded blocking cleanup pool for native and Tokio schedulers, including the io_uring scheduler. Both variants use the same path. This pool reuses the internal blocking-pool implementation but has separate workers from arbitrary `spawn_blocking` closures, so shutdown draining does not depend on a user closure that might itself destroy the scheduler. Both pools start lazily and each uses the configured `BlockingOptions` limits. Accepted close jobs survive waiter and scheduler destruction. Native shutdown/destruction outside future and blocking-pool workers waits for cleanup; native destruction on either kind of worker only requests shutdown. Explicit synchronous shutdown panics on either kind of worker to avoid waiting for its own completion. Tokio destruction requests shutdown, and its awaited `shutdown` drains cleanup. Standalone io_uring selectors own a cleanup pool drained by their shutdown; standalone readiness selectors use a process-wide bounded fallback, like their other file operations. The simulator completes close immediately. `_submit` execution errors are currently discarded; use ordinary close for diagnostics. Native close/shutdown SQEs and CQE suppression remain later optimizations.
 
-`Socket::socket_shutdown` takes `std::net::Shutdown::{Read, Write, Both}` and borrows the descriptor. Await preceding writes before shutting down `Write`; the other direction can remain usable for the response. Repeated shutdown and I/O on disabled directions retain OS-specific outcomes. `socket_close` consumes the descriptor and rejects retained backend use before admission; it never coordinates or interrupts other operations. Deregistration and close run together on the cleanup worker. Deregistration errors are execution results where the backend exposes them; Tokio's Unix `AsyncFd::into_inner()` discards them internally. The ordinary future reports available execution errors; `_submit` discards them.
+`SocketScheduler::socket_shutdown` takes `std::net::Shutdown::{Read, Write, Both}` and borrows the descriptor. Await preceding writes before shutting down `Write`; the other direction can remain usable for the response. Repeated shutdown and I/O on disabled directions retain OS-specific outcomes. `socket_close` consumes the descriptor and rejects retained backend use before admission; it never coordinates or interrupts other operations. Deregistration and close run together on the cleanup worker. Deregistration errors are execution results where the backend exposes them; Tokio's Unix `AsyncFd::into_inner()` discards them internally. The ordinary future reports available execution errors; `_submit` discards them.
 
 Native and Tokio socket descriptors privately share their persistent registration through `Arc`. Ordinary readiness operations borrow it without cloning; io_uring and accepted shutdown jobs retain references until completion. Cleanup releases those references before notifying completion, allowing an immediately following close. `_submit` alone cannot establish this ordering: use ordinary shutdown when subsequent explicit close depends on its completion. The in-memory backend completes immediately while preserving admission-only error reporting for `_submit`.
 
@@ -718,7 +720,7 @@ Keep `_submit` exceptional rather than adding a submission-only variant to every
 A pool receive returns a selected filled lease, rather than accepting an already-selected buffer:
 
 ```rust
-pub trait PoolReceive: Socket {
+pub trait PoolReceive: SocketScheduler {
     type Pool: Send + Sync;
     type Lease: IoBufMut;
 
@@ -745,7 +747,7 @@ The returned lease exposes only the initialized received payload for sending, an
 ### Example: positioned file read
 
 ```rust
-async fn read_header<S: File>(
+async fn read_header<S: FileScheduler>(
     scheduler: &S,
     path: &Path,
     cancellation: &Cancellation,
@@ -769,7 +771,7 @@ This deliberately performs one read and permits a short result. A caller needing
 ### Example: forwarding pooled socket data
 
 ```rust
-async fn forward<S: Socket + PoolReceive>(
+async fn forward<S: SocketScheduler + PoolReceive>(
     scheduler: &S,
     source: &S::Socket,
     destination: &S::Socket,
@@ -974,7 +976,7 @@ Implemented `file_read` and `file_write` use and advance the file's shared curso
 
 Allocation is distinct from truncation. An allocation interface needs to account for an offset, length, and supported modes. Platform-specific modes may require an extension rather than a universal flags type. See [io\_uring\_prep\_fallocate](https://man7.org/linux/man-pages/man3/io_uring_prep_fallocate.3.html).
 
-Current `File` opens regular files and provides seeking, shared-cursor and positioned reads and writes, using explicit offsets that fit in `i64`. The internal io\_uring representation distinguishes a shared cursor from a supplied offset, so `file_read_at(..., u64::MAX, ...)` remains invalid rather than selecting stateful access. Each call can complete with a short transfer; read returns zero at EOF. Buffers and their allocations are returned on success, error, and cancellation. Separate opens start with independent cursors; aliases of the same resource share one. `FileOptions` omits append mode so writes respect their supplied offsets. Its Windows fallback uses `seek_read`/`seek_write`, which update the shared cursor according to [Windows FileExt](https://doc.rust-lang.org/std/os/windows/fs/trait.FileExt.html). Resolving this difference is required before promising uniform cursor-preserving semantics.
+Current `FileScheduler` opens regular files and provides seeking, shared-cursor and positioned reads and writes, using explicit offsets that fit in `i64`. The internal io\_uring representation distinguishes a shared cursor from a supplied offset, so `file_read_at(..., u64::MAX, ...)` remains invalid rather than selecting stateful access. Each call can complete with a short transfer; read returns zero at EOF. Buffers and their allocations are returned on success, error, and cancellation. Separate opens start with independent cursors; aliases of the same resource share one. `FileOptions` omits append mode so writes respect their supplied offsets. Its Windows fallback uses `seek_read`/`seek_write`, which update the shared cursor according to [Windows FileExt](https://doc.rust-lang.org/std/os/windows/fs/trait.FileExt.html). Resolving this difference is required before promising uniform cursor-preserving semantics.
 
 ### Syscall proximity and messages
 
@@ -1078,7 +1080,7 @@ Process creation/waiting and pipes remain useful optional extensions. Prepared l
 
 ### Executable interface experiment
 
-[interface\_probe.rs](examples/interface_probe.rs) runs the same `copy`, `serve`, and `exchange` functions through the public `File` and `Socket` traits with native, Tokio, and in-memory implementations:
+[interface\_probe.rs](examples/interface_probe.rs) runs the same `copy`, `serve`, and `exchange` functions through the public `FileScheduler` and `SocketScheduler` traits with native, Tokio, and in-memory implementations:
 
 ```sh
 cargo run -p socketry-executor --example interface_probe --features tokio
@@ -1104,7 +1106,7 @@ The simulator has bounded in-memory file sizes and unbounded byte queues. It doe
 | Cancellation | `Cancellation`, `Cancelled`, `defer_cancel`, and cancellation-aware file/socket operations implemented. Application shutdown is cooperative. |
 | Signal notifications | `Notify<Value>`, `Signals`, and optional Unix registration guards implemented for native and Tokio; each guard owns its dispatch task. |
 | Runtime lifetime | Application waits are explicit. Runtime shutdown abandons futures; backend retention protects submitted I/O. Accepted file-close and socket-close/shutdown submissions survive abandonment and are drained by graceful shutdown. |
-| Capabilities | Public `File`, `Socket`, `SocketOptions<O>`, `SocketMessages`, `SocketRegistration`, `AddressResolution`, `Clock`, `Spawn`, and `Blocking`; associated resources and initial file/socket creation implemented. File operation traits share `FileOperation`; `File` is a convenience aggregate. The equivalent `SocketOperation` split remains follow-up work. |
+| Capabilities | Public `FileScheduler`, `SocketScheduler`, `SocketOptions<O>`, `SocketMessages`, `SocketRegistration`, `AddressResolution`, `Clock`, `Spawn`, and `Blocking`; associated resources and initial file/socket creation implemented. File operation traits share `FileOperation`; `FileScheduler` is a convenience aggregate. The equivalent `SocketOperation` split remains follow-up work. |
 | Blocking execution | Dedicated native/Tokio pools, configurable worker and admission limits, queued cancellation, and owning completion handles implemented. Started closures finish independently; graceful completion requires awaiting them. |
 | Linked operations | Prepared chains and `Linked` remain proposed; native linking, whole-chain blocking jobs, and readiness sequencing are not implemented. |
 | File operations | `file_open`, `file_seek`, `file_sync`, `file_truncate`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at` implemented with owned buffers. Optional `FileAllocate` implemented on Linux with `Extend` and `KeepSize`; optional `FileAdvice` supplies six hints with completion/submission forms. `file_close`/`file_close_submit` implemented with exclusive ownership and bounded cleanup. `file_stat` returns associated native-backed metadata; path-based metadata remains separate. |

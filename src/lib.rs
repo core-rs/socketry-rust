@@ -8,14 +8,14 @@ pub use socketry_executor as executor;
 pub use socketry_executor::{
     AddressHints, AddressInfo, AddressResolution, AddressResolveError, AddressResolveErrorKind,
     AddressService, AdviceMode, AllocationMode, Blocking, BlockingError, BlockingOptions,
-    BlockingTask, BufferResult, BufferSlice, Cancellation, Cancelled, Clock, File, FileAdvice,
+    BlockingTask, BufferResult, BufferSlice, Cancellation, Cancelled, Clock, FileAdvice,
     FileAllocate, FileClose, FileDescriptor, FileMetadata, FileOpen, FileOperation, FileOptions,
-    FileRead, FileReadAt, FileSeek, FileStat, FileSync, FileTruncate, FileType, FileWrite,
-    FileWriteAt, Interest, IoBuf, IoBufMut, Notify, OperationError, OperationResult, Scheduler,
-    SchedulerHandle, Signals, Socket, SocketDomain, SocketKeepalive, SocketMessage, SocketMessages,
-    SocketOption, SocketOptions, SocketProtocol, SocketRecvFlags, SocketRecvResult,
-    SocketRegistration, SocketReuseAddress, SocketSendFlags, SocketType, Spawn, SpawnError,
-    SyncMode, Task, TaskError, TaskHandle, TcpNoDelay, defer_cancel, yield_now,
+    FileRead, FileReadAt, FileScheduler, FileSeek, FileStat, FileSync, FileTruncate, FileType,
+    FileWrite, FileWriteAt, Interest, IoBuf, IoBufMut, Notify, OperationError, OperationResult,
+    Scheduler, SchedulerHandle, Signals, SocketDomain, SocketKeepalive, SocketMessage,
+    SocketMessages, SocketOption, SocketOptions, SocketProtocol, SocketRecvFlags, SocketRecvResult,
+    SocketRegistration, SocketReuseAddress, SocketScheduler, SocketSendFlags, SocketType, Spawn,
+    SpawnError, SyncMode, Task, TaskError, TaskHandle, TcpNoDelay, defer_cancel, yield_now,
 };
 
 #[cfg(all(unix, feature = "signals", any(feature = "native", feature = "tokio")))]

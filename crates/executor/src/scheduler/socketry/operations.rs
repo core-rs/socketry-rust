@@ -5,7 +5,7 @@
 use super::{Scheduler, SchedulerHandle};
 use crate::SyncMode;
 use crate::scheduler::selector::DefaultSelector;
-use crate::scheduler::{BufferResult, Clock, Interest, Socket};
+use crate::scheduler::{BufferResult, Clock, Interest, SocketScheduler};
 #[cfg(target_os = "linux")]
 use crate::{AllocationMode, FileAllocate};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
@@ -119,8 +119,8 @@ impl SocketRegistration for SchedulerHandle {
         self.selector()?.register_listener(listener)
     }
 }
-impl Socket for SchedulerHandle {
-    type Socket = <DefaultSelector as Socket>::Socket;
+impl SocketScheduler for SchedulerHandle {
+    type Socket = <DefaultSelector as SocketScheduler>::Socket;
 
     async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
         check_open(
@@ -516,8 +516,8 @@ impl SocketRegistration for Scheduler {
         self.handle.register_listener(listener)
     }
 }
-impl Socket for Scheduler {
-    type Socket = <SchedulerHandle as Socket>::Socket;
+impl SocketScheduler for Scheduler {
+    type Socket = <SchedulerHandle as SocketScheduler>::Socket;
 
     async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
         self.handle.socket_close(socket).await

@@ -9,7 +9,7 @@
 //! coroutine stacks and may be polled on different workers.
 use crate::scheduler::file_io::{read_at, write_at};
 use crate::scheduler::operation::cancellable;
-use crate::scheduler::{BufferResult, Clock, Interest, Socket as SocketOperations};
+use crate::scheduler::{BufferResult, Clock, Interest, SocketScheduler};
 #[cfg(target_os = "linux")]
 use crate::{AllocationMode, FileAllocate};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
@@ -95,7 +95,7 @@ impl SocketRegistration for Selector {
     }
 }
 
-impl SocketOperations for Selector {
+impl SocketScheduler for Selector {
     type Socket = SocketDescriptor;
 
     async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {

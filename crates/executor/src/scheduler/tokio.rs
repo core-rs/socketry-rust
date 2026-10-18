@@ -11,7 +11,7 @@
 mod signals;
 
 use super::operation::cancellable;
-use super::{BufferResult, Clock, Interest, Socket as SocketOperations};
+use super::{BufferResult, Clock, Interest, SocketScheduler};
 use crate::blocking_pool::BlockingPool;
 #[cfg(target_os = "linux")]
 use crate::{AllocationMode, FileAllocate};
@@ -568,7 +568,7 @@ impl SocketRegistration for SchedulerHandle {
         SocketDescriptor::new(&self.shared.runtime, listener.into())
     }
 }
-impl SocketOperations for SchedulerHandle {
+impl SocketScheduler for SchedulerHandle {
     type Socket = SocketDescriptor;
 
     async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
@@ -1179,8 +1179,8 @@ impl SocketRegistration for Scheduler {
         self.handle.register_listener(listener)
     }
 }
-impl SocketOperations for Scheduler {
-    type Socket = <SchedulerHandle as SocketOperations>::Socket;
+impl SocketScheduler for Scheduler {
+    type Socket = <SchedulerHandle as SocketScheduler>::Socket;
 
     async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
         self.handle.socket_close(socket).await

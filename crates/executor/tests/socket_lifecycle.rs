@@ -3,11 +3,11 @@
 
 #![cfg(any(feature = "native", feature = "tokio"))]
 
-use socketry_executor::{Cancellation, Socket, SocketDomain, SocketType};
+use socketry_executor::{Cancellation, SocketDomain, SocketScheduler, SocketType};
 use std::{io, net::Shutdown};
 
-async fn sockets<S: Socket>(scheduler: &S) -> [S::Socket; 3] {
-    async fn open<S: Socket>(scheduler: &S) -> S::Socket {
+async fn sockets<S: SocketScheduler>(scheduler: &S) -> [S::Socket; 3] {
+    async fn open<S: SocketScheduler>(scheduler: &S) -> S::Socket {
         scheduler
             .socket_open(
                 SocketDomain::Ipv4,
@@ -25,7 +25,7 @@ async fn sockets<S: Socket>(scheduler: &S) -> [S::Socket; 3] {
     ]
 }
 
-async fn rejected<S: Socket>(
+async fn rejected<S: SocketScheduler>(
     scheduler: &S,
     [first, second, third]: [S::Socket; 3],
     expected: io::ErrorKind,

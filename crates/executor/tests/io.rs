@@ -14,7 +14,7 @@ use socketry_executor::{SocketRegistration, SyncMode};
 use std::fs::File as StdFile;
 use std::future::{Future, poll_fn};
 use std::io;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -190,30 +190,65 @@ where
     assert_eq!(buffer.len(), 1);
 }
 
-async fn concurrent_reads<SchedulerType>(scheduler: SchedulerType)
+async fn concurrent_datagram_reads<SchedulerType>(scheduler: SchedulerType)
 where
-    SchedulerType: Socket + SocketRegistration + Spawn + Clone + 'static,
+    SchedulerType: Socket + Spawn + Clone + 'static,
 {
-    let (client, mut server) = socket_pair();
-    let socket = Arc::new(scheduler.register_socket(client).unwrap());
+    let socket = scheduler
+        .socket_open(
+            SocketDomain::Ipv4,
+            SocketType::Datagram,
+            Some(SocketProtocol::Udp),
+            &NEVER,
+        )
+        .await
+        .unwrap();
+    scheduler
+        .socket_bind(&socket, "127.0.0.1:0".parse().unwrap(), &NEVER)
+        .await
+        .unwrap();
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    sender
+        .connect(scheduler.socket_local_addr(&socket).unwrap())
+        .unwrap();
+    scheduler
+        .socket_connect(&socket, sender.local_addr().unwrap(), &NEVER)
+        .await
+        .unwrap();
+    let socket = Arc::new(socket);
+    let (waiting, ready) = std::sync::mpsc::channel();
     let mut handles = Vec::new();
     for _ in 0..16 {
         let scheduler = scheduler.clone();
         let socket = Arc::clone(&socket);
+        let waiting = waiting.clone();
         let handle = scheduler
             .clone()
             .spawn(async move {
-                let (result, buffer) = scheduler.socket_read(&socket, vec![0; 1], &NEVER).await;
-                assert_eq!(result.unwrap(), 1);
+                let mut read = pin!(scheduler.socket_read(&socket, vec![0; 32], &NEVER));
+                poll_fn(|context| {
+                    assert!(read.as_mut().poll(context).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                waiting.send(()).unwrap();
+                let (result, buffer) = read.await;
+                assert_eq!(result.unwrap(), 32);
+                assert_eq!(buffer, vec![buffer[0]; 32]);
                 buffer[0]
             })
             .unwrap();
         handles.push(handle);
     }
-    // A dedicated writer supplies all bytes while readers race for readiness.
+    drop(waiting);
+    // Start sending only after every reader is pending on the shared registration. UDP preserves message boundaries, so independent readers can consume whole packets without assigning portions of a TCP stream to competing tasks.
     let writer = std::thread::spawn(move || {
-        use std::io::Write;
-        server.write_all(&(0..16u8).collect::<Vec<_>>()).unwrap();
+        for _ in 0..16 {
+            support::receive(&ready);
+        }
+        for value in 0..16u8 {
+            assert_eq!(sender.send(&[value; 32]).unwrap(), 32);
+        }
     });
     let mut values = Vec::new();
     for handle in handles {
@@ -315,10 +350,10 @@ mod native {
     }
 
     #[test]
-    fn multiple_readers_share_one_registration() {
+    fn multiple_datagram_readers_share_one_registration() {
         let scheduler = Scheduler::with_workers(4).unwrap();
         let handle = scheduler.handle();
-        scheduler.block_on(within(&handle, concurrent_reads(handle.clone())));
+        scheduler.block_on(within(&handle, concurrent_datagram_reads(handle.clone())));
     }
 
     #[test]
@@ -732,11 +767,11 @@ mod tokio_adapter {
     }
 
     #[test]
-    fn multiple_readers_share_one_registration() {
+    fn multiple_datagram_readers_share_one_registration() {
         let runtime = runtime();
         let scheduler = Scheduler::new(runtime.handle().clone());
         let handle = scheduler.handle();
-        runtime.block_on(within(&handle, concurrent_reads(handle.clone())));
+        runtime.block_on(within(&handle, concurrent_datagram_reads(handle.clone())));
     }
 
     #[test]

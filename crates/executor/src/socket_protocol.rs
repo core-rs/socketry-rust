@@ -8,4 +8,6 @@ pub enum SocketProtocol {
     Tcp,
     /// User Datagram Protocol.
     Udp,
+    /// A platform-native protocol number, preserved by resolution and forwarded unchanged to socket creation.
+    Other(i32),
 }

@@ -19,6 +19,9 @@ pub mod tokio;
 pub use socketry::{Scheduler, SchedulerHandle};
 pub(crate) use socketry::{Shared, enter};
 
+mod address_resolution;
+pub use address_resolution::AddressResolution;
+
 /// An operation result together with its reusable, owned buffer.
 ///
 /// Reads fill the existing buffer length and leave its length unchanged. Only
@@ -66,3 +69,6 @@ pub use socket_messages::SocketMessages;
 
 #[cfg(any(feature = "native", feature = "tokio"))]
 mod message_io;
+
+#[cfg(any(feature = "native", feature = "tokio"))]
+mod socket_parameters;

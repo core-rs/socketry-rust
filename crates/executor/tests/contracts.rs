@@ -575,3 +575,16 @@ fn tokio_allocation_contract() {
     runtime.block_on(file_allocate::check(&scheduler, directory.path()));
     runtime.block_on(file_allocate::check(&scheduler.handle(), directory.path()));
 }
+
+#[path = "../examples/interface_probe/tests/address_resolution.rs"]
+mod address_resolution;
+
+#[test]
+fn simulated_address_resolution() {
+    let scheduler = simulated::Scheduler::new(2, 2);
+    scheduler.insert_addresses("service.test", vec!["127.0.0.1".parse().unwrap()]);
+    futures_lite::future::block_on(async {
+        address_resolution::check(&scheduler).await;
+        address_resolution::connection(&scheduler, "service.test").await;
+    });
+}

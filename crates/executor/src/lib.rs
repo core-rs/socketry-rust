@@ -7,6 +7,11 @@
 //! Task handles own execution lifetimes; dropping one abandons its task.
 #![doc = include_str!("../readme.md")]
 
+mod address_hints;
+mod address_info;
+mod address_resolve_error;
+mod address_resolve_error_kind;
+mod address_service;
 mod allocation_mode;
 mod blocking;
 mod blocking_error;
@@ -42,6 +47,11 @@ mod task;
 mod tcp_no_delay;
 mod worker;
 
+pub use address_hints::AddressHints;
+pub use address_info::AddressInfo;
+pub use address_resolve_error::AddressResolveError;
+pub use address_resolve_error_kind::AddressResolveErrorKind;
+pub use address_service::AddressService;
 pub use allocation_mode::AllocationMode;
 pub use blocking::Blocking;
 pub use blocking_error::BlockingError;
@@ -58,8 +68,8 @@ pub use io_buf_mut::IoBufMut;
 pub use notify::Notify;
 pub use operation_error::{OperationError, OperationResult};
 pub use scheduler::{
-    BufferResult, Clock, File, FileAllocate, Interest, Scheduler, SchedulerHandle, Signals, Socket,
-    SocketMessages, SocketOptions, SocketRegistration,
+    AddressResolution, BufferResult, Clock, File, FileAllocate, Interest, Scheduler,
+    SchedulerHandle, Signals, Socket, SocketMessages, SocketOptions, SocketRegistration,
 };
 #[cfg(all(unix, feature = "signals"))]
 pub use signal_hook::consts::signal;

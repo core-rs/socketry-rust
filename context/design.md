@@ -89,7 +89,7 @@ Periodic external checks prevent a busy local queue from starving submissions. I
 
 Scheduler and SchedulerHandle implement Spawn. Its associated handle type permits runtime-specific join implementations. Public TaskHandle drop abandons execution; moving the handle transfers its lifetime to the recipient. Awaiting it reports output, cancellation or a panic payload. There is no implicit task hierarchy; group coordination belongs above dispatch.
 
-Native I/O and sleep capabilities now accompany the executor. Regular-file fallbacks use blocking pools; there is no public blocking-task API or local non-Send task executor. Coroutine sources and historical tests are preserved on their branch and are no longer built by this workspace.
+Native I/O and sleep capabilities now accompany the executor. Regular-file fallbacks use blocking pools; the optional `Blocking` capability also supplies general synchronous work. There is no local non-Send task executor. Coroutine sources and historical tests are preserved on their branch and are no longer built by this workspace.
 
 ## Compatibility with Tokio and other runtimes
 
@@ -106,6 +106,10 @@ Entering a Tokio runtime context provides access to its services; entering alone
 The optional `scheduler::tokio` adapter implements Socket, File, Clock and Spawn against an existing runtime. It preserves scheduler task ownership and joins owned task destruction on asynchronous shutdown. The same generic TCP program runs on Socketry and Tokio. The adapter scopes runtime context to individual polls when registering resources; its futures can also be polled by Socketry workers while Tokio drives the underlying services. Socketry contextual lookups still identify Socketry execution; portable code passes handles explicitly.
 
 For existing libraries tied to Tokio, either keep their work on Tokio and bridge owned messages/results, or provide the particular trait adapter they consume. Avoid a broad imitation of Tokio's API.
+
+## Address resolution
+
+`AddressResolution` is independent of `Socket` and returns `Vec<AddressInfo>` using an optional hostname, numeric or named service, typed `AddressHints`, and explicit cancellation. Hints select family, socket type/protocol, passive binding, numeric-only hosts, and configured families during native resolution. Each candidate retains socket creation parameters, including raw or platform-specific values when transports are unspecified. Typed resolver errors retain native codes separately from errno. Native and Tokio schedulers use their own bounded blocking pools, sharing capacity with `spawn_blocking`; the simulator uses exact-name fixtures. System lookups preserve native `getaddrinfo`/`GetAddrInfoW` behavior, including hosts-file policy. Cancellation can prevent queued execution, but started lookups preserve their actual result and retain their host, service, and capacity until completion, even after waiter abandonment. Await them before shutdown for graceful completion. Connection retries, DNS-specific APIs, caching, canonical names, and further resolver flags remain above or outside this initial capability.
 
 ## I/O and io\_uring
 

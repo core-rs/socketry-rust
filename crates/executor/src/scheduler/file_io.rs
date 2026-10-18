@@ -96,6 +96,10 @@ pub(crate) fn truncate(file: &File, length: u64) -> io::Result<()> {
     retry_interrupted(|| file.set_len(length))
 }
 
+pub(crate) fn stat(file: &File) -> io::Result<crate::SystemFileMetadata> {
+    retry_interrupted(|| file.metadata()).map(crate::SystemFileMetadata::from)
+}
+
 pub(crate) fn sync(file: &File, mode: crate::SyncMode) -> io::Result<()> {
     retry_interrupted(|| match mode {
         crate::SyncMode::All => file.sync_all(),

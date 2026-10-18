@@ -626,6 +626,7 @@ fn cancelling_queued_blocking_work_preserves_buffers_cursor_and_prevents_creatio
         let mut open = Box::pin(handle.file_open(&path, FileOptions::CREATE, &cancellation));
         let mut seek = Box::pin(handle.file_seek(&file, SeekFrom::Start(7), &cancellation));
         let mut sync = Box::pin(handle.file_sync(&file, SyncMode::All, &cancellation));
+        let mut stat = Box::pin(handle.file_stat(&file, &cancellation));
         let mut truncate = Box::pin(handle.file_truncate(&file, 13, &cancellation));
         #[cfg(target_os = "linux")]
         let mut allocate =
@@ -635,6 +636,7 @@ fn cancelling_queued_blocking_work_preserves_buffers_cursor_and_prevents_creatio
             assert!(open.as_mut().poll(context).is_pending());
             assert!(seek.as_mut().poll(context).is_pending());
             assert!(sync.as_mut().poll(context).is_pending());
+            assert!(stat.as_mut().poll(context).is_pending());
             assert!(truncate.as_mut().poll(context).is_pending());
             #[cfg(target_os = "linux")]
             assert!(allocate.as_mut().poll(context).is_pending());
@@ -662,6 +664,10 @@ fn cancelling_queued_blocking_work_preserves_buffers_cursor_and_prevents_creatio
                 .unwrap(),
             0
         );
+        assert!(matches!(
+            stat.await,
+            Err(crate::OperationError::Cancelled(_))
+        ));
         assert!(matches!(
             sync.await,
             Err(crate::OperationError::Cancelled(_))

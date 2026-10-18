@@ -86,6 +86,8 @@ Generic code can accept `Socket`, `File`, `Clock`, and `Spawn` capabilities. Soc
 
 `SocketOptions<O>` adds typed, cancellable option get/set. Require `SocketReuseAddress`, `SocketKeepalive`, or `TcpNoDelay` as needed; the option selects its value type and backend capability. The [listener configuration example](crates/executor/examples/socket_options.rs) shows configuration before binding.
 
+`File::file_stat` queries an open descriptor and returns owned, native-backed metadata through portable `FileMetadata` accessors. The result remains usable after close; the operation leaves the cursor unchanged. See the [commented metadata example](crates/executor/examples/file_stat.rs).
+
 The optional `SocketMessages` capability provides `socket_sendmsg`/`socket_recvmsg` with owned scatter/gather buffers, IP addresses, portable flags, and receive truncation metadata. See the [commented UDP message example](crates/executor/examples/socket_messages.rs). Ancillary data remains a separate extension.
 
 

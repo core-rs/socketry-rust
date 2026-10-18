@@ -48,6 +48,9 @@ async fn open_client(
 #[path = "tests/stateful_file.rs"]
 mod stateful_file;
 
+#[path = "tests/file_stat.rs"]
+mod file_stat;
+
 #[path = "tests/file_sync.rs"]
 mod file_sync;
 
@@ -69,6 +72,7 @@ fn stateful_operations_forward_and_preserve_short_transfers() {
     // Exercise forwarding through the wrapper with failure injection disabled.
     block_on(stateful_file::check(&scheduler, Path::new("stateful")));
     block_on(file_sync::check(&scheduler, Path::new("sync")));
+    block_on(file_stat::check(&scheduler, Path::new("stat")));
     block_on(file_truncate::check(&scheduler, Path::new("truncate")));
     block_on(file_close::check(&scheduler, Path::new("close")));
     assert_eq!(scheduler.scheduler.open_files(), 0);
@@ -98,6 +102,7 @@ struct FailingFiles {
 
 impl File for FailingFiles {
     type File = <simulated::Scheduler as File>::File;
+    type Metadata = <simulated::Scheduler as File>::Metadata;
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
         self.scheduler.file_close(file).await
     }
@@ -116,6 +121,13 @@ impl File for FailingFiles {
             .await
     }
 
+    async fn file_stat(
+        &self,
+        file: &Self::File,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Metadata> {
+        self.scheduler.file_stat(file, cancellation).await
+    }
     async fn file_sync(
         &self,
         file: &Self::File,

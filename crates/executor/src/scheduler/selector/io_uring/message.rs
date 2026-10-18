@@ -16,8 +16,8 @@ struct MessageRequest<B: IoBuf> {
     socket: Option<SocketDescriptor>,
     message: Option<Message<B>>,
     operation: MessageOperation,
-    reply: Option<oneshot::Sender<RawBufferResult<Message<B>>>>,
-    cancelling: bool,
+    reply: Cell<Option<oneshot::Sender<RawBufferResult<Message<B>>>>>,
+    cancelling: Cell<bool>,
 }
 
 impl<B: IoBuf> PendingRequest for MessageRequest<B> {
@@ -64,12 +64,12 @@ impl<B: IoBuf> PendingRequest for MessageRequest<B> {
     }
 
     fn cancelling(&self) -> bool {
-        self.cancelling
+        self.cancelling.get()
     }
-    fn set_cancelling(&mut self) {
-        self.cancelling = true;
+    fn set_cancelling(&self) {
+        self.cancelling.set(true);
     }
-    fn take_reply(&mut self) -> Option<Box<dyn Send>> {
+    fn take_reply(&self) -> Option<Box<dyn Send>> {
         self.reply
             .take()
             .map(|reply| Box::new(reply) as Box<dyn Send>)
@@ -112,8 +112,8 @@ impl Selector {
             socket: Some(socket.retain()),
             message: Some(message),
             operation,
-            reply: Some(reply),
-            cancelling: false,
+            reply: Cell::new(Some(reply)),
+            cancelling: Cell::new(false),
         };
         self.submit(Box::new(request), result, cancellation).await
     }
@@ -290,7 +290,7 @@ mod tests {
                         assert_eq!(Arc::strong_count(&socket.inner), 1);
                         let mut operation = Box::pin(run(&selector, &socket, send, &cancellation));
                         assert!(poll_once(&mut operation).await.is_none());
-                        let Command::Submit(mut request) = incoming.try_recv().unwrap() else {
+                        let Command::Submit(request) = incoming.try_recv().unwrap() else {
                             unreachable!(
                                 "the first poll can only submit: this harness has not cancelled or closed the selector"
                             )
@@ -395,7 +395,7 @@ mod tests {
                     &never,
                 ));
                 assert!(poll_once(&mut operation).await.is_none());
-                let Command::Submit(mut request) = incoming.try_recv().unwrap() else {
+                let Command::Submit(request) = incoming.try_recv().unwrap() else {
                     unreachable!(
                         "the first poll can only submit: this harness has not cancelled or closed the selector"
                     )

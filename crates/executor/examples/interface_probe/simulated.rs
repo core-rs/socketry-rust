@@ -269,8 +269,32 @@ impl FileAllocate for Scheduler {
     }
 }
 
+/// This simulator models regular-file bytes, not filesystem timestamps or native identity.
+pub struct FileMetadata {
+    size: u64,
+}
+
+impl socketry_executor::FileMetadata for FileMetadata {
+    fn file_type(&self) -> Option<socketry_executor::FileType> {
+        Some(socketry_executor::FileType::File)
+    }
+    fn size(&self) -> Option<u64> {
+        Some(self.size)
+    }
+    fn accessed(&self) -> Option<std::time::SystemTime> {
+        None
+    }
+    fn modified(&self) -> Option<std::time::SystemTime> {
+        None
+    }
+    fn created(&self) -> Option<std::time::SystemTime> {
+        None
+    }
+}
+
 impl File for Scheduler {
     type File = FileDescriptor;
+    type Metadata = FileMetadata;
 
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
         drop(file);
@@ -300,6 +324,17 @@ impl File for Scheduler {
         }
         file.bytes.lock().unwrap().resize(length as usize, 0);
         Ok(())
+    }
+
+    async fn file_stat(
+        &self,
+        file: &Self::File,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Metadata> {
+        cancellation.check()?;
+        Ok(FileMetadata {
+            size: file.bytes.lock().unwrap().len() as u64,
+        })
     }
 
     async fn file_sync(

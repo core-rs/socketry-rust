@@ -140,8 +140,8 @@ fn queued_request_returns_its_buffer_if_the_selector_exits() {
         buffer: Some(buffer),
         pointer: |buffer| buffer.as_mut_ptr(),
         write: false,
-        reply: Some(reply),
-        cancelling: false,
+        reply: Cell::new(Some(reply)),
+        cancelling: Cell::new(false),
     };
     drop(request);
     let (result, buffer) = result.try_recv().unwrap().unwrap();
@@ -201,8 +201,8 @@ fn request(identifier: u64) -> (Request, oneshot::Receiver<RawBufferResult>) {
             buffer: Some(vec![1]),
             pointer: |buffer| buffer.as_mut_ptr(),
             write: false,
-            reply: Some(reply),
-            cancelling: false,
+            reply: Cell::new(Some(reply)),
+            cancelling: Cell::new(false),
         },
         result,
     )
@@ -259,6 +259,7 @@ fn capability_validation_rejects_each_unsupported_requirement() {
         opcode::RecvMsg::CODE,
         opcode::AsyncCancel::CODE,
         opcode::Fsync::CODE,
+        opcode::Statx::CODE,
     ] {
         assert_eq!(
             validate_operation_support(|operation| operation != missing)
@@ -779,8 +780,8 @@ fn sync_request(identifier: u64) -> (FileRequest, oneshot::Receiver<io::Result<(
             identifier,
             file: Some(Arc::new(tempfile::tempfile().unwrap())),
             operation: FileOperation::Sync(SyncMode::All),
-            reply: Some(reply),
-            cancelling: false,
+            reply: Cell::new(Some(reply)),
+            cancelling: Cell::new(false),
         },
         result,
     )

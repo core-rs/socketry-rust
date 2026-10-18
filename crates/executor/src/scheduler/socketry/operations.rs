@@ -273,6 +273,7 @@ impl FileAllocate for SchedulerHandle {
 
 impl File for SchedulerHandle {
     type File = <DefaultSelector as File>::File;
+    type Metadata = <DefaultSelector as File>::Metadata;
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
         check_open(
             self.shared
@@ -302,6 +303,13 @@ impl File for SchedulerHandle {
             .await
     }
 
+    async fn file_stat(
+        &self,
+        file: &Self::File,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Metadata> {
+        self.selector()?.file_stat(file, cancellation).await
+    }
     async fn file_sync(
         &self,
         file: &Self::File,
@@ -560,6 +568,7 @@ impl FileAllocate for Scheduler {
 
 impl File for Scheduler {
     type File = <SchedulerHandle as File>::File;
+    type Metadata = <SchedulerHandle as File>::Metadata;
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
         self.handle.file_close(file).await
     }
@@ -577,6 +586,13 @@ impl File for Scheduler {
         self.handle.file_truncate(file, length, cancellation).await
     }
 
+    async fn file_stat(
+        &self,
+        file: &Self::File,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Metadata> {
+        self.handle.file_stat(file, cancellation).await
+    }
     async fn file_sync(
         &self,
         file: &Self::File,

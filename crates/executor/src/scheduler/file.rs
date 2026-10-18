@@ -1,16 +1,20 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use crate::{BufferResult, Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SyncMode};
+use crate::{
+    BufferResult, Cancellation, FileMetadata, FileOptions, IoBuf, IoBufMut, OperationResult,
+    SyncMode,
+};
 use std::{future::Future, io::SeekFrom, path::Path};
 
-/// Regular-file creation, synchronization, shared-cursor operations, and explicit-offset operations through the chosen scheduler. The backend retains resources used by accepted operations even when the waiting future is destroyed.
+/// Regular-file creation, metadata, synchronization, shared-cursor operations, and explicit-offset operations through the chosen scheduler. The backend retains resources used by accepted operations even when the waiting future is destroyed.
 ///
 /// `file_read` and `file_write` use and advance the resource's shared cursor by the transferred byte count. Await operations sequentially when ordering matters: concurrent operations have no portable ordering or non-overlap guarantee. Dropping a submitted future does not roll back transferred bytes or cursor changes.
 ///
 /// Explicit offsets must fit in `i64`. On Unix, positioned operations leave the shared cursor unchanged; the current Windows fallback uses `std`'s `seek_read`/`seek_write` and changes it. Cancellation before execution prevents I/O. Once a blocking call starts, completion can win cancellation; buffers are returned only after access ends.
 pub trait File: Send + Sync {
     type File: Send + Sync;
+    type Metadata: FileMetadata;
 
     fn file_open(
         &self,
@@ -34,6 +38,15 @@ pub trait File: Send + Sync {
         &self,
         file: Self::File,
     ) -> impl Future<Output = std::io::Result<()>> + Send;
+
+    /// Query the already-open resource and return owned metadata without moving its cursor. The result is an observation, not an atomic snapshot: await preceding modifications when ordering matters. Path lookup and symlink-following policy belong to resource creation, not this operation.
+    ///
+    /// The future is lazy. Cancellation before dispatch prevents submission; blocking workers check again before execution. Started blocking calls preserve their actual result. Ring cancellation is best effort and waits for original completion. The backend retains the file until access ends, even if the waiting future is dropped.
+    fn file_stat(
+        &self,
+        file: &Self::File,
+        cancellation: &Cancellation,
+    ) -> impl Future<Output = OperationResult<Self::Metadata>> + Send;
 
     /// Set the logical file length, discarding bytes when shrinking and filling an extension with zeros. The file must be open for writing. Lengths must fit in `i64`; filesystem limits and other OS errors are reported. The shared cursor is unchanged, even when it ends up past EOF.
     ///

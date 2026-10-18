@@ -320,6 +320,7 @@ impl FileAllocate for Selector {
 
 impl File for Selector {
     type File = FileDescriptor;
+    type Metadata = crate::SystemFileMetadata;
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
         crate::scheduler::file_close::close(crate::scheduler::cleanup::standalone_pool(), file)
             .await
@@ -350,6 +351,21 @@ impl File for Selector {
         .await
     }
 
+    async fn file_stat(
+        &self,
+        file: &Self::File,
+        cancellation: &Cancellation,
+    ) -> OperationResult<Self::Metadata> {
+        cancellation.check()?;
+        let file = file.retain();
+        let cancellation = cancellation.clone();
+        blocking::unblock(move || {
+            crate::scheduler::blocking::run(&cancellation, || {
+                crate::scheduler::file_io::stat(&file)
+            })
+        })
+        .await
+    }
     async fn file_sync(
         &self,
         file: &Self::File,

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add required `File::file_stat` and associated `File::Metadata: FileMetadata`, returning owned status with portable optional accessors. Readiness/Tokio retain standard metadata; io_uring requires `Statx` support and retains native output inside its request allocation. Add shared contracts, completion-lifetime tests, and a commented example. External `File` implementations must add the associated type and operation.
+
 - Add optional `AddressResolution` with hostname/service inputs, native resolver hints, typed resolver errors, and owned address/type/protocol candidates. Support unspecified transports, raw sockets, and platform-specific socket values. Native and Tokio share their bounded blocking pools; started lookups preserve their actual result after cancellation. Add simulated fixtures, shared conformance/lifetime tests, and hostname resolution in the echo client.
 
 - Add optional `SocketMessages` with owned scatter/gather send/receive, IP addresses, peeking, routing flags, and truncation metadata. Native readiness, Tokio, and io_uring share the buffer/cancellation contract; include conformance tests and a commented UDP example.

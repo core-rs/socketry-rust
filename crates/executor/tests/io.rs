@@ -619,6 +619,11 @@ mod native {
                 io::ErrorKind::BrokenPipe
             );
 
+            assert_eq!(
+                handle.file_stat(&file, &NEVER).await.unwrap_err().kind(),
+                io::ErrorKind::BrokenPipe
+            );
+
             let resize_file =
                 socketry_executor::FileDescriptor::from(tempfile::tempfile().unwrap());
             assert_eq!(
@@ -1032,6 +1037,11 @@ mod tokio_adapter {
                     .await
                     .unwrap_err()
                     .kind(),
+                io::ErrorKind::BrokenPipe
+            );
+
+            assert_eq!(
+                handle.file_stat(&file, &NEVER).await.unwrap_err().kind(),
                 io::ErrorKind::BrokenPipe
             );
 

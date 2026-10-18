@@ -32,7 +32,7 @@ Initial affinity support could retain the existing `Send + 'static` bounds: `Sen
 
 A blocking accept loop belongs on an explicitly dedicated blocking thread, outside the workers that poll futures. Assigning a future to a worker must not silently make `socket_accept` block inside `poll`, since that also prevents sibling futures composed within the same task from progressing. A cancellation token alone cannot interrupt a thread blocked in `accept`; prompt cooperative shutdown requires an explicit interruption mechanism. See the [Future polling contract](https://doc.rust-lang.org/std/future/trait.Future.html) and [accept semantics](https://man7.org/linux/man-pages/man2/accept.2.html).
 
-Multishot accept could use an optional owned subscription with an asynchronous next-result operation. One submission produces successive accepted connections; the backend checks `IORING_CQE_F_MORE` to detect termination and handles rearming according to the subscription contract. Before implementation, define bounded delivery/backpressure, cancellation and retirement, and ownership of accepted sockets whose results are never consumed. This capability remains separate from ordinary single-result `socket_accept`. See [liburing multishot accept](https://man7.org/linux/man-pages/man3/io_uring_prep_multishot_accept.3.html).
+Multishot accept is a proposed optional capability, independent of worker placement. `SocketAcceptMulti::socket_accept_multi` would return an owned subscription yielding accepted sockets, with peer-address lookup explicit. The [multishot operations proposal](#multishot-operations) records the interface sketch, shared-address-buffer issue, and lifecycle questions that must be settled before implementation.
 
 Task placement and resource placement must agree. Ordinary accepted OS descriptors can cross threads, but io_uring direct descriptors belong to a ring's registered file table; moving a task does not make its direct descriptors usable on another worker's ring. Per-worker rings and buffer pools therefore need explicit resource ownership and transfer rules.
 
@@ -981,6 +981,71 @@ For io\_uring, send the chain to the selector as one command, reserve sufficient
 
 The portable `Linked` capability guarantees dependency behaviour. If a caller specifically requires kernel-linked submission, a separate native extension can express that requirement at compile time. SQE LINK is an implementation strategy for portable linking, rather than a restriction of linking to Linux.
 
+## Multishot operations
+
+Multishot operations produce successive results from one active request. They need an owned subscription with an asynchronous next-result operation, rather than a future whose completion yields only one result. This is a proposed interface direction; no multishot capability or subscription is implemented yet.
+
+### Multishot accept
+
+Propose an optional `SocketAcceptMulti` capability extending only `SocketOperation`, with a `socket_accept_multi` operation separate from ordinary `SocketAccept::socket_accept`. The subscription yields independently owned sockets of the scheduler's associated `Socket` type. Prefer yielding just the socket and leaving peer-address inspection to callers that need it. The existing single-result accept's socket-and-address result remains unchanged.
+
+Illustrative syntax is:
+
+```rust
+let mut accepts = scheduler
+    .socket_accept_multi(&listener, &shutdown)
+    .await?;
+
+while let Some(socket) = accepts.next().await? {
+    // Dispatch the owned socket to a connection handler.
+    // Obtain an address only when needed:
+    let peer = scheduler.socket_peer_address(&socket)?;
+}
+```
+
+The subscription type, lifetimes, exact signatures, error/end-of-stream representation, and dispatch policy remain to be specified. `next` is illustrative asynchronous subscription syntax; it does not select a particular stream trait or dependency. Peer inspection requires the separate `SocketPeerAddress` capability.
+
+io_uring's multishot accept has a native implementation target: one submitted accept request produces successive CQEs carrying accepted descriptors. Readiness and Tokio implementations could provide equivalent repeated acceptance through ordinary nonblocking accepts. A portable capability would describe repeated acceptance and its ownership contract; requiring native kernel multishot would be a separate extension requirement. See [liburing accept](https://github.com/axboe/liburing/blob/master/man/io_uring_prep_accept.3).
+
+### Peer-address output is shared, not per completion
+
+An accept request can supply a `sockaddr` output buffer and its length. For io_uring multishot accept, every accepted connection uses those same output locations. A CQE carries the accepted descriptor; it does not capture a copy of the peer address. If two connections complete before the application processes their CQEs, the first connection's address may already have been overwritten:
+
+```text
+accept A: address buffer = peer A; CQE A contains socket A
+accept B: address buffer = peer B; CQE B contains socket B
+process CQE A: the shared address buffer now contains peer B
+```
+
+The kernel may accept C and overwrite the buffer again while the application processes A and B. Processing CQEs individually, or draining several in one poll, cannot recover the overwritten addresses or make the shared output stable. Concurrently reading that buffer while the kernel may write it also needs synchronization; it cannot serve as an independently owned address for each result. liburing explicitly documents the overwrite problem in its [multishot accept description](https://github.com/axboe/liburing/blob/master/man/io_uring_prep_accept.3).
+
+For the proposed socket-only interface, submit native multishot accept with null address and address-length pointers. A caller can subsequently use `socket_peer_address(&socket)` to query the particular accepted socket. For ordinary OS descriptors, this is a separate `getpeername` syscall whose result is independent of subsequent accepts. Returning `(socket, address)` for every result would require the backend to obtain a separate reliable address for each socket, adding that work even for consumers that do not need it.
+
+### Subscription lifecycle and bounded delivery
+
+Before implementation, settle these contracts:
+
+- **Bounded delivery:** bound queued accepted sockets and define how acceptance pauses or is cancelled and rearmed when capacity is exhausted. A bounded userspace queue alone does not stop an active kernel request from producing more completions; account for accepts racing backpressure.
+- **Cancellation and retirement:** distinguish requesting cancellation from confirming that the original multishot request has terminated. Keep the listener and request state alive until the original terminal completion; the cancellation request's own CQE is insufficient. Dropping the subscription should request cancellation and leave backend retirement and cleanup safe without blocking its destructor.
+- **Socket ownership:** sockets already delivered belong to their consumers and are unaffected by dropping the accept subscription. Every accepted-but-undelivered socket must also have an owner; abandoning the subscription must arrange their cleanup. Whether cooperative shutdown drains queued sockets or closes them remains to be specified.
+- **Termination and rearming:** inspect `IORING_CQE_F_MORE` on every completion, including successful ones. A final success can still yield an accepted socket; process that result before handling termination. Define which terminal conditions end the subscription or permit transparent rearming, and how terminal errors reach the consumer.
+
+These are lifecycle decisions for repeated I/O, independent of worker affinity and connection-handler scheduling. The io_uring implementation must retain all state until kernel access ends, just as with single-result operations. See [liburing multishot lifetime and cancellation](https://github.com/axboe/liburing/blob/master/man/io_uring_multishot.7).
+
+### Relationship to chaining and buffer pools
+
+Keep the proposed forms distinct:
+
+| Form | Example | Status |
+| --- | --- | --- |
+| Known-input chain | Write followed by synchronization | Prepared `Linked` proposal. |
+| Resource dependency | Accept followed by receive on the produced socket | Prepared output-reference proposal with a direct-descriptor io_uring target. |
+| Pool-backed receive | Receive using a buffer selected when data arrives | Optional pool/lease proposal; preparation and linking variants remain open. |
+| Repeated results | `socket_accept_multi` | Optional owned subscription proposal. |
+| Buffer dependency | `with_previous_buffer` | Hypothetical; no selected implementation target. |
+
+An accept-to-receive chain describes one connection. A multishot accept produces many independently owned connections. Do not imply that attaching an ordinary linked successor runs that successor for every accepted socket; a per-result continuation would need a separate explicit contract and implementation target. Pool selection, repeated results, and preparation are separate dimensions, and their combinations should be exposed only where the backend can preserve the agreed semantics.
+
 ## Candidate I/O hooks
 
 Use the [liburing preparation helpers](https://github.com/axboe/liburing/blob/master/src/include/liburing.h) as an inventory of operations to consider. This is a candidate surface, not a requirement that every opcode become part of every scheduler's core traits.
@@ -1166,13 +1231,14 @@ The simulator has bounded in-memory file sizes and unbounded byte queues. It doe
 | Area | Current status |
 | --- | --- |
 | Executor | Future workers, work stealing, primitive `Spawn`, and owning handles implemented. Await joins; move transfers ownership; drop abandons unfinished work. Task groups remain above the primitives. |
-| Worker placement | Affinity, isolated workers, and dedicated acceptors remain design notes. Optional worker handles and multishot accept subscriptions have no settled API or implementation. |
+| Worker placement | Affinity, isolated workers, and dedicated acceptors remain design notes. Optional worker handles have no settled API or implementation. |
 | Cancellation | `Cancellation`, `Cancelled`, `defer_cancel`, and cancellation-aware file/socket operations implemented. Application shutdown is cooperative. |
 | Signal notifications | `Notify<Value>`, `Signals`, and optional Unix registration guards implemented for native and Tokio; each guard owns its dispatch task. |
 | Runtime lifetime | Application waits are explicit. Runtime shutdown abandons futures; backend retention protects submitted I/O. Accepted file-close and socket-close/shutdown submissions survive abandonment and are drained by graceful shutdown. |
 | Capabilities | Public `FileScheduler`, `SocketScheduler`, `SocketOptions<O>`, `SocketMessages`, `SocketRegistration`, `AddressResolution`, `Clock`, `Spawn`, and `Blocking`; associated resources and initial file/socket creation implemented. File operation traits share `FileOperation`; `FileScheduler` is a convenience aggregate. Socket operation traits share `SocketOperation`; `SocketScheduler`, `SocketMessages`, and `SocketOptions<O>` are convenience aggregates. |
 | Blocking execution | Dedicated native/Tokio pools, configurable worker and admission limits, queued cancellation, and owning completion handles implemented. Started closures finish independently; graceful completion requires awaiting them. |
 | Linked operations | Prepared chains and `Linked` remain proposed; native linking, whole-chain blocking jobs, and readiness sequencing are not implemented. |
+| Multishot operations | `SocketAcceptMulti::socket_accept_multi` is proposed as an owned subscription yielding sockets with optional explicit peer-address lookup. Bounded delivery, cancellation/draining, retirement, and rearming contracts remain unsettled; no implementation exists. |
 | File operations | `file_open`, `file_seek`, `file_sync`, `file_truncate`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at` implemented with owned buffers. Optional `FileAllocate` implemented on Linux with `Extend` and `KeepSize`; optional `FileAdvice` supplies six hints with completion/submission forms. `file_close`/`file_close_submit` implemented with exclusive ownership and bounded cleanup. `file_stat` returns associated native-backed metadata; path-based metadata remains separate. |
 | Submission and completion | File close, socket close/shutdown, and Linux file advice pairs share bounded admission and persistent cleanup jobs. Native cleanup/advice SQEs and safe CQE suppression remain proposed. The public blocking pool has its own bounded admission. |
 | Socket operations | `socket_open`, `socket_bind`, syscall-like `socket_listen`, `socket_connect`, `socket_accept`, address inspection, read/write, and readiness implemented for IPv4/IPv6 stream and datagram sockets. Directional shutdown and explicit close, with completion and admission-only forms, are implemented. Typed `SocketOptions<O>` adds get/set for address reuse, keepalive, and TCP no-delay. `SocketMessages` implements owned scatter/gather payload/address I/O; ancillary data remains pending. |

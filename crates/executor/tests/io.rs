@@ -194,34 +194,40 @@ async fn concurrent_reads<SchedulerType>(scheduler: SchedulerType)
 where
     SchedulerType: Socket + SocketRegistration + Spawn + Clone + 'static,
 {
-    let (client, mut server) = socket_pair();
-    let socket = Arc::new(scheduler.register_socket(client).unwrap());
-    let mut handles = Vec::new();
-    for _ in 0..16 {
-        let scheduler = scheduler.clone();
-        let socket = Arc::clone(&socket);
-        let handle = scheduler
-            .clone()
-            .spawn(async move {
-                let (result, buffer) = scheduler.socket_read(&socket, vec![0; 1], &NEVER).await;
-                assert_eq!(result.unwrap(), 1);
-                buffer[0]
-            })
-            .unwrap();
-        handles.push(handle);
+    for iteration in 0..1_000 {
+        let (client, mut server) = socket_pair();
+        let socket = Arc::new(scheduler.register_socket(client).unwrap());
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let scheduler = scheduler.clone();
+            let socket = Arc::clone(&socket);
+            let handle = scheduler
+                .clone()
+                .spawn(async move {
+                    let (result, buffer) = scheduler.socket_read(&socket, vec![0; 1], &NEVER).await;
+                    assert_eq!(result.unwrap(), 1);
+                    buffer[0]
+                })
+                .unwrap();
+            handles.push(handle);
+        }
+        // A dedicated writer supplies all bytes while readers race for readiness.
+        let writer = std::thread::spawn(move || {
+            use std::io::Write;
+            server.write_all(&(0..16u8).collect::<Vec<_>>()).unwrap();
+        });
+        let mut values = Vec::new();
+        for handle in handles {
+            values.push(handle.await.unwrap());
+        }
+        values.sort_unstable();
+        assert_eq!(
+            values,
+            (0..16u8).collect::<Vec<_>>(),
+            "iteration {iteration}"
+        );
+        writer.join().unwrap();
     }
-    // A dedicated writer supplies all bytes while readers race for readiness.
-    let writer = std::thread::spawn(move || {
-        use std::io::Write;
-        server.write_all(&(0..16u8).collect::<Vec<_>>()).unwrap();
-    });
-    let mut values = Vec::new();
-    for handle in handles {
-        values.push(handle.await.unwrap());
-    }
-    values.sort_unstable();
-    assert_eq!(values, (0..16u8).collect::<Vec<_>>());
-    writer.join().unwrap();
 }
 
 struct TemporaryFile(std::path::PathBuf);

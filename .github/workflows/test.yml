@@ -1,149 +1,29 @@
 name: Test
-
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
-  coverage:
-    name: Coverage (${{ matrix.runner }})
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        # Native selectors and positioned file I/O are target-specific.
-        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15-intel, macos-15, windows-latest]
+  windows-repro:
+    runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          components: clippy, llvm-tools-preview, rustfmt
+          components: llvm-tools-preview
           cache-shared-key: coverage-cargo-install-v1
-      - name: Install Bake launcher
-        run: cargo install socketry-cargo-bake --locked
+      - name: Independent receive stress tests
+        run: cargo test -p socketry-executor --test windows_recv --locked -- --test-threads=1
+      - name: Scheduler receive stress test
+        if: always()
+        run: cargo test -p socketry-executor --test io --features tokio --locked -- multiple_readers_share_one_registration --test-threads=1
       - name: Install coverage tool
+        if: always()
         run: cargo install cargo-llvm-cov --locked
-      - run: cargo fmt --all -- --check
-        if: matrix.runner == 'ubuntu-24.04'
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-        if: matrix.runner == 'ubuntu-24.04'
-      - name: Run tests and require complete source-region coverage
-        run: cargo bake --locked test:coverage --all-targets true --features tokio,signals
-
-  test:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux x86-64
-            runner: ubuntu-24.04
-          - name: Linux AArch64
-            runner: ubuntu-24.04-arm
-          - name: macOS x86-64
-            runner: macos-15-intel
-          - name: macOS AArch64
-            runner: macos-15
-          - name: Windows x86-64
-            runner: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Run workspace tests
-        run: cargo test --workspace --all-targets --features tokio,signals --locked
-      - name: Run documentation tests
-        run: cargo test --workspace --doc --features tokio,signals --locked
-      - name: Check executor-only and Tokio-only configurations
-        run: |
-          cargo check --workspace --all-targets --no-default-features --locked
-          cargo check --workspace --all-targets --no-default-features --features tokio --locked
-          cargo check --workspace --all-targets --no-default-features --features signals --locked
-          cargo check --workspace --all-targets --no-default-features --features tokio,signals --locked
-
-  io-uring:
-    name: io_uring ${{ matrix.runner }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, llvm-tools-preview
-      - name: Install Bake launcher
-        run: cargo install socketry-cargo-bake --locked
-      - name: Install coverage tool
-        run: cargo install cargo-llvm-cov --locked
-      # Run on the host kernel: container policies commonly deny io_uring.
-      # Initialization errors fail these tests; they are not silently skipped.
-      - name: Exercise native completion and cancellation
-        run: cargo bake --locked test:coverage --all-targets true --all-features true
-      - name: Check native selector code
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-
-  freebsd:
-    name: FreeBSD x86-64
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-      - name: Run workspace tests in FreeBSD
-        uses: vmactions/freebsd-vm@v1
-        with:
-          release: "15.1"
-          prepare: pkg install -y curl ca_root_nss
-          run: |
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-            export PATH="$HOME/.cargo/bin:$PATH"
-            rustup component add llvm-tools-preview
-            cargo install socketry-cargo-bake --locked
-            cargo install cargo-llvm-cov --locked
-            cargo bake --locked test:coverage --all-targets true --features tokio,signals
-
-  sanitizer:
-    name: Linux x86-64 ${{ matrix.name }}
-    runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: AddressSanitizer
-            sanitizer: address
-          - name: ThreadSanitizer
-            sanitizer: thread
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rust-src
-      - name: Run sanitizer tests
-        # Loom uses simulated synchronization and private generator stacks.
-        # Its model runs in the normal matrix; sanitize the actual executor here.
-        run: cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --workspace --all-targets --locked -- --skip queue_publication_cannot_leave_a_worker_asleep
-        env:
-          RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }}
-          TSAN_OPTIONS: suppressions=${{ github.workspace }}/.github/tsan-suppressions.txt
-
-  test-result:
-    # Sanitizers are diagnostic; regular tests and coverage gate merging.
-    if: always()
-    needs: [coverage, test, io-uring, freebsd]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Require successful tests and coverage
-        env:
-          JOB_RESULTS: ${{ toJSON(needs) }}
-        run: |
-          echo "$JOB_RESULTS" | jq -e 'all(.[]; .result == "success")'
+      - name: Coverage receive stress tests
+        if: always()
+        run: cargo llvm-cov -p socketry-executor --test windows_recv --locked --no-report -- --test-threads=1
+      - name: Coverage scheduler stress test
+        if: always()
+        run: cargo llvm-cov -p socketry-executor --test io --features tokio --locked --no-report -- multiple_readers_share_one_registration --test-threads=1

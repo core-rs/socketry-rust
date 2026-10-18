@@ -159,7 +159,7 @@ where
         .socket_bind(&reserved, address, &never)
         .await
         .unwrap();
-    let reserved_address = scheduler.socket_local_addr(&reserved).unwrap();
+    let reserved_address = scheduler.socket_local_address(&reserved).unwrap();
     let another_reserved = scheduler
         .socket_open(SocketDomain::Ipv4, SocketType::Stream, None, &never)
         .await
@@ -169,7 +169,7 @@ where
         .await
         .unwrap();
     assert_ne!(
-        scheduler.socket_local_addr(&another_reserved).unwrap(),
+        scheduler.socket_local_address(&another_reserved).unwrap(),
         reserved_address
     );
     let duplicate = scheduler
@@ -202,7 +202,7 @@ where
         .socket_bind(&ipv6, "[::1]:0".parse().unwrap(), &never)
         .await
         .unwrap();
-    assert!(scheduler.socket_local_addr(&ipv6).unwrap().is_ipv6());
+    assert!(scheduler.socket_local_address(&ipv6).unwrap().is_ipv6());
     scheduler
         .socket_bind(&listener, address, &never)
         .await
@@ -211,7 +211,7 @@ where
         .socket_listen(&listener, 128, &never)
         .await
         .unwrap();
-    let address = scheduler.socket_local_addr(&listener).unwrap();
+    let address = scheduler.socket_local_address(&listener).unwrap();
     assert_ne!(address.port(), 0);
     let duplicate = scheduler
         .socket_open(
@@ -269,10 +269,10 @@ where
         .await
         .unwrap();
     let (server, peer) = scheduler.socket_accept(&listener, &never).await.unwrap();
-    assert_eq!(scheduler.socket_local_addr(&server).unwrap(), address);
-    assert_eq!(scheduler.socket_peer_addr(&client).unwrap(), address);
-    assert_eq!(scheduler.socket_local_addr(&client).unwrap(), peer);
-    assert_eq!(scheduler.socket_peer_addr(&server).unwrap(), peer);
+    assert_eq!(scheduler.socket_local_address(&server).unwrap(), address);
+    assert_eq!(scheduler.socket_peer_address(&client).unwrap(), address);
+    assert_eq!(scheduler.socket_local_address(&client).unwrap(), peer);
+    assert_eq!(scheduler.socket_peer_address(&server).unwrap(), peer);
     scheduler
         .socket_wait(&client, Interest::Writable, &never)
         .await
@@ -336,7 +336,7 @@ where
                 .socket_bind(&receiver, "127.0.0.1:0".parse().unwrap(), &never)
                 .await
                 .unwrap();
-            let address = scheduler.socket_local_addr(&receiver).unwrap();
+            let address = scheduler.socket_local_address(&receiver).unwrap();
             scheduler
                 .socket_connect(&datagram, address, &never)
                 .await
@@ -382,7 +382,7 @@ where
             scheduler
                 .socket_connect(
                     &zero_sender,
-                    scheduler.socket_local_addr(&zero_receiver).unwrap(),
+                    scheduler.socket_local_address(&zero_receiver).unwrap(),
                     &never,
                 )
                 .await

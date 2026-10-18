@@ -58,11 +58,11 @@ pub use socket_bind::SocketBind;
 mod socket_listen;
 pub use socket_listen::SocketListen;
 
-mod socket_local_addr;
-pub use socket_local_addr::SocketLocalAddr;
+mod socket_local_address;
+pub use socket_local_address::SocketLocalAddress;
 
-mod socket_peer_addr;
-pub use socket_peer_addr::SocketPeerAddr;
+mod socket_peer_address;
+pub use socket_peer_address::SocketPeerAddress;
 
 mod socket_connect;
 pub use socket_connect::SocketConnect;

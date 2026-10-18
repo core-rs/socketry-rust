@@ -19,8 +19,8 @@ use crate::{
 };
 use crate::{FileDescriptor, SyncMode};
 use crate::{
-    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddr,
-    SocketOpen, SocketOperation, SocketPeerAddr, SocketRead, SocketRecvMsg, SocketSendMsg,
+    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddress,
+    SocketOpen, SocketOperation, SocketPeerAddress, SocketRead, SocketRecvMsg, SocketSendMsg,
     SocketShutdown, SocketWait, SocketWrite,
 };
 use crate::{SocketMessage, SocketRecvFlags, SocketRecvResult, SocketSendFlags};
@@ -196,14 +196,14 @@ impl SocketListen for Selector {
     }
 }
 
-impl SocketLocalAddr for Selector {
-    fn socket_local_addr(&self, socket: &SocketDescriptor) -> io::Result<SocketAddr> {
+impl SocketLocalAddress for Selector {
+    fn socket_local_address(&self, socket: &SocketDescriptor) -> io::Result<SocketAddr> {
         socket.local_addr()
     }
 }
 
-impl SocketPeerAddr for Selector {
-    fn socket_peer_addr(&self, socket: &SocketDescriptor) -> io::Result<SocketAddr> {
+impl SocketPeerAddress for Selector {
+    fn socket_peer_address(&self, socket: &SocketDescriptor) -> io::Result<SocketAddr> {
         socket.peer_addr()
     }
 }

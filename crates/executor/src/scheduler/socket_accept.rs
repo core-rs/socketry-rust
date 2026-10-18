@@ -2,8 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::SocketOperation;
-use crate::{Cancellation, OperationResult};
-use std::{future::Future, net::SocketAddr};
+use crate::{Cancellation, OperationResult, SocketAddress};
+use std::future::Future;
 
 /// Accept one connection from a listening socket.
 pub trait SocketAccept: SocketOperation {
@@ -12,5 +12,5 @@ pub trait SocketAccept: SocketOperation {
         &self,
         socket: &Self::Socket,
         cancellation: &Cancellation,
-    ) -> impl Future<Output = OperationResult<(Self::Socket, SocketAddr)>> + Send;
+    ) -> impl Future<Output = OperationResult<(Self::Socket, SocketAddress)>> + Send;
 }

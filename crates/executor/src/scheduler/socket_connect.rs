@@ -2,8 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::SocketOperation;
-use crate::{Cancellation, OperationResult};
-use std::{future::Future, net::SocketAddr};
+use crate::{Cancellation, OperationResult, SocketAddress};
+use std::future::Future;
 
 /// Connect an existing socket to a peer IP address.
 pub trait SocketConnect: SocketOperation {
@@ -11,7 +11,7 @@ pub trait SocketConnect: SocketOperation {
     fn socket_connect(
         &self,
         socket: &Self::Socket,
-        address: SocketAddr,
+        address: SocketAddress,
         cancellation: &Cancellation,
     ) -> impl Future<Output = OperationResult<()>> + Send;
 }

@@ -13,8 +13,8 @@ use socketry_executor::{
     SocketScheduler, SocketType,
 };
 use socketry_executor::{
-    SocketAccept, SocketBind, SocketConnect, SocketListen, SocketLocalAddr, SocketOpen, SocketRead,
-    SocketWrite,
+    SocketAccept, SocketBind, SocketConnect, SocketListen, SocketLocalAddress, SocketOpen,
+    SocketRead, SocketWrite,
 };
 use std::{io, path::Path};
 static NEVER: Cancellation = Cancellation::never();
@@ -113,7 +113,7 @@ async fn exchange<
     S: SocketOpen
         + SocketBind
         + SocketListen
-        + SocketLocalAddr
+        + SocketLocalAddress
         + SocketConnect
         + SocketAccept
         + SocketRead
@@ -133,7 +133,7 @@ async fn exchange<
         .await?;
     scheduler.socket_bind(&listener, address, &NEVER).await?;
     scheduler.socket_listen(&listener, 128, &NEVER).await?;
-    let address = scheduler.socket_local_addr(&listener)?;
+    let address = scheduler.socket_local_address(&listener)?;
     let client = async {
         // The same hostname resolves through the system backend or the simulator's explicit table. Connection policy remains application code.
         let addresses = scheduler

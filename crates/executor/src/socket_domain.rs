@@ -1,6 +1,8 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+use crate::SocketAddress;
+
 /// The address family of an IP socket.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SocketDomain {
@@ -10,11 +12,11 @@ pub enum SocketDomain {
     Ipv6,
 }
 
-impl From<std::net::SocketAddr> for SocketDomain {
-    fn from(address: std::net::SocketAddr) -> Self {
+impl From<SocketAddress> for SocketDomain {
+    fn from(address: SocketAddress) -> Self {
         match address {
-            std::net::SocketAddr::V4(_) => Self::Ipv4,
-            std::net::SocketAddr::V6(_) => Self::Ipv6,
+            SocketAddress::V4(_) => Self::Ipv4,
+            SocketAddress::V6(_) => Self::Ipv6,
         }
     }
 }

@@ -25,7 +25,7 @@ fn readiness_operations_remain_available_with_other_backends_selected() {
             .socket_listen(&listener, 128, &NEVER)
             .await
             .unwrap();
-        let address = selector.socket_local_addr(&listener).unwrap();
+        let address = selector.socket_local_address(&listener).unwrap();
         let duplicate = selector
             .socket_open(
                 crate::SocketDomain::Ipv4,
@@ -57,8 +57,11 @@ fn readiness_operations_remain_available_with_other_backends_selected() {
             .await
             .unwrap();
         let (peer, peer_address) = selector.socket_accept(&listener, &NEVER).await.unwrap();
-        assert_eq!(selector.socket_local_addr(&socket).unwrap(), peer_address);
-        assert_eq!(selector.socket_peer_addr(&socket).unwrap(), address);
+        assert_eq!(
+            selector.socket_local_address(&socket).unwrap(),
+            peer_address
+        );
+        assert_eq!(selector.socket_peer_address(&socket).unwrap(), address);
         let mut written = 0;
         while written < 5 {
             let (result, buffer) = selector

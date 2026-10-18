@@ -445,9 +445,9 @@ fn closed_selector_rejects_its_direct_network_operations() {
                 .await
                 .is_err()
         );
-        assert!(selector.socket_local_addr(&listener).is_err());
-        assert!(selector.socket_local_addr(&socket).is_err());
-        assert!(selector.socket_peer_addr(&socket).is_err());
+        assert!(selector.socket_local_address(&listener).is_err());
+        assert!(selector.socket_local_address(&socket).is_err());
+        assert!(selector.socket_peer_address(&socket).is_err());
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("closed");
         assert!(

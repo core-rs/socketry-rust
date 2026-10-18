@@ -73,7 +73,7 @@ async fn exchange<S: SocketScheduler>(scheduler: &S) -> io::Result<()> {
     scheduler
         .socket_connect(
             &client,
-            scheduler.socket_local_addr(&listener)?,
+            scheduler.socket_local_address(&listener)?,
             &cancellation,
         )
         .await?;

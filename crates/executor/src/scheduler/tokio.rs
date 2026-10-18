@@ -25,8 +25,8 @@ use crate::{
 };
 use crate::{FileDescriptor, SyncMode};
 use crate::{
-    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddr,
-    SocketOpen, SocketOperation, SocketPeerAddr, SocketRead, SocketRecvMsg, SocketSendMsg,
+    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddress,
+    SocketOpen, SocketOperation, SocketPeerAddress, SocketRead, SocketRecvMsg, SocketSendMsg,
     SocketShutdown, SocketWait, SocketWrite,
 };
 use crate::{SocketMessage, SocketRecvFlags, SocketRecvResult, SocketSendFlags};
@@ -667,15 +667,15 @@ impl SocketListen for SchedulerHandle {
     }
 }
 
-impl SocketLocalAddr for SchedulerHandle {
-    fn socket_local_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+impl SocketLocalAddress for SchedulerHandle {
+    fn socket_local_address(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
         self.check_runtime(socket.runtime())?;
         socket.local_addr()
     }
 }
 
-impl SocketPeerAddr for SchedulerHandle {
-    fn socket_peer_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+impl SocketPeerAddress for SchedulerHandle {
+    fn socket_peer_address(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
         self.check_runtime(socket.runtime())?;
         socket.peer_addr()
     }
@@ -1287,15 +1287,15 @@ impl SocketListen for Scheduler {
     }
 }
 
-impl SocketLocalAddr for Scheduler {
-    fn socket_local_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
-        self.handle.socket_local_addr(socket)
+impl SocketLocalAddress for Scheduler {
+    fn socket_local_address(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+        self.handle.socket_local_address(socket)
     }
 }
 
-impl SocketPeerAddr for Scheduler {
-    fn socket_peer_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
-        self.handle.socket_peer_addr(socket)
+impl SocketPeerAddress for Scheduler {
+    fn socket_peer_address(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+        self.handle.socket_peer_address(socket)
     }
 }
 

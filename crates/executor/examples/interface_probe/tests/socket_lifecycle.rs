@@ -3,7 +3,7 @@
 
 use socketry_executor::{Cancellation, OperationError, SocketDomain, SocketType};
 use socketry_executor::{
-    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddr,
+    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddress,
     SocketOpen, SocketRead, SocketShutdown, SocketWrite,
 };
 use std::net::Shutdown;
@@ -26,7 +26,7 @@ async fn pair<
         + SocketListen
         + SocketConnect
         + SocketAccept
-        + SocketLocalAddr
+        + SocketLocalAddress
         + SocketClose,
 >(
     scheduler: &S,
@@ -45,7 +45,7 @@ async fn pair<
     scheduler
         .socket_connect(
             &client,
-            scheduler.socket_local_addr(&listener).unwrap(),
+            scheduler.socket_local_address(&listener).unwrap(),
             &never,
         )
         .await
@@ -61,7 +61,7 @@ pub async fn check<
         + SocketListen
         + SocketConnect
         + SocketAccept
-        + SocketLocalAddr
+        + SocketLocalAddress
         + SocketClose
         + SocketRead
         + SocketWrite

@@ -8,7 +8,7 @@ use socketry_executor::{
     SocketRecvFlags, SocketSendFlags, SocketType,
 };
 use socketry_executor::{
-    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddr,
+    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddress,
     SocketOpen, SocketShutdown,
 };
 use std::{
@@ -49,7 +49,7 @@ pub async fn check<
         + SocketOpen
         + SocketBind
         + SocketConnect
-        + SocketLocalAddr
+        + SocketLocalAddress
         + SocketClose
         + SocketListen
         + SocketAccept
@@ -60,8 +60,8 @@ pub async fn check<
     for local in ["127.0.0.1:0", "[::1]:0"] {
         let receiver = bound(scheduler, local.parse().unwrap(), SocketType::Datagram).await;
         let sender = bound(scheduler, local.parse().unwrap(), SocketType::Datagram).await;
-        let address = scheduler.socket_local_addr(&receiver).unwrap();
-        let source = scheduler.socket_local_addr(&sender).unwrap();
+        let address = scheduler.socket_local_address(&receiver).unwrap();
+        let source = scheduler.socket_local_address(&sender).unwrap();
 
         // An unpolled send has no effect. Receive cancellation also returns the original owners.
         drop(scheduler.socket_sendmsg(
@@ -265,7 +265,7 @@ async fn stream<
         + SocketOpen
         + SocketBind
         + SocketConnect
-        + SocketLocalAddr
+        + SocketLocalAddress
         + SocketClose
         + SocketListen
         + SocketAccept
@@ -287,7 +287,7 @@ async fn stream<
     scheduler
         .socket_connect(
             &sender,
-            scheduler.socket_local_addr(&listener).unwrap(),
+            scheduler.socket_local_address(&listener).unwrap(),
             &NEVER,
         )
         .await

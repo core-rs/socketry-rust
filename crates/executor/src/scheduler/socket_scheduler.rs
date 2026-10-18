@@ -2,8 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::{
-    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddr,
-    SocketOpen, SocketPeerAddr, SocketRead, SocketShutdown, SocketWait, SocketWrite,
+    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddress,
+    SocketOpen, SocketPeerAddress, SocketRead, SocketShutdown, SocketWait, SocketWrite,
 };
 
 /// Convenience aggregate for the core socket operations provided by a scheduler.
@@ -26,8 +26,8 @@ pub trait SocketScheduler:
     + SocketOpen
     + SocketBind
     + SocketListen
-    + SocketLocalAddr
-    + SocketPeerAddr
+    + SocketLocalAddress
+    + SocketPeerAddress
     + SocketConnect
     + SocketAccept
     + SocketRead
@@ -42,8 +42,8 @@ impl<S: ?Sized> SocketScheduler for S where
         + SocketOpen
         + SocketBind
         + SocketListen
-        + SocketLocalAddr
-        + SocketPeerAddr
+        + SocketLocalAddress
+        + SocketPeerAddress
         + SocketConnect
         + SocketAccept
         + SocketRead

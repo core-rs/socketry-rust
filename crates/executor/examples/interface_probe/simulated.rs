@@ -12,8 +12,8 @@ use socketry_executor::{
 };
 use socketry_executor::{Interest, IoBuf, IoBufMut, SocketDomain, SocketProtocol, SocketType};
 use socketry_executor::{
-    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddr,
-    SocketOpen, SocketOperation, SocketPeerAddr, SocketRead, SocketShutdown, SocketWait,
+    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddress,
+    SocketOpen, SocketOperation, SocketPeerAddress, SocketRead, SocketShutdown, SocketWait,
     SocketWrite,
 };
 use std::collections::{HashMap, VecDeque};
@@ -675,8 +675,8 @@ impl SocketListen for Scheduler {
     }
 }
 
-impl SocketLocalAddr for Scheduler {
-    fn socket_local_addr(&self, socket: &SocketDescriptor) -> io::Result<SocketAddr> {
+impl SocketLocalAddress for Scheduler {
+    fn socket_local_address(&self, socket: &SocketDescriptor) -> io::Result<SocketAddr> {
         match &*socket.state.lock().unwrap() {
             SocketState::Open { local, .. } => Ok(*local),
             SocketState::Listening { address, .. } => Ok(*address),
@@ -685,8 +685,8 @@ impl SocketLocalAddr for Scheduler {
     }
 }
 
-impl SocketPeerAddr for Scheduler {
-    fn socket_peer_addr(&self, socket: &SocketDescriptor) -> io::Result<SocketAddr> {
+impl SocketPeerAddress for Scheduler {
+    fn socket_peer_address(&self, socket: &SocketDescriptor) -> io::Result<SocketAddr> {
         match &*socket.state.lock().unwrap() {
             SocketState::Connected(connection) => Ok(connection.peer),
             _ => Err(io::Error::from(io::ErrorKind::NotConnected)),
@@ -778,7 +778,7 @@ impl SocketAccept for Scheduler {
             let ready = incoming.ready.listen();
             let accepted = incoming.sockets.lock().unwrap().pop_front();
             if let Some(socket) = accepted {
-                let peer = self.socket_peer_addr(&socket)?;
+                let peer = self.socket_peer_address(&socket)?;
                 return Ok((socket, peer));
             }
             wait(ready, cancellation).await?;

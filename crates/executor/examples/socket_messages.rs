@@ -10,7 +10,7 @@ async fn exchange<
     S: socketry_executor::SocketMessages
         + socketry_executor::SocketOpen
         + socketry_executor::SocketBind
-        + socketry_executor::SocketLocalAddr
+        + socketry_executor::SocketLocalAddress
         + socketry_executor::SocketClose,
 >(
     scheduler: &S,
@@ -40,7 +40,7 @@ async fn exchange<
     scheduler
         .socket_bind(&receiver, "127.0.0.1:0".parse().unwrap(), &cancellation)
         .await?;
-    let address = scheduler.socket_local_addr(&receiver)?;
+    let address = scheduler.socket_local_address(&receiver)?;
 
     // These two allocations form one datagram. The backend builds the native iovec array without concatenating or copying their contents. An address selects the destination without connecting the socket; None would use an existing connected peer.
     let message = SocketMessage {

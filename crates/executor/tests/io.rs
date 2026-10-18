@@ -12,8 +12,8 @@ use socketry_executor::{
     SocketType, Spawn,
 };
 use socketry_executor::{
-    SocketAccept, SocketBind, SocketConnect, SocketListen, SocketLocalAddr, SocketOpen,
-    SocketPeerAddr, SocketRead, SocketWait, SocketWrite,
+    SocketAccept, SocketBind, SocketConnect, SocketListen, SocketLocalAddress, SocketOpen,
+    SocketPeerAddress, SocketRead, SocketWait, SocketWrite,
 };
 use socketry_executor::{SocketRegistration, SyncMode};
 use std::fs::File as StdFile;
@@ -89,7 +89,7 @@ async fn socket_variants<S: SocketScheduler>(scheduler: &S) {
         .socket_bind(&ipv6, "[::1]:0".parse().unwrap(), &NEVER)
         .await
         .unwrap();
-    assert!(scheduler.socket_local_addr(&ipv6).unwrap().is_ipv6());
+    assert!(scheduler.socket_local_address(&ipv6).unwrap().is_ipv6());
 
     let datagram = scheduler
         .socket_open(
@@ -104,7 +104,7 @@ async fn socket_variants<S: SocketScheduler>(scheduler: &S) {
         .socket_connect(&datagram, "127.0.0.1:9".parse().unwrap(), &NEVER)
         .await
         .unwrap();
-    assert!(scheduler.socket_peer_addr(&datagram).is_ok());
+    assert!(scheduler.socket_peer_address(&datagram).is_ok());
     assert!(scheduler.socket_listen(&datagram, 1, &NEVER).await.is_err());
     assert!(
         scheduler
@@ -214,7 +214,7 @@ where
         .unwrap();
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
     sender
-        .connect(scheduler.socket_local_addr(&socket).unwrap())
+        .connect(scheduler.socket_local_address(&socket).unwrap())
         .unwrap();
     scheduler
         .socket_connect(&socket, sender.local_addr().unwrap(), &NEVER)
@@ -519,17 +519,17 @@ mod native {
 
         assert_eq!(
             handle
-                .socket_local_addr(&registered_listener)
+                .socket_local_address(&registered_listener)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::BrokenPipe
         );
         assert_eq!(
-            handle.socket_local_addr(&socket).unwrap_err().kind(),
+            handle.socket_local_address(&socket).unwrap_err().kind(),
             io::ErrorKind::BrokenPipe
         );
         assert_eq!(
-            handle.socket_peer_addr(&socket).unwrap_err().kind(),
+            handle.socket_peer_address(&socket).unwrap_err().kind(),
             io::ErrorKind::BrokenPipe
         );
         let executor = Scheduler::with_workers(1).unwrap();
@@ -964,15 +964,15 @@ mod tokio_adapter {
         );
 
         assert_eq!(
-            handle.socket_local_addr(&listener).unwrap_err().kind(),
+            handle.socket_local_address(&listener).unwrap_err().kind(),
             io::ErrorKind::BrokenPipe
         );
         assert_eq!(
-            handle.socket_local_addr(&socket).unwrap_err().kind(),
+            handle.socket_local_address(&socket).unwrap_err().kind(),
             io::ErrorKind::BrokenPipe
         );
         assert_eq!(
-            handle.socket_peer_addr(&socket).unwrap_err().kind(),
+            handle.socket_peer_address(&socket).unwrap_err().kind(),
             io::ErrorKind::BrokenPipe
         );
         runtime.block_on(async {
@@ -1194,11 +1194,11 @@ mod tokio_adapter {
                 io::ErrorKind::InvalidInput
             );
             assert_eq!(
-                second.socket_local_addr(&socket).unwrap_err().kind(),
+                second.socket_local_address(&socket).unwrap_err().kind(),
                 io::ErrorKind::InvalidInput
             );
             assert_eq!(
-                second.socket_peer_addr(&socket).unwrap_err().kind(),
+                second.socket_peer_address(&socket).unwrap_err().kind(),
                 io::ErrorKind::InvalidInput
             );
         });

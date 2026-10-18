@@ -23,8 +23,8 @@ use crate::{
     FileWrite, FileWriteAt,
 };
 use crate::{
-    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddr,
-    SocketOpen, SocketOperation, SocketPeerAddr, SocketRead, SocketShutdown, SocketWait,
+    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddress,
+    SocketOpen, SocketOperation, SocketPeerAddress, SocketRead, SocketShutdown, SocketWait,
     SocketWrite,
 };
 use event_listener::{Event as CompletionEvent, Listener as _};
@@ -806,17 +806,17 @@ impl SocketListen for Selector {
     }
 }
 
-impl SocketLocalAddr for Selector {
-    fn socket_local_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+impl SocketLocalAddress for Selector {
+    fn socket_local_address(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
         self.check_open()?;
-        readiness::Selector.socket_local_addr(socket)
+        readiness::Selector.socket_local_address(socket)
     }
 }
 
-impl SocketPeerAddr for Selector {
-    fn socket_peer_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+impl SocketPeerAddress for Selector {
+    fn socket_peer_address(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
         self.check_open()?;
-        readiness::Selector.socket_peer_addr(socket)
+        readiness::Selector.socket_peer_address(socket)
     }
 }
 

@@ -6,7 +6,8 @@ use socketry_executor::{
     SocketReuseAddress, SocketType, TcpNoDelay,
 };
 use socketry_executor::{
-    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddr, SocketOpen,
+    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddress,
+    SocketOpen,
 };
 
 async fn round_trip<S, O>(scheduler: &S, socket: &S::Socket, option: O)
@@ -75,7 +76,7 @@ where
         + SocketListen
         + SocketAccept
         + SocketConnect
-        + SocketLocalAddr
+        + SocketLocalAddress
         + SocketClose,
 {
     let never = Cancellation::never();
@@ -114,7 +115,7 @@ where
     scheduler
         .socket_connect(
             &client,
-            scheduler.socket_local_addr(&listener).unwrap(),
+            scheduler.socket_local_address(&listener).unwrap(),
             &never,
         )
         .await

@@ -87,13 +87,13 @@ This is a source-breaking implementor refactor. Replace the former `impl File` w
 
 ### Socket operation capabilities
 
-`SocketOperation` supplies the shared `Socket` associated type. Each core operation trait depends only on that base: `SocketOpen`, `SocketBind`, `SocketListen`, `SocketConnect`, `SocketAccept`, `SocketRead`, `SocketWrite`, `SocketWait`, `SocketLocalAddr`, `SocketPeerAddr`, `SocketShutdown`, and `SocketClose`. Keep the existing syscall-shaped method names; this split adds no new runtime behavior or allocations. Close and shutdown retain their ordinary and `_submit` forms together.
+`SocketOperation` supplies the shared `Socket` associated type. Each core operation trait depends only on that base: `SocketOpen`, `SocketBind`, `SocketListen`, `SocketConnect`, `SocketAccept`, `SocketRead`, `SocketWrite`, `SocketWait`, `SocketLocalAddress`, `SocketPeerAddress`, `SocketShutdown`, and `SocketClose`. Keep the existing syscall-shaped method names; this split adds no new runtime behavior or allocations. Close and shutdown retain their ordinary and `_submit` forms together.
 
 `SocketScheduler` is implemented automatically for schedulers providing all core operations. It declares no methods or associated types. Existing-connection protocol code can require only `S: SocketRead + SocketWrite`, and a send loop can require only `S: SocketWrite`, without socket creation, listening, or accepting. The same resource type is shared across these bounds.
 
 Optional `SocketSendMsg` and `SocketRecvMsg` supply `socket_sendmsg` and `socket_recvmsg`; `SocketMessages` is their blanket aggregate. `SocketGetOption<O>` and `SocketSetOption<O>` independently supply typed option get/set; `SocketOptions<O>` is their blanket aggregate. Each individual capability and `SocketRegistration` depend only on `SocketOperation`, so an extension-only implementation needs no core operations. Message, option, and registration capabilities remain outside `SocketScheduler`.
 
-Implementors move `type Socket` from `impl SocketScheduler` into `impl SocketOperation` and move each method into its operation trait implementation. Replace explicit `SocketMessages` and `SocketOptions<O>` implementations with the respective send/receive and get/set implementations. Do not implement the three aggregates explicitly. Fully qualified resource paths become `<S as SocketOperation>::Socket`; method paths name the operation trait, such as `SocketRead::socket_read`. Concrete callers import individual operation traits; importing only an aggregate no longer exposes methods on a concrete scheduler. Generic `S: SocketScheduler`, `S: SocketMessages`, and `S: SocketOptions<O>` bounds retain their grouped methods. Consumers that previously relied on optional capabilities implying core socket operations must now add every setup, I/O, or cleanup capability they use.
+Implementors move `type Socket` from `impl SocketScheduler` into `impl SocketOperation` and move each method into its operation trait implementation. Replace explicit `SocketMessages` and `SocketOptions<O>` implementations with the respective send/receive and get/set implementations. Do not implement the three aggregates explicitly. Fully qualified resource paths become `<S as SocketOperation>::Socket`; method paths name the operation trait, such as `SocketRead::socket_read`. Concrete callers import individual operation traits; importing only an aggregate no longer exposes methods on a concrete scheduler. Generic `S: SocketScheduler`, `S: SocketMessages`, and `S: SocketOptions<O>` bounds retain their grouped methods. Consumers that previously relied on optional capabilities implying core socket operations must now add every setup, I/O, or cleanup capability they use. Address inspection spells out `Address`: rename `socket_local_addr`/`socket_peer_addr` to `socket_local_address`/`socket_peer_address`; the corresponding traits are `SocketLocalAddress` and `SocketPeerAddress`.
 
 Native readiness, io_uring, Tokio, and the in-memory simulator implement the split interfaces. Shared conformance tests state their setup and observation requirements. A descriptor-free read/write backend exercises a protocol without other socket capabilities, while positive and compile-fail examples verify extension-only adapters, absent operations, typed options, and the aggregate boundaries. Runtime operation bodies and cancellation, buffer ownership, and cleanup contracts are unchanged.
 
@@ -103,7 +103,7 @@ Generic code takes a scheduler such as `&S`, with bounds describing the portion 
 
 Resource creation belongs inside the corresponding capability. `FileOperation` declares an associated file type, and `FileOpen` returns that type. `SocketOperation` declares one associated socket type for unconnected, bound, listening, connected, and datagram sockets. Its `socket_open`, `socket_bind`, `socket_listen`, and `socket_connect` operations follow the corresponding system-call boundaries; `socket_accept` returns another value of that same type. `socket_listen` takes an existing socket and backlog and leaves bind behavior to the operating system, including implicit binding where supported. Generic consumers use these associated resources rather than creating a `std::fs::File` or `std::net::TcpListener` themselves.
 
-The initial socket arguments select IPv4 or IPv6, stream or datagram, and an optional TCP or UDP protocol. Address parameters use `std::net::SocketAddr`. `SocketOptions<O>` adds typed configuration without extending the required `SocketScheduler` surface. `SocketMessages` adds owned scatter/gather payloads, IP addresses, and portable flags. Non-IP families and ancillary data remain future extensions. File and socket descriptors remain distinct; no common descriptor trait is required. Existing std TCP resources can still enter through the optional `SocketRegistration` interoperability trait.
+The initial socket arguments select IPv4 or IPv6, stream or datagram, and an optional TCP or UDP protocol. Address parameters use `SocketAddress`, a re-export of `std::net::SocketAddr`. Local and peer inspection use `SocketLocalAddress::socket_local_address` and `SocketPeerAddress::socket_peer_address`. `SocketOptions<O>` adds typed configuration without extending the required `SocketScheduler` surface. `SocketMessages` adds owned scatter/gather payloads, IP addresses, and portable flags. Non-IP families and ancillary data remain future extensions. File and socket descriptors remain distinct; no common descriptor trait is required. Existing std TCP resources can still enter through the optional `SocketRegistration` interoperability trait.
 
 The interface does not require `Arc` around every resource. Concrete implementations choose their resource representation and how to retain it during in-flight work. They may use OS handles, registered-resource tables, shared ownership, or simulated resource identifiers. Taking a resource by reference does not remove the backend's obligation to retain everything still accessible by a submitted operation after its waiting future is dropped.
 
@@ -152,7 +152,7 @@ let received = received?;
 // received.bytes, address, truncated, control_truncated
 ```
 
-`SocketMessage<B>` owns a `Vec<B>` of `IoBuf` payload buffers and an optional `SocketAddr` destination. Sends return `(OperationResult<usize>, SocketMessage<B>)`. Receives accept `Vec<B: IoBufMut>` and return `(OperationResult<SocketRecvResult>, Vec<B>)`. Receive metadata contains the copied byte count, an optional sender address, payload truncation, and control truncation. Buffers are filled in order, their lengths stay unchanged, and only the returned byte count is newly received data. The sum of initialized lengths must fit `i32::MAX`, matching completion-result limits; native vector/message limits can still return OS errors. No payload concatenation is needed.
+`SocketMessage<B>` owns a `Vec<B>` of `IoBuf` payload buffers and an optional `SocketAddress` destination. Sends return `(OperationResult<usize>, SocketMessage<B>)`. Receives accept `Vec<B: IoBufMut>` and return `(OperationResult<SocketRecvResult>, Vec<B>)`. Receive metadata contains the copied byte count, an optional sender address, payload truncation, and control truncation. Buffers are filled in order, their lengths stay unchanged, and only the returned byte count is newly received data. The sum of initialized lengths must fit `i32::MAX`, matching completion-result limits; native vector/message limits can still return OS errors. No payload concatenation is needed.
 
 Each call performs one transfer: streams can make partial progress, datagrams retain their boundaries, and a zero-byte UDP result can be an empty message. Empty buffer lists are represented by one zero-length native entry where required. Zero-capacity receives retain OS-specific behavior, including whether they consume data, wait, or return an address; use nonempty storage to receive empty datagrams portably. `SocketRecvFlags::peek` maps to `MSG_PEEK`; `SocketSendFlags::dont_route` maps to `MSG_DONTROUTE`. Unix sends suppress `SIGPIPE`, consistent with `socket_write`. Additional native flags, `MSG_WAITALL` policy, zero-copy sends, and original datagram-length reporting are separate extensions.
 
@@ -188,7 +188,7 @@ for candidate in addresses {
 }
 ```
 
-The result is `OperationResult<Vec<AddressInfo>>`; each candidate owns its `SocketAddr`, `SocketType`, and optional `SocketProtocol`. `AddressService` accepts a numeric `Port(u16)` or a service `Name(&str)`. `AddressHints` selects optional domain, socket type, and protocol plus `passive`, `numeric_host`, and `address_configured` flags. Defaults request both IP families, unspecified type/protocol, and no flags. Native implementations pass these hints into `getaddrinfo` rather than filtering its output. A named service can select different ports or transports according to the system service database.
+The result is `OperationResult<Vec<AddressInfo>>`; each candidate owns its `SocketAddress`, `SocketType`, and optional `SocketProtocol`. `AddressService` accepts a numeric `Port(u16)` or a service `Name(&str)`. `AddressHints` selects optional domain, socket type, and protocol plus `passive`, `numeric_host`, and `address_configured` flags. Defaults request both IP families, unspecified type/protocol, and no flags. Native implementations pass these hints into `getaddrinfo` rather than filtering its output. A named service can select different ports or transports according to the system service database.
 
 Names contain no port; numeric IPv6 literals are unbracketed. `None` selects loopback addresses, or wildcard bind addresses when `passive` is set. Empty strings and embedded NUL bytes return `InvalidInput`. `numeric_host` prevents hostname lookup. `address_configured` maps to opt-in `AI_ADDRCONFIG`; native resolvers do not count loopback alone as evidence of a configured family. Backends preserve candidate order, duplicates, IPv6 scope/flow metadata, and socket creation values. Native results outside the IP families (such as FreeBSD pathname resolution) return `InvalidData`. A successful list may be empty; incompatible hints or absent matches can instead produce resolver errors.
 
@@ -362,7 +362,7 @@ scheduler.sleep_until(deadline, cancellation)
 scheduler.sleep(duration, cancellation)
 ```
 
-This list includes proposed extensions. The implemented `FileScheduler` methods are `file_open`, `file_stat`, `file_seek`, `file_sync`, `file_truncate`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at`. The implemented `SocketScheduler` methods are `socket_open`, `socket_bind`, `socket_listen`, `socket_connect`, `socket_accept`, `socket_read`, `socket_write`, and `socket_wait`, plus synchronous `socket_local_addr` and `socket_peer_addr`. Initial creation supports IPv4/IPv6 stream and datagram sockets with TCP/UDP protocol selection. Connected UDP preserves datagram boundaries. Optional `SocketMessages` adds address-based message operations; ancillary data remains an extension. Async I/O methods take `&Cancellation`; buffer operations return `(OperationResult<usize>, B)` on success, error, and cancellation.
+This list includes proposed extensions. The implemented `FileScheduler` methods are `file_open`, `file_stat`, `file_seek`, `file_sync`, `file_truncate`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at`. The implemented `SocketScheduler` methods are `socket_open`, `socket_bind`, `socket_listen`, `socket_connect`, `socket_accept`, `socket_read`, `socket_write`, and `socket_wait`, plus synchronous `socket_local_address` and `socket_peer_address`. Initial creation supports IPv4/IPv6 stream and datagram sockets with TCP/UDP protocol selection. Connected UDP preserves datagram boundaries. Optional `SocketMessages` adds address-based message operations; ancillary data remains an extension. Async I/O methods take `&Cancellation`; buffer operations return `(OperationResult<usize>, B)` on success, error, and cancellation.
 
 An optional context pairing a scheduler reference with a cancellation signal could reduce repetitive arguments. Such a context should preserve explicit dependency and cancellation boundaries; it is a convenience, not a new computation abstraction.
 
@@ -591,7 +591,7 @@ pub trait SocketBind: SocketOperation {
     fn socket_bind(
         &self,
         socket: &Self::Socket,
-        address: SocketAddr,
+        address: SocketAddress,
         cancellation: &Cancellation,
     ) -> impl Future<Output = OperationResult<()>> + Send;
 }
@@ -605,19 +605,19 @@ pub trait SocketListen: SocketOperation {
     ) -> impl Future<Output = OperationResult<()>> + Send;
 }
 
-pub trait SocketLocalAddr: SocketOperation {
-    fn socket_local_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr>;
+pub trait SocketLocalAddress: SocketOperation {
+    fn socket_local_address(&self, socket: &Self::Socket) -> io::Result<SocketAddress>;
 }
 
-pub trait SocketPeerAddr: SocketOperation {
-    fn socket_peer_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr>;
+pub trait SocketPeerAddress: SocketOperation {
+    fn socket_peer_address(&self, socket: &Self::Socket) -> io::Result<SocketAddress>;
 }
 
 pub trait SocketConnect: SocketOperation {
     fn socket_connect(
         &self,
         socket: &Self::Socket,
-        address: SocketAddr,
+        address: SocketAddress,
         cancellation: &Cancellation,
     ) -> impl Future<Output = OperationResult<()>> + Send;
 }
@@ -627,7 +627,7 @@ pub trait SocketAccept: SocketOperation {
         &self,
         socket: &Self::Socket,
         cancellation: &Cancellation,
-    ) -> impl Future<Output = OperationResult<(Self::Socket, SocketAddr)>> + Send;
+    ) -> impl Future<Output = OperationResult<(Self::Socket, SocketAddress)>> + Send;
 }
 
 pub trait SocketRead: SocketOperation {
@@ -684,8 +684,8 @@ pub trait SocketScheduler:
     + SocketOpen
     + SocketBind
     + SocketListen
-    + SocketLocalAddr
-    + SocketPeerAddr
+    + SocketLocalAddress
+    + SocketPeerAddress
     + SocketConnect
     + SocketAccept
     + SocketRead

@@ -48,7 +48,38 @@ Keep core traits small and dependable. Implementing a core trait requires workin
 
 Additional capabilities belong in extension traits where their semantics or platform availability differ. A consumer requiring an extension declares that requirement through its trait bounds. An incompatible scheduler then fails at compile time. Implemented examples include `S: FileAllocate` for allocation and `S: SocketOptions<TcpNoDelay>` for a particular socket option.
 
-Do not create one trait per syscall automatically. Group operations around capabilities that real consumers need, and keep inherently platform-specific types and flags in platform extensions.
+Prefer operation-level capability traits so consumers can require just the operations they use. Keep completion and `_submit` variants of the same operation together, and keep inherently platform-specific types and flags in platform extensions. The existing broad `File` and `Socket` traits have not yet been decomposed; the following refactor is agreed follow-up work.
+
+### Follow-up: operation-level capabilities
+
+Split resource identity from the operations available on that resource. Introduce small scheduler traits, provisionally named `FileResource` and `SocketResource`, that declare only the associated file or socket type and its existing bounds. Every file operation on a scheduler shares that scheduler's one file type, and every socket operation shares its one socket type. These are scheduler capabilities, not a common descriptor hierarchy, and they do not prescribe `Arc`, dynamic dispatch, or a concrete resource representation.
+
+Move each independently useful operation into its own capability: for example, `FileOpen`, `FileRead`, `FileReadAt`, `FileWrite`, `FileWriteAt`, `FileStat`, and `FileClose`; similarly, `SocketOpen`, `SocketBind`, `SocketListen`, `SocketAccept`, `SocketRead`, and `SocketWrite`. Keep trait names aligned with current method names: the current single-buffer operations are `socket_read` and `socket_write`, while message operations are `socket_recvmsg` and `socket_sendmsg`. Split `SocketMessages` into receive and send capabilities so a reader need not implement sending. This refactor does not rename the operations or add a new `socket_recv` method.
+
+Operation traits depend on the minimal resource trait, not the broad aggregate. In particular, change `FileAdvice: File` and `FileAllocate: File` to depend on the shared file resource capability; otherwise they still require unrelated open, read, write, and close operations. Apply the same rule to socket extensions. Move operation-specific associated outputs, such as the current `File::Metadata`, onto the corresponding operation trait (`FileStat`) rather than requiring them of every file-capable scheduler.
+
+A generic consumer could then express its requirement as follows. This is a proposed interface example, not code that compiles against the current broad traits:
+
+```rust,ignore
+async fn read_chunk<S: FileRead>(
+    scheduler: &S,
+    file: &S::File,
+    buffer: Vec<u8>,
+    cancellation: &Cancellation,
+) -> BufferResult<Vec<u8>> {
+    scheduler.file_read(file, buffer, cancellation).await
+}
+```
+
+This function needs neither file creation nor writing, metadata, or close. A copy loop could require `S: FileRead + FileWrite`; a receive-only protocol could require just the relevant socket receive capability. Partial and simulated backends can implement those capabilities without unrelated methods or `Unsupported` stubs. Preserve the current owned-buffer, cancellation, resource-retention, and concrete `Send` future contracts.
+
+Keep `file_close` and `file_close_submit` in `FileClose`, `file_advise` and `file_advise_submit` in `FileAdvice`, and the corresponding socket pairs together. Each pair describes the same underlying operation with different completion boundaries. Audit the remaining grouped capabilities, including typed socket get/set options, for independent consumer requirements; retain small cohesive groups where their shared contract is useful, such as a clock's instant type and monotonic deadline operations.
+
+Retain `File` and `Socket` as convenience aggregate traits built from the required operation traits, with blanket implementations for schedulers satisfying those bounds. Do not repeat method declarations on the aggregates or make operation traits depend on them. Optional capabilities such as allocation and advice remain outside the core aggregate so requiring `File` does not accidentally require a Linux-only operation. The aggregates use ordinary supertraits and blanket implementations, not unstable trait aliases.
+
+These bounds are explicit capability requirements, not inferred effect tracking. Rust checks calls through the generic scheduler against its declared bounds; it does not automatically attach an I/O effect set to the returned `Future` or infer all transitive operations. A bound permits an operation without promising that every execution performs it, and it does not constrain calls through unrelated concrete APIs. No new computation trait or marker on every future is required.
+
+Implement this as a separate public-interface refactor: migrate native, Tokio, and simulated implementations together, update exports and examples, and organize conformance tests by operation capability. Include a minimal partial backend and compile-time checks showing that a consumer accepts exactly its required capabilities and rejects a missing one. Moving methods and associated types changes implementor code and may change fully qualified paths, so preserving the aggregate names alone does not guarantee source compatibility. Record the migration explicitly when the refactor lands.
 
 ### Common scheduler dependency and resource creation
 
@@ -1025,7 +1056,7 @@ The simulator has bounded in-memory file sizes and unbounded byte queues. It doe
 | Cancellation | `Cancellation`, `Cancelled`, `defer_cancel`, and cancellation-aware file/socket operations implemented. Application shutdown is cooperative. |
 | Signal notifications | `Notify<Value>`, `Signals`, and optional Unix registration guards implemented for native and Tokio; each guard owns its dispatch task. |
 | Runtime lifetime | Application waits are explicit. Runtime shutdown abandons futures; backend retention protects submitted I/O. Accepted file-close and socket-close/shutdown submissions survive abandonment and are drained by graceful shutdown. |
-| Capabilities | Public `File`, `Socket`, `SocketOptions<O>`, `SocketMessages`, `SocketRegistration`, `AddressResolution`, `Clock`, `Spawn`, and `Blocking`; associated resources and initial file/socket creation implemented. Broader hooks remain design work. |
+| Capabilities | Public `File`, `Socket`, `SocketOptions<O>`, `SocketMessages`, `SocketRegistration`, `AddressResolution`, `Clock`, `Spawn`, and `Blocking`; associated resources and initial file/socket creation implemented. Operation-level traits, shared resource bases, and convenience aggregates are agreed follow-up work; the broad interfaces remain implemented today. |
 | Blocking execution | Dedicated native/Tokio pools, configurable worker and admission limits, queued cancellation, and owning completion handles implemented. Started closures finish independently; graceful completion requires awaiting them. |
 | Linked operations | Prepared chains and `Linked` remain proposed; native linking, whole-chain blocking jobs, and readiness sequencing are not implemented. |
 | File operations | `file_open`, `file_seek`, `file_sync`, `file_truncate`, shared-cursor `file_read`/`file_write`, and explicit-offset `file_read_at`/`file_write_at` implemented with owned buffers. Optional `FileAllocate` implemented on Linux with `Extend` and `KeepSize`; optional `FileAdvice` supplies six hints with completion/submission forms. `file_close`/`file_close_submit` implemented with exclusive ownership and bounded cleanup. `file_stat` returns associated native-backed metadata; path-based metadata remains separate. |

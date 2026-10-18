@@ -18,6 +18,26 @@ The scheduler executes pinned futures on ordinary worker stacks. Independently s
 
 Pass the implementation into libraries explicitly. A library should require the capabilities it actually uses rather than implicitly selecting a global runtime. Task dispatch takes a future and returns a task handle; it does not require a group or owner argument. Existing resources can be passed directly to code that does not need to create them.
 
+### Future direction: worker affinity and dedicated acceptors
+
+Worker placement is a potential optional scheduler capability, not an implemented API or a change to Rust's `Future` trait. A selected worker handle could implement `Spawn` and route accepted tasks and subsequent wakeups to that worker. Keep three choices distinct:
+
+- **Affinity:** every poll and destruction of an accepted future occurs on its designated worker; other workers cannot steal it. This is stronger than the native executor's current preference for the last worker, whose queues remain stealable.
+- **Isolation:** a worker is reserved for explicitly assigned work and does not take unrelated tasks from shared queues or steal from other workers. Affinity alone does not reserve a thread.
+- **I/O strategy:** a dedicated acceptor can use readiness, a blocking accept loop, or io_uring multishot accept independently of how connection tasks are distributed.
+
+A useful topology is one dedicated acceptor handing each accepted connection to a selected processing worker. The acceptor spawns through that worker's handle rather than awaiting the connection handler inline. The application retains the returned owning task handles and explicitly waits for completion during graceful shutdown. Directly awaited futures execute within their parent task; separately spawned tasks follow the handle used to spawn them. Worker/thread affinity is distinct from CPU-core affinity.
+
+Initial affinity support could retain the existing `Send + 'static` bounds: `Send` permits migration but does not require it. Supporting non-`Send` futures would additionally require local construction, spawning, and destruction, and reconsideration of the current I/O traits' `Send`/`Sync` bounds. Worker selection should be a compile-time extension capability because runtime adapters may not expose placement guarantees. Exact API names and lifecycle rules remain unsettled.
+
+A blocking accept loop belongs on an explicitly dedicated blocking thread, outside the workers that poll futures. Assigning a future to a worker must not silently make `socket_accept` block inside `poll`, since that also prevents sibling futures composed within the same task from progressing. A cancellation token alone cannot interrupt a thread blocked in `accept`; prompt cooperative shutdown requires an explicit interruption mechanism. See the [Future polling contract](https://doc.rust-lang.org/std/future/trait.Future.html) and [accept semantics](https://man7.org/linux/man-pages/man2/accept.2.html).
+
+Multishot accept could use an optional owned subscription with an asynchronous next-result operation. One submission produces successive accepted connections; the backend checks `IORING_CQE_F_MORE` to detect termination and handles rearming according to the subscription contract. Before implementation, define bounded delivery/backpressure, cancellation and retirement, and ownership of accepted sockets whose results are never consumed. This capability remains separate from ordinary single-result `socket_accept`. See [liburing multishot accept](https://man7.org/linux/man-pages/man3/io_uring_prep_multishot_accept.3.html).
+
+Task placement and resource placement must agree. Ordinary accepted OS descriptors can cross threads, but io_uring direct descriptors belong to a ring's registered file table; moving a task does not make its direct descriptors usable on another worker's ring. Per-worker rings and buffer pools therefore need explicit resource ownership and transfer rules.
+
+Dedicated acceptors may reduce scheduling interference, and blocking or multishot accept may reduce per-connection overhead. Throughput still needs measurement: cross-thread queueing, cache locality, batching, and load distribution can outweigh those savings. A handoff to an already-running worker need not cause an OS context switch. These are future design options, with no placement or accept-backend changes required now.
+
 ## Capability traits and static dispatch
 
 `File`, `Socket`, and `Clock` name scheduler capabilities. `Spawn` provides primitive task dispatch and returns an owning task handle. `Blocking` adds optional execution of owned synchronous closures with bounded asynchronous admission. `AddressResolution` adds hostname lookup independently of `Socket`. `File::File` and `Socket::Socket` are associated resource types chosen by each implementation. Native and Tokio use concrete `FileDescriptor` and `SocketDescriptor` types. `Socket` replaces the earlier capability name `Network`.
@@ -995,6 +1015,7 @@ The simulator has bounded in-memory file sizes and unbounded byte queues. It doe
 | Area | Current status |
 | --- | --- |
 | Executor | Future workers, work stealing, primitive `Spawn`, and owning handles implemented. Await joins; move transfers ownership; drop abandons unfinished work. Task groups remain above the primitives. |
+| Worker placement | Affinity, isolated workers, and dedicated acceptors remain design notes. Optional worker handles and multishot accept subscriptions have no settled API or implementation. |
 | Cancellation | `Cancellation`, `Cancelled`, `defer_cancel`, and cancellation-aware file/socket operations implemented. Application shutdown is cooperative. |
 | Signal notifications | `Notify<Value>`, `Signals`, and optional Unix registration guards implemented for native and Tokio; each guard owns its dispatch task. |
 | Runtime lifetime | Application waits are explicit. Runtime shutdown abandons futures; backend retention protects submitted I/O. Accepted file-close and socket-close/shutdown submissions survive abandonment and are drained by graceful shutdown. |

@@ -1,7 +1,8 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use socketry_executor::{Cancellation, File, FileOptions, IoBuf, OperationError, SyncMode};
+use socketry_executor::{Cancellation, FileOptions, IoBuf, OperationError, SyncMode};
+use socketry_executor::{FileOpen, FileRead, FileSeek, FileSync, FileTruncate, FileWrite};
 use std::{
     io::{self, SeekFrom},
     path::Path,
@@ -9,14 +10,14 @@ use std::{
 
 static NEVER: Cancellation = Cancellation::never();
 
-async fn position<S: File>(scheduler: &S, file: &S::File) -> u64 {
+async fn position<S: FileSeek>(scheduler: &S, file: &S::File) -> u64 {
     scheduler
         .file_seek(file, SeekFrom::Current(0), &NEVER)
         .await
         .unwrap()
 }
 
-async fn contents<S: File>(scheduler: &S, path: &Path) -> Vec<u8> {
+async fn contents<S: FileOpen + FileRead>(scheduler: &S, path: &Path) -> Vec<u8> {
     let reader = scheduler
         .file_open(path, FileOptions::READ, &NEVER)
         .await
@@ -33,7 +34,10 @@ async fn contents<S: File>(scheduler: &S, path: &Path) -> Vec<u8> {
     bytes
 }
 
-pub async fn check<S: File>(scheduler: &S, root: &Path) {
+pub async fn check<S: FileOpen + FileRead + FileSeek + FileSync + FileTruncate + FileWrite>(
+    scheduler: &S,
+    root: &Path,
+) {
     let path = root.join("truncate");
     let file = scheduler
         .file_open(

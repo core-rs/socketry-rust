@@ -2,12 +2,16 @@
 // Copyright, 2026, by Samuel Williams.
 
 use socketry_executor::{AdviceMode, Cancellation, FileAdvice, FileOptions};
+use socketry_executor::{FileClose, FileOpen, FileRead, FileSeek, FileWrite};
 use std::{
     io::{self, SeekFrom},
     path::Path,
 };
 
-pub async fn check<S: FileAdvice>(scheduler: &S, root: &Path) {
+pub async fn check<S: FileAdvice + FileClose + FileOpen + FileRead + FileSeek + FileWrite>(
+    scheduler: &S,
+    root: &Path,
+) {
     let never = Cancellation::never();
     let path = root.join("advice");
     let file = scheduler

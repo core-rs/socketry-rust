@@ -5,10 +5,14 @@
 use super::{Scheduler, SchedulerHandle};
 use crate::SyncMode;
 use crate::scheduler::selector::DefaultSelector;
-use crate::scheduler::{BufferResult, Clock, File, Interest, Socket};
+use crate::scheduler::{BufferResult, Clock, Interest, Socket};
 #[cfg(target_os = "linux")]
 use crate::{AllocationMode, FileAllocate};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
+use crate::{
+    FileClose, FileOpen, FileOperation, FileRead, FileReadAt, FileSeek, FileStat, FileSync,
+    FileTruncate, FileWrite, FileWriteAt,
+};
 use crate::{SocketMessage, SocketMessages, SocketRecvFlags, SocketRecvResult, SocketSendFlags};
 use std::io::{self, SeekFrom};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -312,16 +316,18 @@ impl crate::FileAdvice for SchedulerHandle {
     }
 }
 
-impl File for SchedulerHandle {
-    type File = <DefaultSelector as File>::File;
-    type Metadata = <DefaultSelector as File>::Metadata;
+impl FileOperation for SchedulerHandle {
+    type File = <DefaultSelector as FileOperation>::File;
+}
+
+impl FileClose for SchedulerHandle {
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
         check_open(
             self.shared
                 .closed
                 .load(std::sync::atomic::Ordering::Acquire),
         )?;
-        crate::scheduler::file_close::close(&self.shared.cleanup, file).await
+        crate::scheduler::file_close_io::close(&self.shared.cleanup, file).await
     }
 
     async fn file_close_submit(&self, file: Self::File) -> io::Result<()> {
@@ -330,9 +336,11 @@ impl File for SchedulerHandle {
                 .closed
                 .load(std::sync::atomic::Ordering::Acquire),
         )?;
-        crate::scheduler::file_close::submit_only(&self.shared.cleanup, file).await
+        crate::scheduler::file_close_io::submit_only(&self.shared.cleanup, file).await
     }
+}
 
+impl FileTruncate for SchedulerHandle {
     async fn file_truncate(
         &self,
         file: &Self::File,
@@ -343,6 +351,10 @@ impl File for SchedulerHandle {
             .file_truncate(file, length, cancellation)
             .await
     }
+}
+
+impl FileStat for SchedulerHandle {
+    type Metadata = <DefaultSelector as FileStat>::Metadata;
 
     async fn file_stat(
         &self,
@@ -351,6 +363,9 @@ impl File for SchedulerHandle {
     ) -> OperationResult<Self::Metadata> {
         self.selector()?.file_stat(file, cancellation).await
     }
+}
+
+impl FileSync for SchedulerHandle {
     async fn file_sync(
         &self,
         file: &Self::File,
@@ -359,7 +374,9 @@ impl File for SchedulerHandle {
     ) -> OperationResult<()> {
         self.selector()?.file_sync(file, mode, cancellation).await
     }
+}
 
+impl FileSeek for SchedulerHandle {
     async fn file_seek(
         &self,
         file: &Self::File,
@@ -370,7 +387,9 @@ impl File for SchedulerHandle {
             .file_seek(file, position, cancellation)
             .await
     }
+}
 
+impl FileOpen for SchedulerHandle {
     async fn file_open(
         &self,
         path: &Path,
@@ -381,6 +400,9 @@ impl File for SchedulerHandle {
             .file_open(path, options, cancellation)
             .await
     }
+}
+
+impl FileRead for SchedulerHandle {
     async fn file_read<B: IoBufMut>(
         &self,
         file: &Self::File,
@@ -392,6 +414,9 @@ impl File for SchedulerHandle {
             Err(error) => (Err(error.into()), buffer),
         }
     }
+}
+
+impl FileWrite for SchedulerHandle {
     async fn file_write<B: IoBuf>(
         &self,
         file: &Self::File,
@@ -403,6 +428,9 @@ impl File for SchedulerHandle {
             Err(error) => (Err(error.into()), buffer),
         }
     }
+}
+
+impl FileReadAt for SchedulerHandle {
     async fn file_read_at<B: IoBufMut>(
         &self,
         file: &Self::File,
@@ -419,6 +447,9 @@ impl File for SchedulerHandle {
             Err(error) => (Err(error.into()), buffer),
         }
     }
+}
+
+impl FileWriteAt for SchedulerHandle {
     async fn file_write_at<B: IoBuf>(
         &self,
         file: &Self::File,
@@ -630,9 +661,11 @@ impl crate::FileAdvice for Scheduler {
     }
 }
 
-impl File for Scheduler {
-    type File = <SchedulerHandle as File>::File;
-    type Metadata = <SchedulerHandle as File>::Metadata;
+impl FileOperation for Scheduler {
+    type File = <SchedulerHandle as FileOperation>::File;
+}
+
+impl FileClose for Scheduler {
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
         self.handle.file_close(file).await
     }
@@ -640,7 +673,9 @@ impl File for Scheduler {
     async fn file_close_submit(&self, file: Self::File) -> io::Result<()> {
         self.handle.file_close_submit(file).await
     }
+}
 
+impl FileTruncate for Scheduler {
     async fn file_truncate(
         &self,
         file: &Self::File,
@@ -649,6 +684,10 @@ impl File for Scheduler {
     ) -> OperationResult<()> {
         self.handle.file_truncate(file, length, cancellation).await
     }
+}
+
+impl FileStat for Scheduler {
+    type Metadata = <SchedulerHandle as FileStat>::Metadata;
 
     async fn file_stat(
         &self,
@@ -657,6 +696,9 @@ impl File for Scheduler {
     ) -> OperationResult<Self::Metadata> {
         self.handle.file_stat(file, cancellation).await
     }
+}
+
+impl FileSync for Scheduler {
     async fn file_sync(
         &self,
         file: &Self::File,
@@ -665,7 +707,9 @@ impl File for Scheduler {
     ) -> OperationResult<()> {
         self.handle.file_sync(file, mode, cancellation).await
     }
+}
 
+impl FileSeek for Scheduler {
     async fn file_seek(
         &self,
         file: &Self::File,
@@ -674,7 +718,9 @@ impl File for Scheduler {
     ) -> OperationResult<u64> {
         self.handle.file_seek(file, position, cancellation).await
     }
+}
 
+impl FileOpen for Scheduler {
     async fn file_open(
         &self,
         path: &Path,
@@ -683,6 +729,9 @@ impl File for Scheduler {
     ) -> OperationResult<Self::File> {
         self.handle.file_open(path, options, cancellation).await
     }
+}
+
+impl FileRead for Scheduler {
     async fn file_read<B: IoBufMut>(
         &self,
         file: &Self::File,
@@ -691,6 +740,9 @@ impl File for Scheduler {
     ) -> BufferResult<B> {
         self.handle.file_read(file, buffer, cancellation).await
     }
+}
+
+impl FileWrite for Scheduler {
     async fn file_write<B: IoBuf>(
         &self,
         file: &Self::File,
@@ -699,6 +751,9 @@ impl File for Scheduler {
     ) -> BufferResult<B> {
         self.handle.file_write(file, buffer, cancellation).await
     }
+}
+
+impl FileReadAt for Scheduler {
     async fn file_read_at<B: IoBufMut>(
         &self,
         file: &Self::File,
@@ -710,6 +765,9 @@ impl File for Scheduler {
             .file_read_at(file, buffer, offset, cancellation)
             .await
     }
+}
+
+impl FileWriteAt for Scheduler {
     async fn file_write_at<B: IoBuf>(
         &self,
         file: &Self::File,

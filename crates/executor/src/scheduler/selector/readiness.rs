@@ -9,10 +9,14 @@
 //! coroutine stacks and may be polled on different workers.
 use crate::scheduler::file_io::{read_at, write_at};
 use crate::scheduler::operation::cancellable;
-use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
+use crate::scheduler::{BufferResult, Clock, Interest, Socket as SocketOperations};
 #[cfg(target_os = "linux")]
 use crate::{AllocationMode, FileAllocate};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
+use crate::{
+    FileClose, FileOpen, FileOperation, FileRead, FileReadAt, FileSeek, FileStat, FileSync,
+    FileTruncate, FileWrite, FileWriteAt,
+};
 use crate::{FileDescriptor, SyncMode};
 use crate::{SocketMessage, SocketMessages, SocketRecvFlags, SocketRecvResult, SocketSendFlags};
 use std::io::{self, SeekFrom};
@@ -355,22 +359,26 @@ impl crate::FileAdvice for Selector {
     }
 }
 
-impl File for Selector {
+impl FileOperation for Selector {
     type File = FileDescriptor;
-    type Metadata = crate::SystemFileMetadata;
+}
+
+impl FileClose for Selector {
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
-        crate::scheduler::file_close::close(crate::scheduler::cleanup::standalone_pool(), file)
+        crate::scheduler::file_close_io::close(crate::scheduler::cleanup::standalone_pool(), file)
             .await
     }
 
     async fn file_close_submit(&self, file: Self::File) -> io::Result<()> {
-        crate::scheduler::file_close::submit_only(
+        crate::scheduler::file_close_io::submit_only(
             crate::scheduler::cleanup::standalone_pool(),
             file,
         )
         .await
     }
+}
 
+impl FileTruncate for Selector {
     async fn file_truncate(
         &self,
         file: &Self::File,
@@ -387,6 +395,10 @@ impl File for Selector {
         })
         .await
     }
+}
+
+impl FileStat for Selector {
+    type Metadata = crate::SystemFileMetadata;
 
     async fn file_stat(
         &self,
@@ -403,6 +415,9 @@ impl File for Selector {
         })
         .await
     }
+}
+
+impl FileSync for Selector {
     async fn file_sync(
         &self,
         file: &Self::File,
@@ -419,7 +434,9 @@ impl File for Selector {
         })
         .await
     }
+}
 
+impl FileSeek for Selector {
     async fn file_seek(
         &self,
         file: &Self::File,
@@ -436,7 +453,9 @@ impl File for Selector {
         })
         .await
     }
+}
 
+impl FileOpen for Selector {
     async fn file_open(
         &self,
         path: &Path,
@@ -453,6 +472,9 @@ impl File for Selector {
         })
         .await
     }
+}
+
+impl FileRead for Selector {
     async fn file_read<B: IoBufMut>(
         &self,
         file: &Self::File,
@@ -465,6 +487,9 @@ impl File for Selector {
         })
         .await
     }
+}
+
+impl FileWrite for Selector {
     async fn file_write<B: IoBuf>(
         &self,
         file: &Self::File,
@@ -477,6 +502,9 @@ impl File for Selector {
         })
         .await
     }
+}
+
+impl FileReadAt for Selector {
     async fn file_read_at<B: IoBufMut>(
         &self,
         file: &Self::File,
@@ -490,6 +518,9 @@ impl File for Selector {
         })
         .await
     }
+}
+
+impl FileWriteAt for Selector {
     async fn file_write_at<B: IoBuf>(
         &self,
         file: &Self::File,

@@ -15,9 +15,13 @@
 //!
 //! Allocation and truncation use native requests when their opcodes are available, otherwise the blocking file fallback preserves the same public contract. File advice uses bounded cleanup workers so accepted jobs survive ring shutdown; native advice SQEs remain future work.
 use super::readiness::{self, SocketDescriptor};
-use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
+use crate::scheduler::{BufferResult, Clock, Interest, Socket as SocketOperations};
 use crate::{AllocationMode, FileAllocate, FileDescriptor, SyncMode};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
+use crate::{
+    FileClose, FileOpen, FileRead, FileReadAt, FileSeek, FileStat, FileSync, FileTruncate,
+    FileWrite, FileWriteAt,
+};
 use event_listener::{Event as CompletionEvent, Listener as _};
 use futures_channel::oneshot;
 use io_uring::{IoUring, opcode, squeue, types};
@@ -945,19 +949,23 @@ impl crate::FileAdvice for Selector {
     }
 }
 
-impl File for Selector {
+impl crate::FileOperation for Selector {
     type File = FileDescriptor;
-    type Metadata = crate::StatxMetadata;
+}
+
+impl FileClose for Selector {
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
         self.check_open()?;
-        crate::scheduler::file_close::close(&self.controller.cleanup, file).await
+        crate::scheduler::file_close_io::close(&self.controller.cleanup, file).await
     }
 
     async fn file_close_submit(&self, file: Self::File) -> io::Result<()> {
         self.check_open()?;
-        crate::scheduler::file_close::submit_only(&self.controller.cleanup, file).await
+        crate::scheduler::file_close_io::submit_only(&self.controller.cleanup, file).await
     }
+}
 
+impl FileTruncate for Selector {
     async fn file_truncate(
         &self,
         file: &Self::File,
@@ -976,6 +984,10 @@ impl File for Selector {
                 .await
         }
     }
+}
+
+impl FileStat for Selector {
+    type Metadata = crate::StatxMetadata;
 
     async fn file_stat(
         &self,
@@ -984,7 +996,9 @@ impl File for Selector {
     ) -> OperationResult<Self::Metadata> {
         self.stat(file, cancellation).await
     }
+}
 
+impl FileSync for Selector {
     async fn file_sync(
         &self,
         file: &Self::File,
@@ -994,7 +1008,9 @@ impl File for Selector {
         self.file_operation(file, FileOperation::Sync(mode), cancellation)
             .await
     }
+}
 
+impl FileSeek for Selector {
     async fn file_seek(
         &self,
         file: &Self::File,
@@ -1007,7 +1023,9 @@ impl File for Selector {
             .file_seek(file, position, cancellation)
             .await
     }
+}
 
+impl FileOpen for Selector {
     async fn file_open(
         &self,
         path: &Path,
@@ -1019,6 +1037,9 @@ impl File for Selector {
             .file_open(path, options, cancellation)
             .await
     }
+}
+
+impl FileRead for Selector {
     async fn file_read<B: IoBufMut>(
         &self,
         file: &Self::File,
@@ -1036,6 +1057,9 @@ impl File for Selector {
             .await;
         (operation_result(result, cancellation), buffer)
     }
+}
+
+impl FileWrite for Selector {
     async fn file_write<B: IoBuf>(
         &self,
         file: &Self::File,
@@ -1053,6 +1077,9 @@ impl File for Selector {
             .await;
         (operation_result(result, cancellation), buffer)
     }
+}
+
+impl FileReadAt for Selector {
     async fn file_read_at<B: IoBufMut>(
         &self,
         file: &Self::File,
@@ -1071,6 +1098,9 @@ impl File for Selector {
             .await;
         (operation_result(result, cancellation), buffer)
     }
+}
+
+impl FileWriteAt for Selector {
     async fn file_write_at<B: IoBuf>(
         &self,
         file: &Self::File,

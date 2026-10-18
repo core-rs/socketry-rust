@@ -1,12 +1,16 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use socketry_executor::{Cancellation, File, FileMetadata, FileOptions, FileType, OperationError};
+use socketry_executor::{Cancellation, FileMetadata, FileOptions, FileType, OperationError};
+use socketry_executor::{FileClose, FileOpen, FileSeek, FileStat, FileTruncate};
 use std::{io::SeekFrom, path::Path};
 
 static NEVER: Cancellation = Cancellation::never();
 
-pub async fn check<S: File>(scheduler: &S, root: &Path) {
+pub async fn check<S: FileClose + FileOpen + FileSeek + FileStat + FileTruncate>(
+    scheduler: &S,
+    root: &Path,
+) {
     let path = root.join("stat");
     let file = scheduler
         .file_open(&path, FileOptions::CREATE, &NEVER)

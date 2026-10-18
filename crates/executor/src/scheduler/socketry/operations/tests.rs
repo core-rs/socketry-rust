@@ -1,11 +1,12 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
+use crate::{FileReadAt, FileWriteAt};
 static NEVER: crate::Cancellation = crate::Cancellation::never();
 
 use super::{DefaultSelector, Scheduler, check_initialized_open, check_open};
 use crate::SocketRegistration;
-use crate::scheduler::{Clock, File, Interest, Socket};
+use crate::scheduler::{Clock, Interest, Socket};
 use crate::{OperationResult, SocketDomain, SocketProtocol, SocketType};
 use std::fs::OpenOptions;
 use std::io;

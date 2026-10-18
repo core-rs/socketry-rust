@@ -1,12 +1,16 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use socketry_executor::{Cancellation, File, FileOptions, IoBuf, OperationError, SyncMode};
+use socketry_executor::{Cancellation, FileOptions, IoBuf, OperationError, SyncMode};
+use socketry_executor::{FileOpen, FileRead, FileSeek, FileSync, FileWrite};
 use std::{io::SeekFrom, path::Path};
 
 static NEVER: Cancellation = Cancellation::never();
 
-pub async fn check<S: File>(scheduler: &S, root: &Path) {
+pub async fn check<S: FileOpen + FileRead + FileSeek + FileSync + FileWrite>(
+    scheduler: &S,
+    root: &Path,
+) {
     let path = root.join("sync");
     let file = scheduler
         .file_open(

@@ -329,6 +329,10 @@ async fn positioned_files<SchedulerType: File>(scheduler: &SchedulerType) {
 #[cfg(feature = "native")]
 mod native {
     use super::*;
+    use socketry_executor::{
+        FileClose, FileOpen, FileRead, FileReadAt, FileSeek, FileStat, FileSync, FileTruncate,
+        FileWrite, FileWriteAt,
+    };
     use socketry_executor::{Scheduler, TaskError};
 
     #[test]
@@ -680,6 +684,10 @@ mod native {
 mod tokio_adapter {
     use super::*;
     use socketry_executor::scheduler::tokio::{Scheduler, SchedulerHandle};
+    use socketry_executor::{
+        FileClose, FileOpen, FileRead, FileReadAt, FileSeek, FileStat, FileSync, FileTruncate,
+        FileWrite, FileWriteAt,
+    };
     use socketry_executor::{SpawnError, TaskError};
 
     fn runtime() -> tokio::runtime::Runtime {

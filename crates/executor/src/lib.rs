@@ -77,8 +77,10 @@ pub use io_buf_mut::IoBufMut;
 pub use notify::Notify;
 pub use operation_error::{OperationError, OperationResult};
 pub use scheduler::{
-    AddressResolution, BufferResult, Clock, File, FileAdvice, FileAllocate, Interest, Scheduler,
-    SchedulerHandle, Signals, Socket, SocketMessages, SocketOptions, SocketRegistration,
+    AddressResolution, BufferResult, Clock, File, FileAdvice, FileAllocate, FileClose, FileOpen,
+    FileOperation, FileRead, FileReadAt, FileSeek, FileStat, FileSync, FileTruncate, FileWrite,
+    FileWriteAt, Interest, Scheduler, SchedulerHandle, Signals, Socket, SocketMessages,
+    SocketOptions, SocketRegistration,
 };
 #[cfg(all(unix, feature = "signals"))]
 pub use signal_hook::consts::signal;

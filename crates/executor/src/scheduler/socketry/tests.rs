@@ -2,6 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::Scheduler;
+#[cfg(feature = "native")]
+use crate::FileClose;
 use crate::{Spawn, SpawnError, Task, TaskError};
 use std::sync::Arc;
 
@@ -14,7 +16,7 @@ fn ready_task(value: usize) -> ReadyTask {
 #[cfg(feature = "native")]
 #[test]
 fn shutdown_drains_accepted_closes_after_their_waiters_are_dropped() {
-    use crate::{BlockingOptions, File};
+    use crate::BlockingOptions;
     use futures_lite::future::{block_on, poll_once};
     use std::{sync::mpsc, time::Duration};
     let timeout = Duration::from_secs(10);
@@ -61,7 +63,7 @@ fn shutdown_drains_accepted_closes_after_their_waiters_are_dropped() {
 #[cfg(feature = "native")]
 #[test]
 fn cleanup_completion_can_destroy_scheduler_without_waiting_on_its_own_worker() {
-    use crate::{BlockingOptions, File};
+    use crate::BlockingOptions;
     use futures_lite::future::block_on;
     use std::future::Future;
     use std::panic::{AssertUnwindSafe, catch_unwind};

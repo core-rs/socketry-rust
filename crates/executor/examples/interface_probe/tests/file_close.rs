@@ -1,10 +1,11 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use socketry_executor::{Cancellation, File, FileOptions, OperationError};
+use socketry_executor::{Cancellation, FileOptions, OperationError};
+use socketry_executor::{FileClose, FileOpen, FileRead, FileWrite};
 use std::path::Path;
 
-pub async fn check<S: File>(scheduler: &S, root: &Path) {
+pub async fn check<S: FileClose + FileOpen + FileRead + FileWrite>(scheduler: &S, root: &Path) {
     let never = Cancellation::never();
     let path = root.join("close");
     let file = scheduler

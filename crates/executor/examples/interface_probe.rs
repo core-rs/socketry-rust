@@ -8,8 +8,9 @@
 mod simulated;
 
 use socketry_executor::{
-    AddressHints, AddressResolution, AddressService, Cancellation, File, FileOptions, IoBuf,
-    OperationResult, Socket, SocketDomain, SocketProtocol, SocketType,
+    AddressHints, AddressResolution, AddressService, Cancellation, File, FileOpen, FileOptions,
+    FileReadAt, FileWriteAt, IoBuf, OperationResult, Socket, SocketDomain, SocketProtocol,
+    SocketType,
 };
 use std::{io, path::Path};
 static NEVER: Cancellation = Cancellation::never();
@@ -18,7 +19,7 @@ const PAYLOAD: &[u8] = b"Explicit schedulers keep protocol code portable.\n";
 const BUFFER_SIZE: usize = 16;
 
 /// Application code only sees the backend's associated resources.
-async fn copy<S: File>(
+async fn copy<S: FileOpen + FileReadAt + FileWriteAt>(
     scheduler: &S,
     source: &Path,
     destination: &Path,

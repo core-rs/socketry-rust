@@ -6,7 +6,9 @@
 //! On Linux, run `cargo run -p socketry-executor --example file_advice`. Add `--features tokio` for the adapter or `--features io-uring` for the native completion backend. Advice currently uses the cleanup pool on all three.
 
 #[cfg(all(target_os = "linux", any(feature = "native", feature = "tokio")))]
-async fn advise<S: socketry_executor::FileAdvice>(
+async fn advise<
+    S: socketry_executor::FileAdvice + socketry_executor::FileOpen + socketry_executor::FileClose,
+>(
     scheduler: &S,
     path: &std::path::Path,
 ) -> socketry_executor::OperationResult<()> {

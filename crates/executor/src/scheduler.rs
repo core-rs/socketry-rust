@@ -9,7 +9,7 @@ pub mod socketry;
 #[cfg(any(feature = "native", feature = "tokio"))]
 mod cleanup;
 #[cfg(any(feature = "native", feature = "tokio"))]
-mod file_close;
+mod file_close_io;
 #[cfg(any(feature = "native", feature = "tokio"))]
 mod file_io;
 
@@ -51,6 +51,39 @@ mod native_socket_option;
 
 mod file;
 pub use file::File;
+
+mod file_operation;
+pub use file_operation::FileOperation;
+
+mod file_open;
+pub use file_open::FileOpen;
+
+mod file_close;
+pub use file_close::FileClose;
+
+mod file_stat;
+pub use file_stat::FileStat;
+
+mod file_truncate;
+pub use file_truncate::FileTruncate;
+
+mod file_sync;
+pub use file_sync::FileSync;
+
+mod file_seek;
+pub use file_seek::FileSeek;
+
+mod file_read;
+pub use file_read::FileRead;
+
+mod file_write;
+pub use file_write::FileWrite;
+
+mod file_read_at;
+pub use file_read_at::FileReadAt;
+
+mod file_write_at;
+pub use file_write_at::FileWriteAt;
 
 mod file_advice;
 pub use file_advice::FileAdvice;

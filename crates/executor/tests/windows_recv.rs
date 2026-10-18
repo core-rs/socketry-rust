@@ -97,3 +97,64 @@ fn async_io_concurrent_reads() {
         );
     }
 }
+
+#[test]
+fn udp_concurrent_reads() {
+    use std::{
+        net::UdpSocket,
+        time::{Duration, Instant},
+    };
+
+    for iteration in 0..1_000 {
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client.connect(server.local_addr().unwrap()).unwrap();
+        server.connect(client.local_addr().unwrap()).unwrap();
+        client.set_nonblocking(true).unwrap();
+        let values = thread::scope(|scope| {
+            let mut readers = Vec::new();
+            for _ in 0..4 {
+                let client = &client;
+                readers.push(scope.spawn(move || {
+                    let mut values = Vec::new();
+                    for _ in 0..4 {
+                        let mut buffer = [0; 64];
+                        let deadline = Instant::now() + Duration::from_secs(5);
+                        loop {
+                            match client.recv(&mut buffer) {
+                                Ok(64) => {
+                                    assert!(
+                                        buffer.iter().all(|value| *value == buffer[0]),
+                                        "split datagram: {buffer:?}"
+                                    );
+                                    values.push(buffer[0]);
+                                    break;
+                                }
+                                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                    assert!(Instant::now() < deadline, "missing datagram");
+                                    thread::yield_now();
+                                }
+                                result => panic!("unexpected recv result: {result:?}"),
+                            }
+                        }
+                    }
+                    values
+                }));
+            }
+            for value in 0..16u8 {
+                assert_eq!(server.send(&[value; 64]).unwrap(), 64);
+            }
+            readers
+                .into_iter()
+                .flat_map(|reader| reader.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let mut values = values;
+        values.sort_unstable();
+        assert_eq!(
+            values,
+            (0..16u8).collect::<Vec<_>>(),
+            "iteration {iteration}"
+        );
+    }
+}

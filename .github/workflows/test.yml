@@ -13,7 +13,13 @@ jobs:
         with:
           components: llvm-tools-preview
           cache-shared-key: coverage-cargo-install-v1
+      - name: Standard-library-only stream stress test
+        run: cargo test -p socketry-executor --test windows_recv --locked -- standard_library_concurrent_reads --exact
+      - name: Standard-library-only datagram stress test
+        if: always()
+        run: cargo test -p socketry-executor --test windows_recv --locked -- udp_concurrent_reads --exact
       - name: Independent receive stress tests
+        if: always()
         run: cargo test -p socketry-executor --test windows_recv --locked -- --test-threads=1
       - name: Scheduler receive stress test
         if: always()

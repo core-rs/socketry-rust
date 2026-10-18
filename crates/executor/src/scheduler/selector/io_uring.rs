@@ -13,7 +13,7 @@
 //! channel per operation. It does not yet pool operation records or register
 //! buffers with the kernel.
 //!
-//! Allocation and truncation use native requests when their opcodes are available, otherwise the blocking file fallback preserves the same public contract.
+//! Allocation and truncation use native requests when their opcodes are available, otherwise the blocking file fallback preserves the same public contract. File advice uses bounded cleanup workers so accepted jobs survive ring shutdown; native advice SQEs remain future work.
 use super::readiness::{self, SocketDescriptor};
 use crate::scheduler::{BufferResult, Clock, File, Interest, Socket as SocketOperations};
 use crate::{AllocationMode, FileAllocate, FileDescriptor, SyncMode};
@@ -904,6 +904,44 @@ impl FileAllocate for Selector {
                 .file_allocate(file, offset, length, mode, cancellation)
                 .await
         }
+    }
+}
+
+impl crate::FileAdvice for Selector {
+    async fn file_advise(
+        &self,
+        file: &Self::File,
+        offset: u64,
+        length: u64,
+        advice: crate::AdviceMode,
+    ) -> io::Result<()> {
+        self.check_open()?;
+        crate::scheduler::file_advice_io::run(
+            &self.controller.cleanup,
+            file,
+            offset,
+            length,
+            advice,
+        )
+        .await
+    }
+
+    async fn file_advise_submit(
+        &self,
+        file: &Self::File,
+        offset: u64,
+        length: u64,
+        advice: crate::AdviceMode,
+    ) -> io::Result<()> {
+        self.check_open()?;
+        crate::scheduler::file_advice_io::submit_only(
+            &self.controller.cleanup,
+            file,
+            offset,
+            length,
+            advice,
+        )
+        .await
     }
 }
 

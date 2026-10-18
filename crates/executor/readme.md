@@ -234,6 +234,20 @@ async fn resize<S: File>(
 }
 ```
 
+`FileAdvice` is an optional Linux capability for access and cache hints. `AdviceMode` offers `Normal`, `Sequential`, `Random`, `WillNeed`, `DontNeed`, and `NoReuse`. An offset and zero length select the range through EOF; otherwise `offset + length` must fit in `i64`. These are OS hints, preserving file contents, size, and cursor. The OS may ignore them, and access policy may apply to the entire open file description.
+
+```rust,no_run
+use socketry_executor::{AdviceMode, FileAdvice};
+
+async fn prepare_scan<S: FileAdvice>(scheduler: &S, file: &S::File) -> std::io::Result<()> {
+    scheduler.file_advise(file, 0, 0, AdviceMode::Sequential).await
+}
+```
+
+`file_advise` waits for OS completion and reports errors; `file_advise_submit` waits only for bounded admission. Neither takes a cancellation token. Accepted jobs retain their descriptor and survive waiter abandonment; graceful scheduler shutdown drains them. Submission does not establish completion, so await ordinary advice before explicit close. Dropping the descriptor after `_submit` is safe because the backend retains it. Success does not guarantee prefetch, eviction, or durability.
+
+Native, Tokio, and io_uring currently execute advice through `posix_fadvise64` on their cleanup workers. Native advice SQEs remain a later optimization. Other platforms omit the capability rather than returning `Unsupported` by default. See the [commented example](examples/file_advice.rs).
+
 `FileAllocate` is an optional capability for reserving backing space. Native and Tokio schedulers implement it on Linux; other targets currently omit the implementation at compile time. `AllocationMode::Extend` reserves a range and extends the logical length if necessary. `KeepSize` reserves it without changing the length, including beyond EOF. Both modes preserve existing contents and the shared cursor. Length must be positive and `offset + length` must fit in `i64`.
 
 The Linux implementation uses `fallocate` on the existing file pools, or a native io\_uring request when its opcode is available. Filesystem errors, including unsupported allocation, are preserved. There is no zero-writing or resize-only emulation. Cancellation and file retention follow the same completion contract as synchronization. Allocation does not unshare copy-on-write extents or guarantee durability; await related operations in order. Platform-specific operations can also be called explicitly through `spawn_blocking`.

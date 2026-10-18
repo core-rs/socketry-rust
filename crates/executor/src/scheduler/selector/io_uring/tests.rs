@@ -1181,3 +1181,28 @@ fn allocation_preparation_is_inert_and_failed_admission_preserves_file() {
         assert_eq!(file.as_ref().metadata().unwrap().len(), 0);
     });
 }
+
+#[test]
+fn advice_uses_retained_cleanup_and_rejects_closed_selector() {
+    use crate::scheduler::file_advice_io::tests::{accepted, closed, saturated};
+    futures_lite::future::block_on(async {
+        for mode in 0..3 {
+            let capacity = if mode == 2 { 1 } else { 2 };
+            let mut selector = Selector::new().unwrap();
+            // The reactor does not retain Controller; customize its initially idle cleanup pool for deterministic admission tests.
+            Arc::get_mut(&mut selector.controller).unwrap().cleanup =
+                crate::blocking_pool::BlockingPool::new(crate::BlockingOptions {
+                    threads: 1,
+                    capacity,
+                });
+            let pool = &selector.controller.cleanup;
+            if mode < 2 {
+                accepted(&selector, pool, mode == 1).await;
+            } else {
+                saturated(&selector, pool).await;
+            }
+            selector.shutdown().await;
+            closed(&selector).await;
+        }
+    });
+}

@@ -5,7 +5,7 @@ use std::{fs::File, sync::Arc};
 
 /// An owned file for the native and Tokio backends. Operations borrow it; explicit close consumes it. It is deliberately not `Clone`.
 ///
-/// The backend privately retains the file while an operation uses it. Dropping an operation future does not establish completion; request cancellation and await the operation before explicitly closing the file. Ordinary handle destruction releases ownership without waiting or reporting close errors.
+/// The backend privately retains the file while an operation uses it. Dropping an operation future does not establish completion; await the operation before explicitly closing the file. Cancellation-aware work can first receive a cooperative cancellation request; accepted submission-only work retains the descriptor until it finishes. Ordinary handle destruction releases ownership without waiting or reporting close errors.
 ///
 /// ```compile_fail
 /// use socketry_executor::FileDescriptor;

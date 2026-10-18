@@ -592,3 +592,44 @@ fn simulated_address_resolution() {
         address_resolution::connection(&scheduler, "service.test").await;
     });
 }
+
+#[path = "../examples/interface_probe/tests/file_advice.rs"]
+mod file_advice;
+
+#[test]
+fn simulated_advice_contract() {
+    let scheduler = simulated::Scheduler::new(2, 1);
+    futures_lite::future::block_on(file_advice::check(&scheduler, Path::new("fixture")));
+}
+
+#[cfg(all(target_os = "linux", feature = "native"))]
+#[test]
+fn native_advice_contract() {
+    let scheduler = socketry_executor::Scheduler::with_workers(2).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    scheduler.block_on(file_advice::check(&scheduler, directory.path()));
+    scheduler.block_on(file_advice::check(&scheduler.handle(), directory.path()));
+    let readiness = socketry_executor::scheduler::selector::readiness::Selector::new().unwrap();
+    scheduler.block_on(file_advice::check(&readiness, directory.path()));
+    #[cfg(feature = "io-uring")]
+    {
+        let selector = socketry_executor::scheduler::selector::io_uring::Selector::new().unwrap();
+        scheduler.block_on(file_advice::check(&selector, directory.path()));
+        scheduler.block_on(selector.shutdown());
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "tokio"))]
+#[test]
+fn tokio_advice_contract() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let scheduler = socketry_executor::scheduler::tokio::Scheduler::new(runtime.handle().clone());
+    let directory = tempfile::tempdir().unwrap();
+    // Advice uses the scheduler's pool and does not need Tokio to drive it.
+    futures_lite::future::block_on(file_advice::check(&scheduler, directory.path()));
+    futures_lite::future::block_on(file_advice::check(&scheduler.handle(), directory.path()));
+    futures_lite::future::block_on(scheduler.shutdown());
+}

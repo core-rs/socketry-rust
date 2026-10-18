@@ -12,6 +12,7 @@ mod address_info;
 mod address_resolve_error;
 mod address_resolve_error_kind;
 mod address_service;
+mod advice_mode;
 mod allocation_mode;
 mod blocking;
 mod blocking_error;
@@ -57,6 +58,7 @@ pub use address_info::AddressInfo;
 pub use address_resolve_error::AddressResolveError;
 pub use address_resolve_error_kind::AddressResolveErrorKind;
 pub use address_service::AddressService;
+pub use advice_mode::AdviceMode;
 pub use allocation_mode::AllocationMode;
 pub use blocking::Blocking;
 pub use blocking_error::BlockingError;
@@ -75,7 +77,7 @@ pub use io_buf_mut::IoBufMut;
 pub use notify::Notify;
 pub use operation_error::{OperationError, OperationResult};
 pub use scheduler::{
-    AddressResolution, BufferResult, Clock, File, FileAllocate, Interest, Scheduler,
+    AddressResolution, BufferResult, Clock, File, FileAdvice, FileAllocate, Interest, Scheduler,
     SchedulerHandle, Signals, Socket, SocketMessages, SocketOptions, SocketRegistration,
 };
 #[cfg(all(unix, feature = "signals"))]

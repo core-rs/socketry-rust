@@ -52,6 +52,12 @@ mod native_socket_option;
 mod file;
 pub use file::File;
 
+mod file_advice;
+pub use file_advice::FileAdvice;
+
+#[cfg(all(target_os = "linux", any(feature = "native", feature = "tokio")))]
+mod file_advice_io;
+
 mod file_allocate;
 pub use file_allocate::FileAllocate;
 

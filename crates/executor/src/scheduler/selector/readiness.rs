@@ -318,6 +318,43 @@ impl FileAllocate for Selector {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl crate::FileAdvice for Selector {
+    async fn file_advise(
+        &self,
+        file: &Self::File,
+        offset: u64,
+        length: u64,
+        advice: crate::AdviceMode,
+    ) -> io::Result<()> {
+        crate::scheduler::file_advice_io::run(
+            crate::scheduler::cleanup::standalone_pool(),
+            file,
+            offset,
+            length,
+            advice,
+        )
+        .await
+    }
+
+    async fn file_advise_submit(
+        &self,
+        file: &Self::File,
+        offset: u64,
+        length: u64,
+        advice: crate::AdviceMode,
+    ) -> io::Result<()> {
+        crate::scheduler::file_advice_io::submit_only(
+            crate::scheduler::cleanup::standalone_pool(),
+            file,
+            offset,
+            length,
+            advice,
+        )
+        .await
+    }
+}
+
 impl File for Selector {
     type File = FileDescriptor;
     type Metadata = crate::SystemFileMetadata;

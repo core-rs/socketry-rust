@@ -292,6 +292,34 @@ impl socketry_executor::FileMetadata for FileMetadata {
     }
 }
 
+impl socketry_executor::FileAdvice for Scheduler {
+    async fn file_advise(
+        &self,
+        _file: &Self::File,
+        offset: u64,
+        length: u64,
+        _advice: socketry_executor::AdviceMode,
+    ) -> io::Result<()> {
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > i64::MAX as u64)
+        {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        Ok(())
+    }
+
+    async fn file_advise_submit(
+        &self,
+        file: &Self::File,
+        offset: u64,
+        length: u64,
+        advice: socketry_executor::AdviceMode,
+    ) -> io::Result<()> {
+        socketry_executor::FileAdvice::file_advise(self, file, offset, length, advice).await
+    }
+}
+
 impl File for Scheduler {
     type File = FileDescriptor;
     type Metadata = FileMetadata;

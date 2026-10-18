@@ -820,6 +820,39 @@ impl FileAllocate for SchedulerHandle {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl crate::FileAdvice for SchedulerHandle {
+    async fn file_advise(
+        &self,
+        file: &Self::File,
+        offset: u64,
+        length: u64,
+        advice: crate::AdviceMode,
+    ) -> io::Result<()> {
+        self.shared.check_open()?;
+        crate::scheduler::file_advice_io::run(&self.shared.cleanup, file, offset, length, advice)
+            .await
+    }
+
+    async fn file_advise_submit(
+        &self,
+        file: &Self::File,
+        offset: u64,
+        length: u64,
+        advice: crate::AdviceMode,
+    ) -> io::Result<()> {
+        self.shared.check_open()?;
+        crate::scheduler::file_advice_io::submit_only(
+            &self.shared.cleanup,
+            file,
+            offset,
+            length,
+            advice,
+        )
+        .await
+    }
+}
+
 impl File for SchedulerHandle {
     type File = FileDescriptor;
     type Metadata = crate::SystemFileMetadata;
@@ -1234,6 +1267,29 @@ impl FileAllocate for Scheduler {
         self.handle
             .file_allocate(file, offset, length, mode, cancellation)
             .await
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl crate::FileAdvice for Scheduler {
+    async fn file_advise(
+        &self,
+        file: &Self::File,
+        offset: u64,
+        length: u64,
+        advice: crate::AdviceMode,
+    ) -> io::Result<()> {
+        crate::FileAdvice::file_advise(&self.handle, file, offset, length, advice).await
+    }
+
+    async fn file_advise_submit(
+        &self,
+        file: &Self::File,
+        offset: u64,
+        length: u64,
+        advice: crate::AdviceMode,
+    ) -> io::Result<()> {
+        crate::FileAdvice::file_advise_submit(&self.handle, file, offset, length, advice).await
     }
 }
 

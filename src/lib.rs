@@ -12,10 +12,13 @@ pub use socketry_executor::{
     FileAllocate, FileClose, FileDescriptor, FileMetadata, FileOpen, FileOperation, FileOptions,
     FileRead, FileReadAt, FileScheduler, FileSeek, FileStat, FileSync, FileTruncate, FileType,
     FileWrite, FileWriteAt, Interest, IoBuf, IoBufMut, Notify, OperationError, OperationResult,
-    Scheduler, SchedulerHandle, Signals, SocketDomain, SocketKeepalive, SocketMessage,
-    SocketMessages, SocketOption, SocketOptions, SocketProtocol, SocketRecvFlags, SocketRecvResult,
-    SocketRegistration, SocketReuseAddress, SocketScheduler, SocketSendFlags, SocketType, Spawn,
-    SpawnError, SyncMode, Task, TaskError, TaskHandle, TcpNoDelay, defer_cancel, yield_now,
+    Scheduler, SchedulerHandle, Signals, SocketAccept, SocketBind, SocketClose, SocketConnect,
+    SocketDomain, SocketGetOption, SocketKeepalive, SocketListen, SocketLocalAddr, SocketMessage,
+    SocketMessages, SocketOpen, SocketOperation, SocketOption, SocketOptions, SocketPeerAddr,
+    SocketProtocol, SocketRead, SocketRecvFlags, SocketRecvMsg, SocketRecvResult,
+    SocketRegistration, SocketReuseAddress, SocketScheduler, SocketSendFlags, SocketSendMsg,
+    SocketSetOption, SocketShutdown, SocketType, SocketWait, SocketWrite, Spawn, SpawnError,
+    SyncMode, Task, TaskError, TaskHandle, TcpNoDelay, defer_cancel, yield_now,
 };
 
 #[cfg(all(unix, feature = "signals", any(feature = "native", feature = "tokio")))]

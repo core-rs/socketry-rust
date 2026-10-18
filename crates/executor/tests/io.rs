@@ -11,6 +11,10 @@ use socketry_executor::{
     Clock, FileScheduler, Interest, OperationResult, SocketDomain, SocketProtocol, SocketScheduler,
     SocketType, Spawn,
 };
+use socketry_executor::{
+    SocketAccept, SocketBind, SocketConnect, SocketListen, SocketLocalAddr, SocketOpen,
+    SocketPeerAddr, SocketRead, SocketWait, SocketWrite,
+};
 use socketry_executor::{SocketRegistration, SyncMode};
 use std::fs::File as StdFile;
 use std::future::{Future, poll_fn};

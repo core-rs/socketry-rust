@@ -79,8 +79,11 @@ pub use operation_error::{OperationError, OperationResult};
 pub use scheduler::{
     AddressResolution, BufferResult, Clock, FileAdvice, FileAllocate, FileClose, FileOpen,
     FileOperation, FileRead, FileReadAt, FileScheduler, FileSeek, FileStat, FileSync, FileTruncate,
-    FileWrite, FileWriteAt, Interest, Scheduler, SchedulerHandle, Signals, SocketMessages,
-    SocketOptions, SocketRegistration, SocketScheduler,
+    FileWrite, FileWriteAt, Interest, Scheduler, SchedulerHandle, Signals, SocketAccept,
+    SocketBind, SocketClose, SocketConnect, SocketGetOption, SocketListen, SocketLocalAddr,
+    SocketMessages, SocketOpen, SocketOperation, SocketOptions, SocketPeerAddr, SocketRead,
+    SocketRecvMsg, SocketRegistration, SocketScheduler, SocketSendMsg, SocketSetOption,
+    SocketShutdown, SocketWait, SocketWrite,
 };
 #[cfg(all(unix, feature = "signals"))]
 pub use signal_hook::consts::signal;

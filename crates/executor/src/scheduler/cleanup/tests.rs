@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::*;
-use crate::SocketRegistration;
+use crate::{SocketClose, SocketRegistration, SocketShutdown, SocketWrite};
 use futures_lite::future::poll_once;
 use std::{
     io::Read,
@@ -22,7 +22,7 @@ fn pair<S: SocketRegistration>(scheduler: &S) -> (S::Socket, TcpStream) {
 }
 
 // A blocked worker makes admission and execution observably different. Each caller supplies a pool with one worker and capacity two.
-pub(crate) async fn accepted_socket_jobs<S: SocketRegistration>(
+pub(crate) async fn accepted_socket_jobs<S: SocketRegistration + SocketClose + SocketShutdown>(
     scheduler: &S,
     pool: &BlockingPool,
     mode: u8,
@@ -77,7 +77,9 @@ pub(crate) async fn accepted_socket_jobs<S: SocketRegistration>(
     assert_eq!(peer.read(&mut [0]).unwrap(), 0);
 }
 
-pub(crate) async fn saturated_socket_admission<S: SocketRegistration>(
+pub(crate) async fn saturated_socket_admission<
+    S: SocketRegistration + SocketClose + SocketShutdown + SocketWrite,
+>(
     scheduler: &S,
     pool: &BlockingPool,
 ) {
@@ -109,7 +111,9 @@ pub(crate) async fn saturated_socket_admission<S: SocketRegistration>(
     scheduler.socket_close(socket).await.unwrap();
 }
 
-pub(crate) async fn closed_socket_admission<S: SocketRegistration>(
+pub(crate) async fn closed_socket_admission<
+    S: SocketRegistration + SocketClose + SocketShutdown,
+>(
     scheduler: &S,
     pool: &BlockingPool,
 ) {

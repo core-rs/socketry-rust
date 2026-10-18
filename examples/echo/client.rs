@@ -1,15 +1,16 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-// `SocketScheduler`, `AddressResolution`, and `IoBuf` are traits: importing them makes their methods available.
+// `SocketOpen`, `SocketConnect`, `SocketRead`, `SocketWrite`, `AddressResolution`, and `IoBuf` are traits: importing them makes their methods available.
 use socketry::{
     AddressHints, AddressResolution, AddressService, Cancellation, IoBuf, OperationResult,
-    Scheduler, SocketDomain, SocketScheduler, SocketType,
+    Scheduler, SocketDomain, SocketType,
 };
+use socketry::{SocketConnect, SocketOpen, SocketRead, SocketWrite};
 use std::io;
 
-// This function works with any scheduler implementing the `SocketScheduler` and `AddressResolution` traits. `&S` and `&Cancellation` borrow values owned by `main()`. The `Vec` is owned by this future and returned with the echoed bytes.
-async fn echo<S: SocketScheduler + AddressResolution>(
+// This function works with any scheduler implementing socket open/connect/read/write and `AddressResolution` traits. `&S` and `&Cancellation` borrow values owned by `main()`. The `Vec` is owned by this future and returned with the echoed bytes.
+async fn echo<S: SocketOpen + SocketConnect + SocketRead + SocketWrite + AddressResolution>(
     scheduler: &S,
     mut buffer: Vec<u8>,
     cancellation: &Cancellation,

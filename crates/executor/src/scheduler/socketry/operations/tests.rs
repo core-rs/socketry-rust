@@ -2,6 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use crate::{FileReadAt, FileWriteAt};
+use crate::{SocketAccept, SocketRead, SocketWait, SocketWrite};
 static NEVER: crate::Cancellation = crate::Cancellation::never();
 
 use super::{DefaultSelector, Scheduler, check_initialized_open, check_open};

@@ -1,12 +1,12 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use crate::{Cancellation, OperationResult, SocketOption, SocketScheduler};
-use std::future::Future;
+use super::{SocketGetOption, SocketSetOption};
+use crate::SocketOption;
 
-/// Typed get/set capability for one socket option. Generic consumers require only the options they use, such as `S: SocketOptions<TcpNoDelay>`.
+/// Convenience aggregate of `SocketGetOption<O>` and `SocketSetOption<O>`, automatically implemented for schedulers providing both operations for an option. Generic consumers require only the options they use, such as `S: SocketOptions<TcpNoDelay>`.
 ///
-/// An absent implementation is a compile-time error. Socket type, protocol, state, and OS policy can still reject an operation at runtime; preserve those errors. Options retain their OS semantics, including address reuse and inheritance on accepted sockets. Read-only, write-only, or differently shaped controls can use separate extension traits.
+/// An absent implementation is a compile-time error. Socket type, protocol, state, and OS policy can still reject an operation at runtime; preserve those errors. Options retain their OS semantics, including address reuse and inheritance on accepted sockets. Read-only and write-only controls implement only their respective operation trait. Differently shaped controls can use separate extension traits.
 ///
 /// Both futures are lazy and check cancellation before the syscall. Once executed, the syscall's result wins concurrent cancellation; dropping an unpolled setter changes nothing. Await setters before operations that depend on them. There is no extra serialization between concurrent option operations, and get-followed-by-set is not atomic.
 ///
@@ -19,26 +19,14 @@ use std::future::Future;
 /// ```
 /// Merely supporting sockets does not imply support for every option:
 /// ```compile_fail
-/// use socketry_executor::{Cancellation, SocketScheduler, SocketOptions, TcpNoDelay};
+/// use socketry_executor::{Cancellation, SocketScheduler, SocketSetOption, TcpNoDelay};
 /// async fn configure<S: SocketScheduler>(scheduler: &S, socket: &S::Socket) {
 ///     scheduler.socket_set_option(socket, TcpNoDelay, true, &Cancellation::never()).await;
 /// }
 /// ```
-pub trait SocketOptions<O: SocketOption>: SocketScheduler {
-    /// Query the option's current value, preserving OS errors.
-    fn socket_get_option(
-        &self,
-        socket: &Self::Socket,
-        option: O,
-        cancellation: &Cancellation,
-    ) -> impl Future<Output = OperationResult<O::Value>> + Send;
+pub trait SocketOptions<O: SocketOption>: SocketGetOption<O> + SocketSetOption<O> {}
 
-    /// Set the option and wait for syscall completion. This borrows the descriptor and does not change its ownership.
-    fn socket_set_option(
-        &self,
-        socket: &Self::Socket,
-        option: O,
-        value: O::Value,
-        cancellation: &Cancellation,
-    ) -> impl Future<Output = OperationResult<()>> + Send;
+impl<S: ?Sized, O: SocketOption> SocketOptions<O> for S where
+    S: SocketGetOption<O> + SocketSetOption<O>
+{
 }

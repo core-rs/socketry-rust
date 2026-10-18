@@ -5,12 +5,14 @@
 
 #[cfg(any(feature = "native", feature = "tokio"))]
 use socketry_executor::{Cancellation, IoBuf, SocketDomain, SocketScheduler, SocketType};
+#[cfg(any(feature = "native", feature = "tokio"))]
+use socketry_executor::{SocketRead, SocketWrite};
 use std::io;
 #[cfg(any(feature = "native", feature = "tokio"))]
 use std::net::Shutdown;
 
 #[cfg(any(feature = "native", feature = "tokio"))]
-async fn send_all<S: SocketScheduler>(
+async fn send_all<S: SocketWrite>(
     scheduler: &S,
     socket: &S::Socket,
     mut buffer: Vec<u8>,
@@ -33,7 +35,7 @@ async fn send_all<S: SocketScheduler>(
 }
 
 #[cfg(any(feature = "native", feature = "tokio"))]
-async fn receive_all<S: SocketScheduler>(
+async fn receive_all<S: SocketRead>(
     scheduler: &S,
     socket: &S::Socket,
     cancellation: &Cancellation,

@@ -6,9 +6,10 @@
 use socketry_executor::{
     Cancellation, OperationError, SocketDomain, SocketOptions, SocketType, TcpNoDelay,
 };
+use socketry_executor::{SocketClose, SocketOpen};
 use std::io;
 
-async fn open<S: SocketOptions<TcpNoDelay>>(scheduler: &S, kind: SocketType) -> S::Socket {
+async fn open<S: SocketOpen>(scheduler: &S, kind: SocketType) -> S::Socket {
     scheduler
         .socket_open(SocketDomain::Ipv4, kind, None, &Cancellation::never())
         .await
@@ -39,7 +40,7 @@ async fn rejected<S: SocketOptions<TcpNoDelay>>(
     );
 }
 
-async fn invalid_protocol<S: SocketOptions<TcpNoDelay>>(scheduler: &S) {
+async fn invalid_protocol<S: SocketOptions<TcpNoDelay> + SocketOpen + SocketClose>(scheduler: &S) {
     let socket = open(scheduler, SocketType::Datagram).await;
     let never = Cancellation::never();
     for error in [

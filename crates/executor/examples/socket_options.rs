@@ -8,7 +8,12 @@ use std::io;
 #[cfg(any(feature = "native", feature = "tokio"))]
 async fn listener<S>(scheduler: &S) -> io::Result<()>
 where
-    S: socketry_executor::SocketOptions<socketry_executor::SocketReuseAddress>,
+    S: socketry_executor::SocketOptions<socketry_executor::SocketReuseAddress>
+        + socketry_executor::SocketOpen
+        + socketry_executor::SocketBind
+        + socketry_executor::SocketListen
+        + socketry_executor::SocketLocalAddr
+        + socketry_executor::SocketClose,
 {
     use socketry_executor::{Cancellation, SocketDomain, SocketReuseAddress, SocketType};
 

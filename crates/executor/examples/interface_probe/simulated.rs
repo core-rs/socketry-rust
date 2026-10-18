@@ -3,7 +3,7 @@
 
 //! In-memory files and duplex byte streams. No OS resources or native runtime.
 //! This is an interface probe, not a model of TCP scheduling or durability.
-use super::{Cancellation, FileOptions, OperationResult, SocketScheduler};
+use super::{Cancellation, FileOptions, OperationResult};
 use event_listener::Event;
 use socketry_executor::{AllocationMode, BufferResult, FileAllocate, SyncMode};
 use socketry_executor::{
@@ -11,6 +11,11 @@ use socketry_executor::{
     FileTruncate, FileWrite, FileWriteAt,
 };
 use socketry_executor::{Interest, IoBuf, IoBufMut, SocketDomain, SocketProtocol, SocketType};
+use socketry_executor::{
+    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddr,
+    SocketOpen, SocketOperation, SocketPeerAddr, SocketRead, SocketShutdown, SocketWait,
+    SocketWrite,
+};
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, SeekFrom};
 use std::net::SocketAddr;
@@ -174,7 +179,7 @@ impl Scheduler {
     }
 }
 
-impl socketry_executor::SocketOptions<socketry_executor::SocketReuseAddress> for Scheduler {
+impl socketry_executor::SocketGetOption<socketry_executor::SocketReuseAddress> for Scheduler {
     async fn socket_get_option(
         &self,
         socket: &Self::Socket,
@@ -184,6 +189,9 @@ impl socketry_executor::SocketOptions<socketry_executor::SocketReuseAddress> for
         cancellation.check()?;
         Ok(socket.options.lock().unwrap().reuse_address)
     }
+}
+
+impl socketry_executor::SocketSetOption<socketry_executor::SocketReuseAddress> for Scheduler {
     async fn socket_set_option(
         &self,
         socket: &Self::Socket,
@@ -197,7 +205,7 @@ impl socketry_executor::SocketOptions<socketry_executor::SocketReuseAddress> for
     }
 }
 
-impl socketry_executor::SocketOptions<socketry_executor::SocketKeepalive> for Scheduler {
+impl socketry_executor::SocketGetOption<socketry_executor::SocketKeepalive> for Scheduler {
     async fn socket_get_option(
         &self,
         socket: &Self::Socket,
@@ -207,6 +215,9 @@ impl socketry_executor::SocketOptions<socketry_executor::SocketKeepalive> for Sc
         cancellation.check()?;
         Ok(socket.options.lock().unwrap().keepalive)
     }
+}
+
+impl socketry_executor::SocketSetOption<socketry_executor::SocketKeepalive> for Scheduler {
     async fn socket_set_option(
         &self,
         socket: &Self::Socket,
@@ -220,7 +231,7 @@ impl socketry_executor::SocketOptions<socketry_executor::SocketKeepalive> for Sc
     }
 }
 
-impl socketry_executor::SocketOptions<socketry_executor::TcpNoDelay> for Scheduler {
+impl socketry_executor::SocketGetOption<socketry_executor::TcpNoDelay> for Scheduler {
     async fn socket_get_option(
         &self,
         socket: &Self::Socket,
@@ -230,6 +241,9 @@ impl socketry_executor::SocketOptions<socketry_executor::TcpNoDelay> for Schedul
         cancellation.check()?;
         Ok(socket.options.lock().unwrap().no_delay)
     }
+}
+
+impl socketry_executor::SocketSetOption<socketry_executor::TcpNoDelay> for Scheduler {
     async fn socket_set_option(
         &self,
         socket: &Self::Socket,
@@ -500,8 +514,11 @@ impl FileWriteAt for Scheduler {
     }
 }
 
-impl SocketScheduler for Scheduler {
+impl SocketOperation for Scheduler {
     type Socket = SocketDescriptor;
+}
+
+impl SocketClose for Scheduler {
     async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
         drop(socket);
         Ok(())
@@ -510,7 +527,9 @@ impl SocketScheduler for Scheduler {
     async fn socket_close_submit(&self, socket: Self::Socket) -> io::Result<()> {
         self.socket_close(socket).await
     }
+}
 
+impl SocketShutdown for Scheduler {
     async fn socket_shutdown(
         &self,
         socket: &Self::Socket,
@@ -545,7 +564,9 @@ impl SocketScheduler for Scheduler {
         let _ = self.socket_shutdown(socket, how).await;
         Ok(())
     }
+}
 
+impl SocketOpen for Scheduler {
     async fn socket_open(
         &self,
         domain: SocketDomain,
@@ -575,7 +596,9 @@ impl SocketScheduler for Scheduler {
             }),
         })
     }
+}
 
+impl SocketBind for Scheduler {
     async fn socket_bind(
         &self,
         socket: &SocketDescriptor,
@@ -604,7 +627,9 @@ impl SocketScheduler for Scheduler {
         *reservation = Some(binding);
         Ok(())
     }
+}
 
+impl SocketListen for Scheduler {
     async fn socket_listen(
         &self,
         socket: &SocketDescriptor,
@@ -648,7 +673,9 @@ impl SocketScheduler for Scheduler {
         };
         Ok(())
     }
+}
 
+impl SocketLocalAddr for Scheduler {
     fn socket_local_addr(&self, socket: &SocketDescriptor) -> io::Result<SocketAddr> {
         match &*socket.state.lock().unwrap() {
             SocketState::Open { local, .. } => Ok(*local),
@@ -656,14 +683,18 @@ impl SocketScheduler for Scheduler {
             SocketState::Connected(connection) => Ok(connection.local),
         }
     }
+}
 
+impl SocketPeerAddr for Scheduler {
     fn socket_peer_addr(&self, socket: &SocketDescriptor) -> io::Result<SocketAddr> {
         match &*socket.state.lock().unwrap() {
             SocketState::Connected(connection) => Ok(connection.peer),
             _ => Err(io::Error::from(io::ErrorKind::NotConnected)),
         }
     }
+}
 
+impl SocketConnect for Scheduler {
     async fn socket_connect(
         &self,
         socket: &SocketDescriptor,
@@ -730,7 +761,9 @@ impl SocketScheduler for Scheduler {
         });
         Ok(())
     }
+}
 
+impl SocketAccept for Scheduler {
     async fn socket_accept(
         &self,
         socket: &SocketDescriptor,
@@ -751,7 +784,9 @@ impl SocketScheduler for Scheduler {
             wait(ready, cancellation).await?;
         }
     }
+}
 
+impl SocketWait for Scheduler {
     async fn socket_wait(
         &self,
         socket: &SocketDescriptor,
@@ -795,7 +830,9 @@ impl SocketScheduler for Scheduler {
             }
         }
     }
+}
 
+impl SocketRead for Scheduler {
     async fn socket_read<B: IoBufMut>(
         &self,
         socket: &SocketDescriptor,
@@ -839,7 +876,9 @@ impl SocketScheduler for Scheduler {
             }
         }
     }
+}
 
+impl SocketWrite for Scheduler {
     async fn socket_write<B: IoBuf>(
         &self,
         socket: &SocketDescriptor,

@@ -40,6 +40,57 @@ pub use socket_registration::SocketRegistration;
 mod interest;
 pub use interest::Interest;
 
+mod socket_operation;
+pub use socket_operation::SocketOperation;
+
+mod socket_close;
+pub use socket_close::SocketClose;
+
+mod socket_shutdown;
+pub use socket_shutdown::SocketShutdown;
+
+mod socket_open;
+pub use socket_open::SocketOpen;
+
+mod socket_bind;
+pub use socket_bind::SocketBind;
+
+mod socket_listen;
+pub use socket_listen::SocketListen;
+
+mod socket_local_addr;
+pub use socket_local_addr::SocketLocalAddr;
+
+mod socket_peer_addr;
+pub use socket_peer_addr::SocketPeerAddr;
+
+mod socket_connect;
+pub use socket_connect::SocketConnect;
+
+mod socket_accept;
+pub use socket_accept::SocketAccept;
+
+mod socket_read;
+pub use socket_read::SocketRead;
+
+mod socket_write;
+pub use socket_write::SocketWrite;
+
+mod socket_wait;
+pub use socket_wait::SocketWait;
+
+mod socket_send_msg;
+pub use socket_send_msg::SocketSendMsg;
+
+mod socket_recv_msg;
+pub use socket_recv_msg::SocketRecvMsg;
+
+mod socket_get_option;
+pub use socket_get_option::SocketGetOption;
+
+mod socket_set_option;
+pub use socket_set_option::SocketSetOption;
+
 mod socket_scheduler;
 pub use socket_scheduler::SocketScheduler;
 

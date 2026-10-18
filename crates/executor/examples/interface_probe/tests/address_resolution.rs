@@ -5,6 +5,7 @@ use socketry_executor::{
     AddressHints, AddressInfo, AddressResolution, AddressService, Cancellation, OperationError,
     SocketDomain, SocketProtocol, SocketType,
 };
+
 use std::{io, net::SocketAddr};
 
 pub async fn check(scheduler: &impl AddressResolution) {

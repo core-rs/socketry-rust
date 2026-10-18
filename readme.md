@@ -78,7 +78,7 @@ The optional `signals` feature adds Unix `Signals::signal_notify(&signals, targe
 
 ## Portable I/O and runtime selection
 
-Generic code can accept `Socket`, `File`, `Clock`, and `Spawn` capabilities. Socketry and the optional Tokio adapter implement these contracts with concrete future and resource types. Import the traits to call their methods.
+Generic code can accept `SocketScheduler`, `FileScheduler`, `Clock`, and `Spawn` capabilities. Socketry and the optional Tokio adapter implement these contracts with concrete future and resource types. File consumers can require individual operations such as `FileRead + FileWrite`; import those operation traits for method calls on concrete schedulers.
 
 `file_close` waits for OS completion; `file_close_submit` waits only for bounded admission. Both consume an owned file handle and require prior operations to have finished. The [commented file-close example](crates/executor/examples/file_close.rs) demonstrates requesting cancellation, awaiting completion, and then closing safely.
 
@@ -86,20 +86,20 @@ Generic code can accept `Socket`, `File`, `Clock`, and `Spawn` capabilities. Soc
 
 `SocketOptions<O>` adds typed, cancellable option get/set. Require `SocketReuseAddress`, `SocketKeepalive`, or `TcpNoDelay` as needed; the option selects its value type and backend capability. The [listener configuration example](crates/executor/examples/socket_options.rs) shows configuration before binding.
 
-`File::file_stat` queries an open descriptor and returns owned, native-backed metadata through portable `FileMetadata` accessors. The result remains usable after close; the operation leaves the cursor unchanged. See the [commented metadata example](crates/executor/examples/file_stat.rs).
+`FileStat::file_stat` queries an open descriptor and returns owned, native-backed metadata through portable `FileMetadata` accessors. The result remains usable after close; the operation leaves the cursor unchanged. See the [commented metadata example](crates/executor/examples/file_stat.rs).
 
 The optional `SocketMessages` capability provides `socket_sendmsg`/`socket_recvmsg` with owned scatter/gather buffers, IP addresses, portable flags, and receive truncation metadata. See the [commented UDP message example](crates/executor/examples/socket_messages.rs). Ancillary data remains a separate extension.
 
 
 `FileAllocate` adds optional range allocation with `AllocationMode::Extend` or `KeepSize`. Native and Tokio implementations currently provide it on Linux; unsupported targets omit the trait implementation. See the [executor I/O documentation](crates/executor/readme.md#io-and-selectors) for allocation and filesystem guarantees.
 
-`File` is the scheduler capability trait; `File::File` is its associated resource type. Generic code can create and use files without importing OS resource types:
+`FileScheduler` aggregates the core file capabilities; `FileOperation::File` supplies their shared associated resource type. Generic code can create and use files without importing OS resource types:
 
 ```rust
-use socketry::{Cancellation, File, FileOptions, OperationResult};
+use socketry::{Cancellation, FileScheduler, FileOptions, OperationResult};
 use std::path::Path;
 
-async fn read_prefix<S: File>(scheduler: &S, path: &Path, cancellation: &Cancellation) -> OperationResult<Vec<u8>> {
+async fn read_prefix<S: FileScheduler>(scheduler: &S, path: &Path, cancellation: &Cancellation) -> OperationResult<Vec<u8>> {
     let file = scheduler.file_open(path, FileOptions::READ, cancellation).await?;
     let (result, mut buffer) = scheduler.file_read_at(&file, vec![0; 4096], 0, cancellation).await;
     buffer.truncate(result?);

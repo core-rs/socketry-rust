@@ -10,8 +10,8 @@ pub(crate) mod system;
 /// Optional IP endpoint resolution, independent of socket creation and connection. Implementations may use a system resolver, an asynchronous resolver, or a deterministic table.
 ///
 /// ```compile_fail
-/// use socketry_executor::{AddressResolution, AddressHints, AddressService, Cancellation, Socket};
-/// async fn resolve<S: Socket>(scheduler: &S) {
+/// use socketry_executor::{AddressResolution, AddressHints, AddressService, Cancellation, SocketScheduler};
+/// async fn resolve<S: SocketScheduler>(scheduler: &S) {
 ///     scheduler.address_resolve(Some("localhost"), AddressService::Port(80), AddressHints::default(), &Cancellation::never()).await;
 /// }
 /// ```

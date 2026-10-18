@@ -3,7 +3,8 @@
 
 use super::*;
 use futures_lite::future::block_on;
-use socketry_executor::{IoBufMut, SocketDomain, SocketProtocol, SocketType, SyncMode};
+use socketry_executor::{FileOpen, FileOperation, FileReadAt, FileSeek, FileTruncate, FileWriteAt};
+use socketry_executor::{IoBufMut, SocketDomain, SocketProtocol, SocketType};
 use std::future::Future;
 use std::pin::pin;
 use std::sync::{
@@ -64,18 +65,14 @@ mod file_allocate;
 mod file_close;
 
 #[test]
-fn stateful_operations_forward_and_preserve_short_transfers() {
-    let scheduler = FailingFiles {
-        scheduler: simulated::Scheduler::new(2, 1),
-        failure: Failure::None,
-    };
-    // Exercise forwarding through the wrapper with failure injection disabled.
+fn simulated_files_preserve_operation_contracts() {
+    let scheduler = simulated::Scheduler::new(2, 1);
     block_on(stateful_file::check(&scheduler, Path::new("stateful")));
     block_on(file_sync::check(&scheduler, Path::new("sync")));
     block_on(file_stat::check(&scheduler, Path::new("stat")));
     block_on(file_truncate::check(&scheduler, Path::new("truncate")));
     block_on(file_close::check(&scheduler, Path::new("close")));
-    assert_eq!(scheduler.scheduler.open_files(), 0);
+    assert_eq!(scheduler.open_files(), 0);
 }
 
 #[derive(Default)]
@@ -88,7 +85,6 @@ impl Wake for WakeCount {
 }
 
 enum Failure {
-    None,
     Create,
     Read,
     Write,
@@ -100,52 +96,11 @@ struct FailingFiles {
     failure: Failure,
 }
 
-impl File for FailingFiles {
-    type File = <simulated::Scheduler as File>::File;
-    type Metadata = <simulated::Scheduler as File>::Metadata;
-    async fn file_close(&self, file: Self::File) -> io::Result<()> {
-        self.scheduler.file_close(file).await
-    }
-    async fn file_close_submit(&self, file: Self::File) -> io::Result<()> {
-        self.scheduler.file_close_submit(file).await
-    }
+impl FileOperation for FailingFiles {
+    type File = <simulated::Scheduler as FileOperation>::File;
+}
 
-    async fn file_truncate(
-        &self,
-        file: &Self::File,
-        length: u64,
-        cancellation: &Cancellation,
-    ) -> OperationResult<()> {
-        self.scheduler
-            .file_truncate(file, length, cancellation)
-            .await
-    }
-
-    async fn file_stat(
-        &self,
-        file: &Self::File,
-        cancellation: &Cancellation,
-    ) -> OperationResult<Self::Metadata> {
-        self.scheduler.file_stat(file, cancellation).await
-    }
-    async fn file_sync(
-        &self,
-        file: &Self::File,
-        mode: SyncMode,
-        cancellation: &Cancellation,
-    ) -> OperationResult<()> {
-        self.scheduler.file_sync(file, mode, cancellation).await
-    }
-
-    async fn file_seek(
-        &self,
-        file: &Self::File,
-        position: std::io::SeekFrom,
-        cancellation: &Cancellation,
-    ) -> OperationResult<u64> {
-        self.scheduler.file_seek(file, position, cancellation).await
-    }
-
+impl FileOpen for FailingFiles {
     async fn file_open(
         &self,
         path: &Path,
@@ -157,25 +112,9 @@ impl File for FailingFiles {
         }
         self.scheduler.file_open(path, mode, cancellation).await
     }
+}
 
-    async fn file_read<B: IoBufMut>(
-        &self,
-        file: &Self::File,
-        buffer: B,
-        cancellation: &Cancellation,
-    ) -> socketry_executor::BufferResult<B> {
-        self.scheduler.file_read(file, buffer, cancellation).await
-    }
-
-    async fn file_write<B: IoBuf>(
-        &self,
-        file: &Self::File,
-        buffer: B,
-        cancellation: &Cancellation,
-    ) -> socketry_executor::BufferResult<B> {
-        self.scheduler.file_write(file, buffer, cancellation).await
-    }
-
+impl FileReadAt for FailingFiles {
     async fn file_read_at<B: IoBufMut>(
         &self,
         file: &Self::File,
@@ -193,7 +132,9 @@ impl File for FailingFiles {
             .file_read_at(file, buffer, offset, cancellation)
             .await
     }
+}
 
+impl FileWriteAt for FailingFiles {
     async fn file_write_at<B: IoBuf>(
         &self,
         file: &Self::File,

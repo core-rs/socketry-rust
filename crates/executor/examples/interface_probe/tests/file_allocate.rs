@@ -1,9 +1,8 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use socketry_executor::{
-    AllocationMode, Cancellation, File, FileAllocate, FileOptions, OperationError,
-};
+use socketry_executor::{AllocationMode, Cancellation, FileAllocate, FileOptions, OperationError};
+use socketry_executor::{FileOpen, FileRead, FileSeek, FileWrite};
 use std::{
     io::{self, SeekFrom},
     path::Path,
@@ -11,7 +10,7 @@ use std::{
 
 static NEVER: Cancellation = Cancellation::never();
 
-async fn contents<S: File>(scheduler: &S, path: &Path) -> Vec<u8> {
+async fn contents<S: FileOpen + FileRead>(scheduler: &S, path: &Path) -> Vec<u8> {
     let reader = scheduler
         .file_open(path, FileOptions::READ, &NEVER)
         .await
@@ -27,7 +26,10 @@ async fn contents<S: File>(scheduler: &S, path: &Path) -> Vec<u8> {
     }
 }
 
-pub async fn check<S: FileAllocate>(scheduler: &S, root: &Path) {
+pub async fn check<S: FileAllocate + FileOpen + FileRead + FileSeek + FileWrite>(
+    scheduler: &S,
+    root: &Path,
+) {
     let path = root.join("allocate");
     let file = scheduler
         .file_open(&path, FileOptions::CREATE, &NEVER)

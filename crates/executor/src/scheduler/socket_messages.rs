@@ -2,12 +2,12 @@
 // Copyright, 2026, by Samuel Williams.
 
 use crate::{
-    Cancellation, IoBuf, IoBufMut, OperationResult, Socket, SocketMessage, SocketRecvFlags,
-    SocketRecvResult, SocketSendFlags,
+    Cancellation, IoBuf, IoBufMut, OperationResult, SocketMessage, SocketRecvFlags,
+    SocketRecvResult, SocketScheduler, SocketSendFlags,
 };
 use std::future::Future;
 
-/// Scatter/gather message I/O with IP addresses. Generic consumers require this capability separately from `Socket`.
+/// Scatter/gather message I/O with IP addresses. Generic consumers require this capability separately from `SocketScheduler`.
 ///
 /// Operations are lazy, check cancellation before I/O, and return the original buffer owners on every result. Cancellation can race successful progress; success wins. Completion backends retain payload and native metadata until the original operation's terminal completion, including after waiter abandonment. Cancel and await outstanding operations before explicit close.
 ///
@@ -16,12 +16,12 @@ use std::future::Future;
 /// This capability carries payload and IP addresses only. It cannot send ancillary data and supplies no receive control storage. Unix reports `MSG_CTRUNC` through the result; the Windows payload/address fallback cannot observe control metadata. Ancillary data requires a separate capability rather than silent emulation. Unsupported flags are not part of this portable interface.
 /// A socket backend must explicitly implement message support:
 /// ```compile_fail
-/// use socketry_executor::{Cancellation, Socket, SocketMessages, SocketRecvFlags};
-/// async fn receive<S: Socket>(scheduler: &S, socket: &S::Socket) {
+/// use socketry_executor::{Cancellation, SocketScheduler, SocketMessages, SocketRecvFlags};
+/// async fn receive<S: SocketScheduler>(scheduler: &S, socket: &S::Socket) {
 ///     scheduler.socket_recvmsg(socket, vec![vec![0; 1024]], SocketRecvFlags::default(), &Cancellation::never()).await;
 /// }
 /// ```
-pub trait SocketMessages: Socket {
+pub trait SocketMessages: SocketScheduler {
     fn socket_sendmsg<B: IoBuf>(
         &self,
         socket: &Self::Socket,

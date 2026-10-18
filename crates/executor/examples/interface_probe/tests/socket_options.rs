@@ -2,8 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 use socketry_executor::{
-    Cancellation, OperationError, Socket, SocketDomain, SocketKeepalive, SocketOption,
-    SocketOptions, SocketReuseAddress, SocketType, TcpNoDelay,
+    Cancellation, OperationError, SocketDomain, SocketKeepalive, SocketOption, SocketOptions,
+    SocketReuseAddress, SocketScheduler, SocketType, TcpNoDelay,
 };
 
 async fn round_trip<S, O>(scheduler: &S, socket: &S::Socket, option: O)
@@ -50,7 +50,7 @@ where
     );
 }
 
-async fn open<S: Socket>(scheduler: &S) -> S::Socket {
+async fn open<S: SocketScheduler>(scheduler: &S) -> S::Socket {
     scheduler
         .socket_open(
             SocketDomain::Ipv4,

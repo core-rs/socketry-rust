@@ -1,15 +1,16 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The same generic application using the public File, Socket, and AddressResolution capabilities.
+//! The same generic application using the public FileScheduler, SocketScheduler, and AddressResolution capabilities.
 //! Run with `--features tokio` for native, Tokio, and simulated I/O.
 //! With `--no-default-features`, only the in-memory implementation runs.
 #[path = "interface_probe/simulated.rs"]
 mod simulated;
 
 use socketry_executor::{
-    AddressHints, AddressResolution, AddressService, Cancellation, File, FileOptions, IoBuf,
-    OperationResult, Socket, SocketDomain, SocketProtocol, SocketType,
+    AddressHints, AddressResolution, AddressService, Cancellation, FileOpen, FileOptions,
+    FileReadAt, FileScheduler, FileWriteAt, IoBuf, OperationResult, SocketDomain, SocketProtocol,
+    SocketScheduler, SocketType,
 };
 use std::{io, path::Path};
 static NEVER: Cancellation = Cancellation::never();
@@ -18,7 +19,7 @@ const PAYLOAD: &[u8] = b"Explicit schedulers keep protocol code portable.\n";
 const BUFFER_SIZE: usize = 16;
 
 /// Application code only sees the backend's associated resources.
-async fn copy<S: File>(
+async fn copy<S: FileOpen + FileReadAt + FileWriteAt>(
     scheduler: &S,
     source: &Path,
     destination: &Path,
@@ -62,7 +63,7 @@ async fn copy<S: File>(
     }
 }
 
-async fn send_all<S: Socket>(
+async fn send_all<S: SocketScheduler>(
     scheduler: &S,
     socket: &S::Socket,
     mut buffer: Vec<u8>,
@@ -84,7 +85,7 @@ async fn send_all<S: Socket>(
 }
 
 /// Serve one connection until peer EOF, echoing each received prefix.
-async fn serve<S: Socket>(scheduler: &S, listener: &S::Socket) -> OperationResult<usize> {
+async fn serve<S: SocketScheduler>(scheduler: &S, listener: &S::Socket) -> OperationResult<usize> {
     let (socket, _) = scheduler.socket_accept(listener, &NEVER).await?;
     let mut total = 0;
     loop {
@@ -101,7 +102,7 @@ async fn serve<S: Socket>(scheduler: &S, listener: &S::Socket) -> OperationResul
     }
 }
 
-async fn exchange<S: Socket + AddressResolution>(scheduler: &S) -> OperationResult<()> {
+async fn exchange<S: SocketScheduler + AddressResolution>(scheduler: &S) -> OperationResult<()> {
     let address = "127.0.0.1:0".parse().unwrap();
     let listener = scheduler
         .socket_open(
@@ -166,7 +167,7 @@ async fn exchange<S: Socket + AddressResolution>(scheduler: &S) -> OperationResu
     Ok(())
 }
 
-async fn exercise<S: File + Socket + AddressResolution>(
+async fn exercise<S: FileScheduler + SocketScheduler + AddressResolution>(
     scheduler: &S,
     source: &Path,
     destination: &Path,

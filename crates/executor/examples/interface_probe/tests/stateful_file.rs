@@ -1,12 +1,13 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use socketry_executor::{Cancellation, File, FileOptions, IoBuf, OperationError};
+use socketry_executor::{Cancellation, FileOptions, IoBuf, OperationError};
+use socketry_executor::{FileOpen, FileRead, FileReadAt, FileSeek, FileWrite, FileWriteAt};
 use std::{io::SeekFrom, path::Path};
 
 static NEVER: Cancellation = Cancellation::never();
 
-async fn write_all<S: File>(scheduler: &S, file: &S::File, bytes: &[u8]) {
+async fn write_all<S: FileWrite>(scheduler: &S, file: &S::File, bytes: &[u8]) {
     let mut buffer = bytes.to_vec();
     let allocation = buffer.as_ptr();
     let mut offset = 0;
@@ -23,7 +24,7 @@ async fn write_all<S: File>(scheduler: &S, file: &S::File, bytes: &[u8]) {
     }
 }
 
-async fn read_all<S: File>(scheduler: &S, file: &S::File) -> Vec<u8> {
+async fn read_all<S: FileRead>(scheduler: &S, file: &S::File) -> Vec<u8> {
     let mut output = Vec::new();
     let mut buffer = vec![255; 6].into_boxed_slice();
     let allocation = buffer.as_ptr();
@@ -44,7 +45,10 @@ async fn read_all<S: File>(scheduler: &S, file: &S::File) -> Vec<u8> {
     output
 }
 
-pub async fn check<S: File>(scheduler: &S, root: &Path) {
+pub async fn check<S: FileOpen + FileRead + FileReadAt + FileSeek + FileWrite + FileWriteAt>(
+    scheduler: &S,
+    root: &Path,
+) {
     check_seek(scheduler, root).await;
     let path = root.join("stateful");
     let file = scheduler
@@ -189,7 +193,10 @@ pub async fn check<S: File>(scheduler: &S, root: &Path) {
     }
 }
 
-async fn check_seek<S: File>(scheduler: &S, root: &Path) {
+async fn check_seek<S: FileOpen + FileRead + FileReadAt + FileSeek + FileWrite + FileWriteAt>(
+    scheduler: &S,
+    root: &Path,
+) {
     let path = root.join("seek");
     let file = scheduler
         .file_open(

@@ -3,11 +3,11 @@
 
 // Bring these types and traits into scope.
 //
-// Traits such as `Socket`, `Signals`, and `IoBuf` provide methods used below. Importing a trait makes its methods available on implementing types.
+// Traits such as `SocketScheduler`, `Signals`, and `IoBuf` provide methods used below. Importing a trait makes its methods available on implementing types.
 #[cfg(unix)]
 use socketry::{
-    Cancellation, IoBuf, OperationError, OperationResult, Scheduler, Signals, Socket, SocketDomain,
-    SocketProtocol, SocketType, signal::SIGINT,
+    Cancellation, IoBuf, OperationError, OperationResult, Scheduler, Signals, SocketDomain,
+    SocketProtocol, SocketScheduler, SocketType, signal::SIGINT,
 };
 
 #[cfg(unix)]
@@ -15,7 +15,7 @@ use std::io;
 
 // `async fn` returns a future. Its body runs when that future is polled.
 //
-// `<S: Socket>` means this function works with any scheduler type `S` implementing the `Socket` capability.
+// `<S: SocketScheduler>` means this function works with any scheduler type `S` implementing the `SocketScheduler` capability.
 //
 // `&S` borrows the scheduler instead of taking ownership.
 //
@@ -28,7 +28,7 @@ use std::io;
 // - `Ok(())`: succeeded, with no meaningful return value.
 // - `Err(error)`: failed or was cancelled.
 #[cfg(unix)]
-async fn echo<S: Socket>(
+async fn echo<S: SocketScheduler>(
     scheduler: &S,
     socket: S::Socket,
     shutdown: &Cancellation,

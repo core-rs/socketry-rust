@@ -187,27 +187,33 @@ Queues allocate backing storage as needed. Rescheduling reuses the existing task
 
 ## I/O and selectors
 
-The public `scheduler` module contains portable `Socket`, `File`, and `Clock` traits, the Socketry implementation in `socketry.rs`, the optional Tokio adapter in `tokio.rs`, and native implementations under `selector/`.
+File capabilities are split by operation: `FileOperation` selects the associated resource type, and `FileOpen`, `FileClose`, `FileStat`, `FileTruncate`, `FileSync`, `FileSeek`, `FileRead`, `FileWrite`, `FileReadAt`, and `FileWriteAt` supply the core operations. Optional `FileAllocate` and `FileAdvice` depend only on `FileOperation`. `FileStat` separately selects its metadata output. The `FileScheduler` aggregate is implemented automatically for schedulers providing every core file capability; consumers can instead require only what they use, such as `FileRead + FileWrite`.
+
+When migrating an implementation, move `type File` from the former `impl File` into `impl FileOperation`, move `type Metadata` and `file_stat` into `impl FileStat`, and move each remaining method into its operation trait implementation. Do not implement `FileScheduler` explicitly. Fully qualified paths become `<S as FileOperation>::File`, `<S as FileStat>::Metadata`, and operation paths such as `FileRead::file_read`. For method calls on concrete schedulers, import the relevant operation traits; importing `FileScheduler` alone is insufficient. Generic functions bounded by `S: FileScheduler` still see every core method. Bounds on `FileAdvice` or `FileAllocate` now require explicit additional capabilities when the function also opens, reads, or closes files.
+
+The broad file and socket traits are named `FileScheduler` and `SocketScheduler`, replacing `File` and `Socket`. Update aggregate bounds and imports accordingly. Socket implementations use `impl SocketScheduler` and `<S as SocketScheduler>::Socket`; the operation-level socket split remains follow-up work, so this trait still declares its methods directly. Individual operation traits and resource names are unchanged.
+
+The public `scheduler` module contains portable `SocketScheduler`, `FileScheduler`, and `Clock` traits, the Socketry implementation in `socketry.rs`, the optional Tokio adapter in `tokio.rs`, and native implementations under `selector/`.
 
 - `native` (default) supplies nonblocking IPv4/IPv6 stream and datagram sockets through async-io's process-wide reactor: epoll on Linux, kqueue on Apple/BSD, and IOCP/AFD socket readiness on Windows. The three platform modules expose the shared implementation; they do not duplicate its registration machinery.
 - `io-uring` selects a dedicated Linux completion selector for socket and file reads/writes. Connection setup, accept, readiness and timers use async-io. On other supported platforms this feature leaves the platform default intact.
 - `tokio` adds an adapter using a supplied `tokio::runtime::Handle`. It uses Tokio `AsyncFd` on Unix. Windows uses async-io's process-wide reactor for generic socket readiness because Tokio has no matching generic socket wrapper; this fallback is not driven by Tokio's I/O driver. The adapter does not construct or drive a runtime. Enable that runtime's I/O and time facilities for the operations that use it.
 - With default features disabled, the executor and public contracts still build. Enabling only `tokio` omits the native blocking and io\_uring backends; async-io remains a dependency for Tokio's generic Windows socket-readiness fallback.
 
-`Scheduler` and `SchedulerHandle` implement the traits. `file_open` returns `File::File`; `socket_open` returns the backend's single associated socket resource, `Socket::Socket`. Call `socket_bind` and then `socket_listen(socket, backlog, cancellation)` to listen, or `socket_connect(socket, address, cancellation)` to connect an opened socket. `socket_accept` returns another resource of the same type. Native and Tokio use non-`Clone` `SocketDescriptor` values. Importing existing standard-library TCP resources uses the separate optional `SocketRegistration` trait. Returned operation futures are Send. Registrations remain with their original reactor as tasks migrate; they are not re-created per poll. Tokio resources passed to an adapter for another runtime return InvalidInput.
+`Scheduler` and `SchedulerHandle` implement the traits. `file_open` returns `FileOperation::File`; `socket_open` returns the backend's single associated socket resource, `SocketScheduler::Socket`. Call `socket_bind` and then `socket_listen(socket, backlog, cancellation)` to listen, or `socket_connect(socket, address, cancellation)` to connect an opened socket. `socket_accept` returns another resource of the same type. Native and Tokio use non-`Clone` `SocketDescriptor` values. Importing existing standard-library TCP resources uses the separate optional `SocketRegistration` trait. Returned operation futures are Send. Registrations remain with their original reactor as tasks migrate; they are not re-created per poll. Tokio resources passed to an adapter for another runtime return InvalidInput.
 
-The initial API selects IPv4 or IPv6, stream or datagram, and an optional TCP or UDP protocol. Connected datagram reads and writes preserve message boundaries. The higher-level `Socket` trait deliberately does not provide protocol buffering: line, frame, and message semantics belong in protocol adapters built above it. Generic static dispatch is the default, with dynamic dispatch available to consumers that need runtime selection or type erasure.
+The initial API selects IPv4 or IPv6, stream or datagram, and an optional TCP or UDP protocol. Connected datagram reads and writes preserve message boundaries. The higher-level `SocketScheduler` trait deliberately does not provide protocol buffering: line, frame, and message semantics belong in protocol adapters built above it. Generic static dispatch is the default, with dynamic dispatch available to consumers that need runtime selection or type erasure.
 
 Read/write operations take an owned `IoBuf` (`IoBufMut` for reads) and return `BufferResult<B> = (OperationResult<usize>, B)`, including errors and cancellation. `OperationError` distinguishes `Cancelled` and `Io`. `Vec<u8>` and `Box<[u8]>` are supported. `buffer.slice(range)` creates an owned `BufferSlice` without copying; `into_inner()` recovers its original owner for reuse. Read buffers must have an initialized length (`vec![0; capacity]`); capacity alone supplies no writable bytes. Buffer length is unchanged; only the first returned byte count contains new data. Reads and writes can be partial. Each read/write call is one operation, not a read-exact/write-all convenience method.
 
-`File::file_read` and `file_write` borrow `&Self::File` and advance its shared cursor by the transferred byte count. `file_read_at` and `file_write_at` take an explicit offset instead. Await cursor operations sequentially when ordering matters; concurrent calls have no portable ordering or non-overlap guarantee. Dropping an admitted operation can still advance the cursor. Each call can transfer fewer bytes than requested, and a read returns zero at EOF. `file_open(path, FileOptions, cancellation)` creates the associated resource. Current native/Tokio backends internally retain an `Arc<std::fs::File>`; generic callers do not require that representation. The readiness and Tokio implementations use blocking pools; io\_uring uses current-position SQEs for stateful access. There is no scheduler-side cursor or extra per-file locking. Use ordinary files opened without append mode, and offsets fitting i64. Unix positioned operations leave the shared cursor unchanged; the Windows blocking fallback updates it according to std's seek\_read/seek\_write semantics.
+`FileRead::file_read` and `file_write` borrow `&Self::File` and advance its shared cursor by the transferred byte count. `file_read_at` and `file_write_at` take an explicit offset instead. Await cursor operations sequentially when ordering matters; concurrent calls have no portable ordering or non-overlap guarantee. Dropping an admitted operation can still advance the cursor. Each call can transfer fewer bytes than requested, and a read returns zero at EOF. `file_open(path, FileOptions, cancellation)` creates the associated resource. Current native/Tokio backends internally retain an `Arc<std::fs::File>`; generic callers do not require that representation. The readiness and Tokio implementations use blocking pools; io\_uring uses current-position SQEs for stateful access. There is no scheduler-side cursor or extra per-file locking. Use ordinary files opened without append mode, and offsets fitting i64. Unix positioned operations leave the shared cursor unchanged; the Windows blocking fallback updates it according to std's seek\_read/seek\_write semantics.
 
-`file_stat(file, cancellation)` queries an open file without changing its cursor. It returns owned `File::Metadata`; import `FileMetadata` to use its portable accessors. Fields may be unavailable, and timestamps may be unrepresentable, so accessors return `Option`. Results can reflect concurrent modifications and are not atomic snapshots. Await preceding operations when ordering matters. Querying requires no write permission, and the result remains usable after the file is closed.
+`file_stat(file, cancellation)` queries an open file without changing its cursor. It returns owned `FileStat::Metadata`; import `FileMetadata` to use its portable accessors. Fields may be unavailable, and timestamps may be unrepresentable, so accessors return `Option`. Results can reflect concurrent modifications and are not atomic snapshots. Await preceding operations when ordering matters. Querying requires no write permission, and the result remains usable after the file is closed.
 
 ```rust
-use socketry_executor::{Cancellation, File, FileMetadata, OperationResult};
+use socketry_executor::{Cancellation, FileStat, FileMetadata, OperationResult};
 
-async fn size<S: File>(scheduler: &S, file: &S::File, cancellation: &Cancellation) -> OperationResult<Option<u64>> {
+async fn size<S: FileStat>(scheduler: &S, file: &S::File, cancellation: &Cancellation) -> OperationResult<Option<u64>> {
     let metadata = scheduler.file_stat(file, cancellation).await?;
     Ok(metadata.size())
 }
@@ -222,9 +228,9 @@ Readiness and Tokio retain `std::fs::Metadata` in `SystemFileMetadata`; `as_std(
 Truncation uses native io\_uring requests when supported by the running kernel, with the blocking file fallback otherwise. Readiness and Tokio use their existing file-operation pools. Cancellation is checked before dispatch and again by blocking workers before execution; started blocking calls preserve their result. Ring cancellation is best effort and waits for the original completion. Dropping a waiter does not undo a resize or release a file still in use by the backend.
 
 ```rust,no_run
-use socketry_executor::{Cancellation, File, OperationResult};
+use socketry_executor::{Cancellation, FileTruncate, OperationResult};
 
-async fn resize<S: File>(
+async fn resize<S: FileTruncate>(
     scheduler: &S,
     file: &S::File,
     length: u64,
@@ -269,9 +275,9 @@ async fn reserve<S: FileAllocate>(
 io\_uring uses native `Fsync` requests; readiness and Tokio use their existing blocking file pools. Cancellation before dispatch prevents submission, and blocking workers check again before starting. Once submitted, cancellation is best effort; a successful completion wins concurrent cancellation. Dropping a waiter does not undo the operation or release a file still in use by the backend.
 
 ```rust,no_run
-use socketry_executor::{Cancellation, File, OperationResult, SyncMode};
+use socketry_executor::{Cancellation, FileSync, OperationResult, SyncMode};
 
-async fn synchronize<S: File>(
+async fn synchronize<S: FileSync>(
     scheduler: &S,
     file: &S::File,
     cancellation: &Cancellation,
@@ -283,9 +289,9 @@ async fn synchronize<S: File>(
 Repeated calls to `file_read` continue from the position reached by the previous call. For example, this helper returns one chunk, which can be shorter than 4096 bytes:
 
 ```rust
-use socketry_executor::{Cancellation, File, OperationResult};
+use socketry_executor::{Cancellation, FileRead, OperationResult};
 
-async fn read_chunk<S: File>(
+async fn read_chunk<S: FileRead>(
     scheduler: &S,
     file: &S::File,
     cancellation: &Cancellation,
@@ -299,10 +305,10 @@ async fn read_chunk<S: File>(
 To rewind an existing file and read from its beginning:
 
 ```rust
-use socketry_executor::{Cancellation, File, OperationResult};
+use socketry_executor::{Cancellation, FileRead, FileSeek, OperationResult};
 use std::io::SeekFrom;
 
-async fn read_header<S: File>(
+async fn read_header<S: FileRead + FileSeek>(
     scheduler: &S,
     file: &S::File,
     cancellation: &Cancellation,
@@ -318,9 +324,9 @@ async fn read_header<S: File>(
 
 ### Explicit file close
 
-`File::file_close(file).await` consumes the handle, waits for bounded admission and OS completion, and reports close errors. `file_close_submit(file).await` waits only for admission; accepted work finishes even if its waiter is dropped, and graceful scheduler shutdown drains it. Neither form takes a cancellation token. Close does not synchronize data and does not retry an OS close error. `_submit` execution errors are discarded in the current backends.
+`FileClose::file_close(file).await` consumes the handle, waits for bounded admission and OS completion, and reports close errors. `file_close_submit(file).await` waits only for admission; accepted work finishes even if its waiter is dropped, and graceful scheduler shutdown drains it. Neither form takes a cancellation token. Close does not synchronize data and does not retry an OS close error. `_submit` execution errors are discarded in the current backends.
 
-Native and Tokio resources are owned, non-`Clone` `FileDescriptor` values with private backend retention. Existing concrete callers using `Arc<std::fs::File>` must instead move an OS file into `FileDescriptor::from(file)` or use `file_open`. `AsRef<std::fs::File>` permits synchronous platform access; generic consumers continue to use `S::File`. External `File` implementations must provide both close methods.
+Native and Tokio resources are owned, non-`Clone` `FileDescriptor` values with private backend retention. Existing concrete callers using `Arc<std::fs::File>` must instead move an OS file into `FileDescriptor::from(file)` or use `file_open`. `AsRef<std::fs::File>` permits synchronous platform access; generic consumers continue to use `S::File`. `FileClose` implementations provide both close methods.
 
 Finish outstanding operations before explicit close. Request cancellation, keep awaiting the operation, then close; dropping its future alone does not establish that the kernel or blocking worker has finished. Closing a handle still retained by an abandoned operation panics. Ordinary `Drop` is a fallback that releases ownership and discards close errors without joining outstanding operations.
 
@@ -346,11 +352,11 @@ The [commented half-close example](examples/socket_shutdown.rs) demonstrates a r
 cargo run -p socketry-executor --example socket_shutdown --features tokio
 ```
 
-External `Socket` implementations must provide `socket_shutdown`, `socket_shutdown_submit`, `socket_close`, and `socket_close_submit`.
+External `SocketScheduler` implementations must provide `socket_shutdown`, `socket_shutdown_submit`, `socket_close`, and `socket_close_submit`.
 
 ### Typed socket options
 
-Require `SocketOptions<O>` for each option your generic code needs. `SocketReuseAddress`, `SocketKeepalive`, and `TcpNoDelay` are typed identifiers with boolean values, implemented by native and Tokio schedulers/handles and the native selectors. This is an extension of `Socket`; existing implementations need not support every option.
+Require `SocketOptions<O>` for each option your generic code needs. `SocketReuseAddress`, `SocketKeepalive`, and `TcpNoDelay` are typed identifiers with boolean values, implemented by native and Tokio schedulers/handles and the native selectors. This is an extension of `SocketScheduler`; existing implementations need not support every option.
 
 ```rust,no_run
 use socketry_executor::{Cancellation, OperationResult, SocketOptions, TcpNoDelay};
@@ -407,7 +413,7 @@ cargo test -p socketry-executor --example interface_probe --features tokio
 cargo run -p socketry-executor --example interface_probe --no-default-features
 ```
 
-It uses the exported `File` and `Socket` traits, associated resources, cancellation, and owned buffer views. Its in-memory implementation supplies the same capabilities without importing OS descriptors. See the [design findings](design.md#executable-interface-experiment) for results and remaining contracts.
+It uses the exported `FileScheduler` and `SocketScheduler` traits, associated resources, cancellation, and owned buffer views. Its in-memory implementation supplies the same capabilities without importing OS descriptors. See the [design findings](design.md#executable-interface-experiment) for results and remaining contracts.
 
 ## Preserved prototype
 

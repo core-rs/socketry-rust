@@ -6,13 +6,18 @@
 //! Run with `cargo run -p socketry-executor --example file_close`. Add `--features tokio` to also exercise the Tokio adapter, or `--features io-uring` on Linux for native completion I/O.
 
 #[cfg(any(feature = "native", feature = "tokio"))]
-use socketry_executor::{Cancellation, File, FileOptions, OperationResult, yield_now};
+use socketry_executor::{
+    Cancellation, FileClose, FileOpen, FileOptions, FileRead, OperationResult, yield_now,
+};
 use std::io;
 #[cfg(any(feature = "native", feature = "tokio"))]
 use std::path::Path;
 
 #[cfg(any(feature = "native", feature = "tokio"))]
-async fn read_then_close<S: File>(scheduler: &S, path: &Path) -> OperationResult<usize> {
+async fn read_then_close<S: FileOpen + FileRead + FileClose>(
+    scheduler: &S,
+    path: &Path,
+) -> OperationResult<usize> {
     let file = scheduler
         .file_open(path, FileOptions::READ, &Cancellation::never())
         .await?;

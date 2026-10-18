@@ -6,11 +6,16 @@
 //! Run with `cargo run -p socketry-executor --example file_stat`. Add `--features tokio` for the Tokio adapter, or `--features io-uring` on Linux for native `statx` completion.
 
 #[cfg(any(feature = "native", feature = "tokio"))]
-use socketry_executor::{Cancellation, File, FileMetadata, FileOptions, OperationResult};
+use socketry_executor::{
+    Cancellation, FileClose, FileMetadata, FileOpen, FileOptions, FileStat, OperationResult,
+};
 use std::io;
 
 #[cfg(any(feature = "native", feature = "tokio"))]
-async fn inspect<S: File>(scheduler: &S, path: &std::path::Path) -> OperationResult<()> {
+async fn inspect<S: FileOpen + FileStat + FileClose>(
+    scheduler: &S,
+    path: &std::path::Path,
+) -> OperationResult<()> {
     // `never` is an explicit choice for this short example. A real application can pass its shared shutdown cancellation instead.
     let cancellation = Cancellation::never();
     let file = scheduler

@@ -6,14 +6,14 @@
 static NEVER: socketry_executor::Cancellation = socketry_executor::Cancellation::never();
 
 #[cfg(any(feature = "native", feature = "tokio"))]
-use socketry_executor::{Socket, SocketDomain, SocketProtocol, SocketType, Spawn};
+use socketry_executor::{SocketDomain, SocketProtocol, SocketScheduler, SocketType, Spawn};
 #[cfg(any(feature = "native", feature = "tokio"))]
 use std::io;
 
 #[cfg(any(feature = "native", feature = "tokio"))]
 async fn exchange<SchedulerType>(scheduler: SchedulerType) -> io::Result<u8>
 where
-    SchedulerType: Socket + Spawn + Clone + 'static,
+    SchedulerType: SocketScheduler + Spawn + Clone + 'static,
 {
     let listener = scheduler
         .socket_open(

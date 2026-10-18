@@ -4,13 +4,13 @@
 //! A small loopback request/response exchange framed by TCP half-close. Run with `cargo run -p socketry-executor --example socket_shutdown --features tokio` to exercise both native and Tokio backends.
 
 #[cfg(any(feature = "native", feature = "tokio"))]
-use socketry_executor::{Cancellation, IoBuf, Socket, SocketDomain, SocketType};
+use socketry_executor::{Cancellation, IoBuf, SocketDomain, SocketScheduler, SocketType};
 use std::io;
 #[cfg(any(feature = "native", feature = "tokio"))]
 use std::net::Shutdown;
 
 #[cfg(any(feature = "native", feature = "tokio"))]
-async fn send_all<S: Socket>(
+async fn send_all<S: SocketScheduler>(
     scheduler: &S,
     socket: &S::Socket,
     mut buffer: Vec<u8>,
@@ -33,7 +33,7 @@ async fn send_all<S: Socket>(
 }
 
 #[cfg(any(feature = "native", feature = "tokio"))]
-async fn receive_all<S: Socket>(
+async fn receive_all<S: SocketScheduler>(
     scheduler: &S,
     socket: &S::Socket,
     cancellation: &Cancellation,
@@ -53,7 +53,7 @@ async fn receive_all<S: Socket>(
 }
 
 #[cfg(any(feature = "native", feature = "tokio"))]
-async fn exchange<S: Socket>(scheduler: &S) -> io::Result<()> {
+async fn exchange<S: SocketScheduler>(scheduler: &S) -> io::Result<()> {
     // This example deliberately runs to completion. An application can pass its cooperative shutdown signal to reads and writes instead.
     let cancellation = Cancellation::never();
     let listener = scheduler

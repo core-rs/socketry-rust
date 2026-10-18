@@ -3,9 +3,13 @@
 
 //! In-memory files and duplex byte streams. No OS resources or native runtime.
 //! This is an interface probe, not a model of TCP scheduling or durability.
-use super::{Cancellation, File, FileOptions, OperationResult, Socket};
+use super::{Cancellation, FileOptions, OperationResult, SocketScheduler};
 use event_listener::Event;
 use socketry_executor::{AllocationMode, BufferResult, FileAllocate, SyncMode};
+use socketry_executor::{
+    FileClose, FileOpen, FileOperation, FileRead, FileReadAt, FileSeek, FileStat, FileSync,
+    FileTruncate, FileWrite, FileWriteAt,
+};
 use socketry_executor::{Interest, IoBuf, IoBufMut, SocketDomain, SocketProtocol, SocketType};
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, SeekFrom};
@@ -320,10 +324,11 @@ impl socketry_executor::FileAdvice for Scheduler {
     }
 }
 
-impl File for Scheduler {
+impl FileOperation for Scheduler {
     type File = FileDescriptor;
-    type Metadata = FileMetadata;
+}
 
+impl FileClose for Scheduler {
     async fn file_close(&self, file: Self::File) -> io::Result<()> {
         drop(file);
         Ok(())
@@ -332,7 +337,9 @@ impl File for Scheduler {
     async fn file_close_submit(&self, file: Self::File) -> io::Result<()> {
         self.file_close(file).await
     }
+}
 
+impl FileTruncate for Scheduler {
     async fn file_truncate(
         &self,
         file: &FileDescriptor,
@@ -353,6 +360,10 @@ impl File for Scheduler {
         file.bytes.lock().unwrap().resize(length as usize, 0);
         Ok(())
     }
+}
+
+impl FileStat for Scheduler {
+    type Metadata = FileMetadata;
 
     async fn file_stat(
         &self,
@@ -364,7 +375,9 @@ impl File for Scheduler {
             size: file.bytes.lock().unwrap().len() as u64,
         })
     }
+}
 
+impl FileSync for Scheduler {
     async fn file_sync(
         &self,
         _file: &Self::File,
@@ -374,7 +387,9 @@ impl File for Scheduler {
         cancellation.check()?;
         Ok(())
     }
+}
 
+impl FileSeek for Scheduler {
     async fn file_seek(
         &self,
         file: &FileDescriptor,
@@ -394,7 +409,9 @@ impl File for Scheduler {
         *cursor = position as u64;
         Ok(*cursor)
     }
+}
 
+impl FileOpen for Scheduler {
     async fn file_open(
         &self,
         path: &Path,
@@ -425,7 +442,9 @@ impl File for Scheduler {
             readable: options.read,
         })
     }
+}
 
+impl FileRead for Scheduler {
     async fn file_read<B: IoBufMut>(
         &self,
         file: &FileDescriptor,
@@ -439,7 +458,9 @@ impl File for Scheduler {
         }
         (result, buffer)
     }
+}
 
+impl FileReadAt for Scheduler {
     async fn file_read_at<B: IoBufMut>(
         &self,
         file: &FileDescriptor,
@@ -449,6 +470,9 @@ impl File for Scheduler {
     ) -> BufferResult<B> {
         self.read_file_at(file, buffer, offset, cancellation)
     }
+}
+
+impl FileWrite for Scheduler {
     async fn file_write<B: IoBuf>(
         &self,
         file: &FileDescriptor,
@@ -462,7 +486,9 @@ impl File for Scheduler {
         }
         (result, buffer)
     }
+}
 
+impl FileWriteAt for Scheduler {
     async fn file_write_at<B: IoBuf>(
         &self,
         file: &FileDescriptor,
@@ -474,7 +500,7 @@ impl File for Scheduler {
     }
 }
 
-impl Socket for Scheduler {
+impl SocketScheduler for Scheduler {
     type Socket = SocketDescriptor;
     async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
         drop(socket);

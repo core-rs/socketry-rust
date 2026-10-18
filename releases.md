@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Split file capabilities into `FileOperation` for the shared resource type and individual operation traits, with `FileScheduler` as a blanket convenience aggregate. Rename the broad `File` and `Socket` traits to `FileScheduler` and `SocketScheduler`. `FileStat` owns the metadata type; optional `FileAllocate` and `FileAdvice` no longer require all file operations. Implementors must migrate `impl File` to the individual traits and rename `impl Socket` to `impl SocketScheduler`; concrete file callers must import the operation traits. Fully qualified associated types move to `FileOperation::File`, `FileStat::Metadata`, and `SocketScheduler::Socket`. Update native, Tokio, simulated implementations, examples, and capability-focused contracts.
+
 - Add optional Linux `FileAdvice` with six `AdviceMode` hints and completion/admission-only `file_advise` forms. Native, Tokio, and io_uring schedulers use bounded cleanup admission, retain descriptors through execution, and drain accepted jobs during graceful shutdown. Include simulator contracts and a commented example.
 
 - Add required `File::file_stat` and associated `File::Metadata: FileMetadata`, returning owned status with portable optional accessors. Readiness/Tokio retain standard metadata; io_uring requires `Statx` support and retains native output inside its request allocation. Add shared contracts, completion-lifetime tests, and a commented example. External `File` implementations must add the associated type and operation.

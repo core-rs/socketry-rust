@@ -1,14 +1,32 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use super::File;
+use super::FileOperation;
 use crate::AdviceMode;
 use std::{future::Future, io};
 
 /// Optional file advice capability, following Linux `posix_fadvise` semantics.
 ///
 /// Native and Tokio implementations currently provide this capability on Linux. Other targets omit the implementation so consumers can require it at compile time. The OS may ignore advice; success promises neither prefetch completion nor eviction. Filesystem-specific errors are preserved.
-pub trait FileAdvice: File {
+///
+/// An advice-only adapter does not need to forward the core file operations:
+///
+/// ```
+/// use socketry_executor::{AdviceMode, FileAdvice, FileOperation};
+/// struct AdviceOnly<S>(S);
+/// impl<S: FileAdvice> FileOperation for AdviceOnly<S> {
+///     type File = S::File;
+/// }
+/// impl<S: FileAdvice> FileAdvice for AdviceOnly<S> {
+///     async fn file_advise(&self, file: &Self::File, offset: u64, length: u64, advice: AdviceMode) -> std::io::Result<()> {
+///         self.0.file_advise(file, offset, length, advice).await
+///     }
+///     async fn file_advise_submit(&self, file: &Self::File, offset: u64, length: u64, advice: AdviceMode) -> std::io::Result<()> {
+///         self.0.file_advise_submit(file, offset, length, advice).await
+///     }
+/// }
+/// ```
+pub trait FileAdvice: FileOperation {
     /// Apply an access or cache hint and await OS completion, reporting admission and execution errors. A zero length means from `offset` through EOF; otherwise the range is `[offset, offset + length)`. The offset and range end must fit in `i64`, or admission fails with `InvalidInput`.
     ///
     /// Access-policy hints may affect the whole open file description rather than only the supplied range.

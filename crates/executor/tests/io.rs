@@ -8,7 +8,8 @@ mod support;
 static NEVER: socketry_executor::Cancellation = socketry_executor::Cancellation::never();
 
 use socketry_executor::{
-    Clock, File, Interest, OperationResult, Socket, SocketDomain, SocketProtocol, SocketType, Spawn,
+    Clock, FileScheduler, Interest, OperationResult, SocketDomain, SocketProtocol, SocketScheduler,
+    SocketType, Spawn,
 };
 use socketry_executor::{SocketRegistration, SyncMode};
 use std::fs::File as StdFile;
@@ -52,7 +53,7 @@ fn socket_pair() -> (TcpStream, TcpStream) {
     (client, server)
 }
 
-async fn connect<S: Socket>(
+async fn connect<S: SocketScheduler>(
     scheduler: &S,
     address: SocketAddr,
     cancellation: &socketry_executor::Cancellation,
@@ -71,7 +72,7 @@ async fn connect<S: Socket>(
     Ok(socket)
 }
 
-async fn socket_variants<S: Socket>(scheduler: &S) {
+async fn socket_variants<S: SocketScheduler>(scheduler: &S) {
     let ipv4 = scheduler
         .socket_open(SocketDomain::Ipv4, SocketType::Stream, None, &NEVER)
         .await
@@ -121,7 +122,7 @@ fn error_kind<ResultType, Error: Into<io::Error>>(
 
 async fn round_trip<SchedulerType>(scheduler: SchedulerType)
 where
-    SchedulerType: Socket + SocketRegistration + Spawn + Clock + Clone + 'static,
+    SchedulerType: SocketScheduler + SocketRegistration + Spawn + Clock + Clone + 'static,
 {
     let (listener, address) = listening_socket();
     let listener = scheduler.register_listener(listener).unwrap();
@@ -170,7 +171,7 @@ where
 
 async fn cancel_pending_read<SchedulerType>(scheduler: &SchedulerType)
 where
-    SchedulerType: Socket + SocketRegistration + Clock,
+    SchedulerType: SocketScheduler + SocketRegistration + Clock,
 {
     let (client, server) = socket_pair();
     let socket = scheduler.register_socket(client).unwrap();
@@ -192,7 +193,7 @@ where
 
 async fn concurrent_datagram_reads<SchedulerType>(scheduler: SchedulerType)
 where
-    SchedulerType: Socket + Spawn + Clone + 'static,
+    SchedulerType: SocketScheduler + Spawn + Clone + 'static,
 {
     let socket = scheduler
         .socket_open(
@@ -266,7 +267,7 @@ impl Drop for TemporaryFile {
     }
 }
 
-async fn positioned_files<SchedulerType: File>(scheduler: &SchedulerType) {
+async fn positioned_files<SchedulerType: FileScheduler>(scheduler: &SchedulerType) {
     static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
         "socketry-io-{}-{}",
@@ -329,6 +330,10 @@ async fn positioned_files<SchedulerType: File>(scheduler: &SchedulerType) {
 #[cfg(feature = "native")]
 mod native {
     use super::*;
+    use socketry_executor::{
+        FileClose, FileOpen, FileRead, FileReadAt, FileSeek, FileStat, FileSync, FileTruncate,
+        FileWrite, FileWriteAt,
+    };
     use socketry_executor::{Scheduler, TaskError};
 
     #[test]
@@ -680,6 +685,10 @@ mod native {
 mod tokio_adapter {
     use super::*;
     use socketry_executor::scheduler::tokio::{Scheduler, SchedulerHandle};
+    use socketry_executor::{
+        FileClose, FileOpen, FileRead, FileReadAt, FileSeek, FileStat, FileSync, FileTruncate,
+        FileWrite, FileWriteAt,
+    };
     use socketry_executor::{SpawnError, TaskError};
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -1257,7 +1266,7 @@ fn ring_shutdown_racing_submissions_returns_owned_buffers() {
 }
 
 #[cfg(unix)]
-async fn sync_errors<S: File<File = socketry_executor::FileDescriptor>>(scheduler: &S) {
+async fn sync_errors<S: FileScheduler<File = socketry_executor::FileDescriptor>>(scheduler: &S) {
     use std::os::{fd::OwnedFd, unix::net::UnixStream};
     let (socket, _peer) = UnixStream::pair().unwrap();
     let file = socketry_executor::FileDescriptor::from(StdFile::from(OwnedFd::from(socket)));

@@ -7,7 +7,7 @@
 mod contracts;
 mod support;
 use socketry_executor::{
-    Cancellation, Socket, SocketDomain, SocketMessage, SocketMessages, SocketRecvFlags,
+    Cancellation, SocketDomain, SocketMessage, SocketMessages, SocketRecvFlags, SocketScheduler,
     SocketSendFlags, SocketType,
 };
 use std::io;

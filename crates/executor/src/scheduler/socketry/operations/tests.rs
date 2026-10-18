@@ -245,3 +245,33 @@ fn socket_cleanup_preserves_admitted_jobs_and_bounds_admission() {
         });
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn advice_preserves_accepted_jobs_and_bounds_admission() {
+    use crate::scheduler::file_advice_io::tests::{accepted, closed, saturated};
+    use futures_lite::future::block_on;
+    for mode in 0..3 {
+        let capacity = if mode == 2 { 1 } else { 2 };
+        let scheduler = Scheduler::with_workers_and_blocking(
+            1,
+            crate::BlockingOptions {
+                threads: 1,
+                capacity,
+            },
+        )
+        .unwrap();
+        let handle = scheduler.handle();
+        block_on(async {
+            let pool = &handle.shared.cleanup;
+            if mode < 2 {
+                accepted(&handle, pool, mode == 1).await;
+            } else {
+                saturated(&handle, pool).await;
+            }
+        });
+        block_on(closed(&scheduler));
+        scheduler.shutdown();
+        block_on(closed(&handle));
+    }
+}

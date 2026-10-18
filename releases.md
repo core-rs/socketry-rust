@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add optional Linux `FileAdvice` with six `AdviceMode` hints and completion/admission-only `file_advise` forms. Native, Tokio, and io_uring schedulers use bounded cleanup admission, retain descriptors through execution, and drain accepted jobs during graceful shutdown. Include simulator contracts and a commented example.
+
 - Add required `File::file_stat` and associated `File::Metadata: FileMetadata`, returning owned status with portable optional accessors. Readiness/Tokio retain standard metadata; io_uring requires `Statx` support and retains native output inside its request allocation. Add shared contracts, completion-lifetime tests, and a commented example. External `File` implementations must add the associated type and operation.
 
 - Add optional `AddressResolution` with hostname/service inputs, native resolver hints, typed resolver errors, and owned address/type/protocol candidates. Support unspecified transports, raw sockets, and platform-specific socket values. Native and Tokio share their bounded blocking pools; started lookups preserve their actual result after cancellation. Add simulated fixtures, shared conformance/lifetime tests, and hostname resolution in the echo client.

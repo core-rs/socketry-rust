@@ -636,3 +636,13 @@ fn simulated_services_transports_and_configured_families() {
         }
     });
 }
+
+#[path = "tests/file_advice.rs"]
+mod file_advice;
+
+#[test]
+fn simulated_advice_preserves_contents_and_cursor() {
+    let scheduler = simulated::Scheduler::new(2, 1);
+    block_on(file_advice::check(&scheduler, Path::new("fixture")));
+    assert_eq!(scheduler.open_files(), 0);
+}

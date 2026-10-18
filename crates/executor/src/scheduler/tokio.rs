@@ -11,7 +11,7 @@
 mod signals;
 
 use super::operation::cancellable;
-use super::{BufferResult, Clock, Interest, SocketScheduler};
+use super::{BufferResult, Clock, Interest};
 use crate::blocking_pool::BlockingPool;
 #[cfg(target_os = "linux")]
 use crate::{AllocationMode, FileAllocate};
@@ -24,7 +24,12 @@ use crate::{
     FileTruncate, FileWrite, FileWriteAt,
 };
 use crate::{FileDescriptor, SyncMode};
-use crate::{SocketMessage, SocketMessages, SocketRecvFlags, SocketRecvResult, SocketSendFlags};
+use crate::{
+    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddress,
+    SocketOpen, SocketOperation, SocketPeerAddress, SocketRead, SocketRecvMsg, SocketSendMsg,
+    SocketShutdown, SocketWait, SocketWrite,
+};
+use crate::{SocketMessage, SocketRecvFlags, SocketRecvResult, SocketSendFlags};
 use ::tokio::runtime::Handle;
 use ::tokio::task::{AbortHandle, JoinHandle};
 use event_listener::Event;
@@ -530,7 +535,7 @@ impl<FutureType: Future> Future for InRuntime<FutureType> {
     }
 }
 
-impl<O: crate::scheduler::native_socket_option::NativeSocketOption> crate::SocketOptions<O>
+impl<O: crate::scheduler::native_socket_option::NativeSocketOption> crate::SocketGetOption<O>
     for SchedulerHandle
 {
     async fn socket_get_option(
@@ -543,7 +548,11 @@ impl<O: crate::scheduler::native_socket_option::NativeSocketOption> crate::Socke
         cancellation.check()?;
         Ok(option.get(socket.get_ref())?)
     }
+}
 
+impl<O: crate::scheduler::native_socket_option::NativeSocketOption> crate::SocketSetOption<O>
+    for SchedulerHandle
+{
     async fn socket_set_option(
         &self,
         socket: &Self::Socket,
@@ -568,9 +577,11 @@ impl SocketRegistration for SchedulerHandle {
         SocketDescriptor::new(&self.shared.runtime, listener.into())
     }
 }
-impl SocketScheduler for SchedulerHandle {
+impl SocketOperation for SchedulerHandle {
     type Socket = SocketDescriptor;
+}
 
+impl SocketClose for SchedulerHandle {
     async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
         self.check_runtime(socket.runtime())?;
         crate::scheduler::cleanup::run(&self.shared.cleanup, socket.into_close()).await
@@ -580,7 +591,9 @@ impl SocketScheduler for SchedulerHandle {
         self.check_runtime(socket.runtime())?;
         crate::scheduler::cleanup::submit_only(&self.shared.cleanup, socket.into_close()).await
     }
+}
 
+impl SocketShutdown for SchedulerHandle {
     async fn socket_shutdown(
         &self,
         socket: &Self::Socket,
@@ -604,7 +617,9 @@ impl SocketScheduler for SchedulerHandle {
         })
         .await
     }
+}
 
+impl SocketOpen for SchedulerHandle {
     async fn socket_open(
         &self,
         domain: crate::SocketDomain,
@@ -622,7 +637,9 @@ impl SocketScheduler for SchedulerHandle {
             |socket| SocketDescriptor::new(&self.shared.runtime, socket),
         )
     }
+}
 
+impl SocketBind for SchedulerHandle {
     async fn socket_bind(
         &self,
         socket: &Self::Socket,
@@ -634,7 +651,9 @@ impl SocketScheduler for SchedulerHandle {
         socket.get_ref().bind(&address.into())?;
         Ok(())
     }
+}
 
+impl SocketListen for SchedulerHandle {
     async fn socket_listen(
         &self,
         socket: &Self::Socket,
@@ -646,17 +665,23 @@ impl SocketScheduler for SchedulerHandle {
         socket.get_ref().listen(backlog)?;
         Ok(())
     }
+}
 
-    fn socket_local_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+impl SocketLocalAddress for SchedulerHandle {
+    fn socket_local_address(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
         self.check_runtime(socket.runtime())?;
         socket.local_addr()
     }
+}
 
-    fn socket_peer_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+impl SocketPeerAddress for SchedulerHandle {
+    fn socket_peer_address(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
         self.check_runtime(socket.runtime())?;
         socket.peer_addr()
     }
+}
 
+impl SocketConnect for SchedulerHandle {
     async fn socket_connect(
         &self,
         socket: &Self::Socket,
@@ -675,7 +700,9 @@ impl SocketScheduler for SchedulerHandle {
         )
         .await
     }
+}
 
+impl SocketAccept for SchedulerHandle {
     async fn socket_accept(
         &self,
         socket: &Self::Socket,
@@ -691,7 +718,9 @@ impl SocketScheduler for SchedulerHandle {
         )
         .await
     }
+}
 
+impl SocketRead for SchedulerHandle {
     async fn socket_read<B: IoBufMut>(
         &self,
         socket: &Self::Socket,
@@ -711,7 +740,9 @@ impl SocketScheduler for SchedulerHandle {
         .await;
         (result, buffer)
     }
+}
 
+impl SocketWrite for SchedulerHandle {
     async fn socket_write<B: IoBuf>(
         &self,
         socket: &Self::Socket,
@@ -729,7 +760,9 @@ impl SocketScheduler for SchedulerHandle {
         .await;
         (result, buffer)
     }
+}
 
+impl SocketWait for SchedulerHandle {
     async fn socket_wait(
         &self,
         socket: &Self::Socket,
@@ -1143,9 +1176,9 @@ impl Spawn for SchedulerHandle {
     }
 }
 
-impl<O: crate::SocketOption> crate::SocketOptions<O> for Scheduler
+impl<O: crate::SocketOption> crate::SocketGetOption<O> for Scheduler
 where
-    SchedulerHandle: crate::SocketOptions<O>,
+    SchedulerHandle: crate::SocketGetOption<O>,
 {
     async fn socket_get_option(
         &self,
@@ -1157,7 +1190,12 @@ where
             .socket_get_option(socket, option, cancellation)
             .await
     }
+}
 
+impl<O: crate::SocketOption> crate::SocketSetOption<O> for Scheduler
+where
+    SchedulerHandle: crate::SocketSetOption<O>,
+{
     async fn socket_set_option(
         &self,
         socket: &Self::Socket,
@@ -1179,9 +1217,11 @@ impl SocketRegistration for Scheduler {
         self.handle.register_listener(listener)
     }
 }
-impl SocketScheduler for Scheduler {
-    type Socket = <SchedulerHandle as SocketScheduler>::Socket;
+impl SocketOperation for Scheduler {
+    type Socket = <SchedulerHandle as SocketOperation>::Socket;
+}
 
+impl SocketClose for Scheduler {
     async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
         self.handle.socket_close(socket).await
     }
@@ -1189,7 +1229,9 @@ impl SocketScheduler for Scheduler {
     async fn socket_close_submit(&self, socket: Self::Socket) -> io::Result<()> {
         self.handle.socket_close_submit(socket).await
     }
+}
 
+impl SocketShutdown for Scheduler {
     async fn socket_shutdown(
         &self,
         socket: &Self::Socket,
@@ -1205,7 +1247,9 @@ impl SocketScheduler for Scheduler {
     ) -> io::Result<()> {
         self.handle.socket_shutdown_submit(socket, how).await
     }
+}
 
+impl SocketOpen for Scheduler {
     async fn socket_open(
         &self,
         domain: crate::SocketDomain,
@@ -1217,6 +1261,9 @@ impl SocketScheduler for Scheduler {
             .socket_open(domain, kind, protocol, cancellation)
             .await
     }
+}
+
+impl SocketBind for Scheduler {
     async fn socket_bind(
         &self,
         socket: &Self::Socket,
@@ -1225,6 +1272,9 @@ impl SocketScheduler for Scheduler {
     ) -> OperationResult<()> {
         self.handle.socket_bind(socket, address, cancellation).await
     }
+}
+
+impl SocketListen for Scheduler {
     async fn socket_listen(
         &self,
         socket: &Self::Socket,
@@ -1235,12 +1285,21 @@ impl SocketScheduler for Scheduler {
             .socket_listen(socket, backlog, cancellation)
             .await
     }
-    fn socket_local_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
-        self.handle.socket_local_addr(socket)
+}
+
+impl SocketLocalAddress for Scheduler {
+    fn socket_local_address(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+        self.handle.socket_local_address(socket)
     }
-    fn socket_peer_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
-        self.handle.socket_peer_addr(socket)
+}
+
+impl SocketPeerAddress for Scheduler {
+    fn socket_peer_address(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+        self.handle.socket_peer_address(socket)
     }
+}
+
+impl SocketConnect for Scheduler {
     async fn socket_connect(
         &self,
         socket: &Self::Socket,
@@ -1251,6 +1310,9 @@ impl SocketScheduler for Scheduler {
             .socket_connect(socket, address, cancellation)
             .await
     }
+}
+
+impl SocketAccept for Scheduler {
     async fn socket_accept(
         &self,
         socket: &Self::Socket,
@@ -1258,6 +1320,9 @@ impl SocketScheduler for Scheduler {
     ) -> OperationResult<(Self::Socket, SocketAddr)> {
         self.handle.socket_accept(socket, cancellation).await
     }
+}
+
+impl SocketRead for Scheduler {
     async fn socket_read<B: IoBufMut>(
         &self,
         socket: &Self::Socket,
@@ -1266,6 +1331,9 @@ impl SocketScheduler for Scheduler {
     ) -> BufferResult<B> {
         self.handle.socket_read(socket, buffer, cancellation).await
     }
+}
+
+impl SocketWrite for Scheduler {
     async fn socket_write<B: IoBuf>(
         &self,
         socket: &Self::Socket,
@@ -1274,6 +1342,9 @@ impl SocketScheduler for Scheduler {
     ) -> BufferResult<B> {
         self.handle.socket_write(socket, buffer, cancellation).await
     }
+}
+
+impl SocketWait for Scheduler {
     async fn socket_wait(
         &self,
         socket: &Self::Socket,
@@ -1501,7 +1572,7 @@ impl Blocking for SchedulerHandle {
 #[cfg(test)]
 mod tests;
 
-impl SocketMessages for SchedulerHandle {
+impl SocketSendMsg for SchedulerHandle {
     async fn socket_sendmsg<B: IoBuf>(
         &self,
         socket: &Self::Socket,
@@ -1536,6 +1607,9 @@ impl SocketMessages for SchedulerHandle {
             },
         )
     }
+}
+
+impl SocketRecvMsg for SchedulerHandle {
     async fn socket_recvmsg<B: IoBufMut>(
         &self,
         socket: &Self::Socket,
@@ -1564,7 +1638,7 @@ impl SocketMessages for SchedulerHandle {
     }
 }
 
-impl SocketMessages for Scheduler {
+impl SocketSendMsg for Scheduler {
     async fn socket_sendmsg<B: IoBuf>(
         &self,
         socket: &Self::Socket,
@@ -1576,6 +1650,9 @@ impl SocketMessages for Scheduler {
             .socket_sendmsg(socket, message, flags, cancellation)
             .await
     }
+}
+
+impl SocketRecvMsg for Scheduler {
     async fn socket_recvmsg<B: IoBufMut>(
         &self,
         socket: &Self::Socket,

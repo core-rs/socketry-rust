@@ -79,8 +79,11 @@ pub use operation_error::{OperationError, OperationResult};
 pub use scheduler::{
     AddressResolution, BufferResult, Clock, FileAdvice, FileAllocate, FileClose, FileOpen,
     FileOperation, FileRead, FileReadAt, FileScheduler, FileSeek, FileStat, FileSync, FileTruncate,
-    FileWrite, FileWriteAt, Interest, Scheduler, SchedulerHandle, Signals, SocketMessages,
-    SocketOptions, SocketRegistration, SocketScheduler,
+    FileWrite, FileWriteAt, Interest, Scheduler, SchedulerHandle, Signals, SocketAccept,
+    SocketBind, SocketClose, SocketConnect, SocketGetOption, SocketListen, SocketLocalAddress,
+    SocketMessages, SocketOpen, SocketOperation, SocketOptions, SocketPeerAddress, SocketRead,
+    SocketRecvMsg, SocketRegistration, SocketScheduler, SocketSendMsg, SocketSetOption,
+    SocketShutdown, SocketWait, SocketWrite,
 };
 #[cfg(all(unix, feature = "signals"))]
 pub use signal_hook::consts::signal;
@@ -99,6 +102,14 @@ pub use socket_type::SocketType;
 pub use spawn::{Spawn, SpawnError};
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 pub use statx_metadata::StatxMetadata;
+/// An IP socket address, re-exported from [`std::net::SocketAddr`]. Standard-library addresses can be passed directly without conversion.
+///
+/// ```
+/// use socketry_executor::SocketAddress;
+/// let address: SocketAddress = std::net::SocketAddr::from(([127, 0, 0, 1], 8080));
+/// let _: std::net::SocketAddr = address;
+/// ```
+pub use std::net::SocketAddr as SocketAddress;
 pub use sync_mode::SyncMode;
 pub use system_file_metadata::SystemFileMetadata;
 pub use task::{Task, TaskError, TaskHandle, yield_now};

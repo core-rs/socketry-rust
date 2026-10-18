@@ -1,10 +1,14 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-use socketry_executor::{Cancellation, OperationError, SocketDomain, SocketScheduler, SocketType};
+use socketry_executor::{Cancellation, OperationError, SocketDomain, SocketType};
+use socketry_executor::{
+    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddress,
+    SocketOpen, SocketRead, SocketShutdown, SocketWrite,
+};
 use std::net::Shutdown;
 
-async fn open<S: SocketScheduler>(scheduler: &S) -> S::Socket {
+async fn open<S: SocketOpen>(scheduler: &S) -> S::Socket {
     scheduler
         .socket_open(
             SocketDomain::Ipv4,
@@ -16,7 +20,17 @@ async fn open<S: SocketScheduler>(scheduler: &S) -> S::Socket {
         .unwrap()
 }
 
-async fn pair<S: SocketScheduler>(scheduler: &S) -> (S::Socket, S::Socket) {
+async fn pair<
+    S: SocketOpen
+        + SocketBind
+        + SocketListen
+        + SocketConnect
+        + SocketAccept
+        + SocketLocalAddress
+        + SocketClose,
+>(
+    scheduler: &S,
+) -> (S::Socket, S::Socket) {
     let never = Cancellation::never();
     let listener = open(scheduler).await;
     scheduler
@@ -31,7 +45,7 @@ async fn pair<S: SocketScheduler>(scheduler: &S) -> (S::Socket, S::Socket) {
     scheduler
         .socket_connect(
             &client,
-            scheduler.socket_local_addr(&listener).unwrap(),
+            scheduler.socket_local_address(&listener).unwrap(),
             &never,
         )
         .await
@@ -41,7 +55,20 @@ async fn pair<S: SocketScheduler>(scheduler: &S) -> (S::Socket, S::Socket) {
     (client, server)
 }
 
-pub async fn check<S: SocketScheduler>(scheduler: &S) {
+pub async fn check<
+    S: SocketOpen
+        + SocketBind
+        + SocketListen
+        + SocketConnect
+        + SocketAccept
+        + SocketLocalAddress
+        + SocketClose
+        + SocketRead
+        + SocketWrite
+        + SocketShutdown,
+>(
+    scheduler: &S,
+) {
     let never = Cancellation::never();
     let (client, server) = pair(scheduler).await;
     // An unpolled shutdown must have no effect; the following write still succeeds.

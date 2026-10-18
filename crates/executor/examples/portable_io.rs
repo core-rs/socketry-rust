@@ -27,7 +27,7 @@ where
         .socket_bind(&listener, "127.0.0.1:0".parse().unwrap(), &NEVER)
         .await?;
     scheduler.socket_listen(&listener, 128, &NEVER).await?;
-    let address = scheduler.socket_local_addr(&listener)?;
+    let address = scheduler.socket_local_address(&listener)?;
     let server_scheduler = scheduler.clone();
     let server = scheduler
         .spawn(async move {

@@ -12,6 +12,10 @@ use socketry_executor::{
     FileReadAt, FileScheduler, FileWriteAt, IoBuf, OperationResult, SocketDomain, SocketProtocol,
     SocketScheduler, SocketType,
 };
+use socketry_executor::{
+    SocketAccept, SocketBind, SocketConnect, SocketListen, SocketLocalAddress, SocketOpen,
+    SocketRead, SocketWrite,
+};
 use std::{io, path::Path};
 static NEVER: Cancellation = Cancellation::never();
 
@@ -63,7 +67,7 @@ async fn copy<S: FileOpen + FileReadAt + FileWriteAt>(
     }
 }
 
-async fn send_all<S: SocketScheduler>(
+async fn send_all<S: SocketWrite>(
     scheduler: &S,
     socket: &S::Socket,
     mut buffer: Vec<u8>,
@@ -85,7 +89,10 @@ async fn send_all<S: SocketScheduler>(
 }
 
 /// Serve one connection until peer EOF, echoing each received prefix.
-async fn serve<S: SocketScheduler>(scheduler: &S, listener: &S::Socket) -> OperationResult<usize> {
+async fn serve<S: SocketAccept + SocketRead + SocketWrite>(
+    scheduler: &S,
+    listener: &S::Socket,
+) -> OperationResult<usize> {
     let (socket, _) = scheduler.socket_accept(listener, &NEVER).await?;
     let mut total = 0;
     loop {
@@ -102,7 +109,19 @@ async fn serve<S: SocketScheduler>(scheduler: &S, listener: &S::Socket) -> Opera
     }
 }
 
-async fn exchange<S: SocketScheduler + AddressResolution>(scheduler: &S) -> OperationResult<()> {
+async fn exchange<
+    S: SocketOpen
+        + SocketBind
+        + SocketListen
+        + SocketLocalAddress
+        + SocketConnect
+        + SocketAccept
+        + SocketRead
+        + SocketWrite
+        + AddressResolution,
+>(
+    scheduler: &S,
+) -> OperationResult<()> {
     let address = "127.0.0.1:0".parse().unwrap();
     let listener = scheduler
         .socket_open(
@@ -114,7 +133,7 @@ async fn exchange<S: SocketScheduler + AddressResolution>(scheduler: &S) -> Oper
         .await?;
     scheduler.socket_bind(&listener, address, &NEVER).await?;
     scheduler.socket_listen(&listener, 128, &NEVER).await?;
-    let address = scheduler.socket_local_addr(&listener)?;
+    let address = scheduler.socket_local_address(&listener)?;
     let client = async {
         // The same hostname resolves through the system backend or the simulator's explicit table. Connection policy remains application code.
         let addresses = scheduler

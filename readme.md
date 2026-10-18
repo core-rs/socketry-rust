@@ -78,17 +78,17 @@ The optional `signals` feature adds Unix `Signals::signal_notify(&signals, targe
 
 ## Portable I/O and runtime selection
 
-Generic code can accept `SocketScheduler`, `FileScheduler`, `Clock`, and `Spawn` capabilities. Socketry and the optional Tokio adapter implement these contracts with concrete future and resource types. File consumers can require individual operations such as `FileRead + FileWrite`; import those operation traits for method calls on concrete schedulers.
+Generic code can accept `SocketScheduler`, `FileScheduler`, `Clock`, and `Spawn` capabilities. Socketry and the optional Tokio adapter implement these contracts with concrete future and resource types. Consumers can require individual operations such as `FileRead + FileWrite` or `SocketRead + SocketWrite`; import the individual operation traits for method calls on concrete schedulers.
 
 `file_close` waits for OS completion; `file_close_submit` waits only for bounded admission. Both consume an owned file handle and require prior operations to have finished. The [commented file-close example](crates/executor/examples/file_close.rs) demonstrates requesting cancellation, awaiting completion, and then closing safely.
 
 `socket_shutdown(&socket, how)` supports directional shutdown while retaining the descriptor. `socket_close(socket)` consumes it after outstanding work has finished. Both have admission-only `_submit` forms. The [commented half-close example](crates/executor/examples/socket_shutdown.rs) sends a request, shuts down writes, receives the response, then closes.
 
-`SocketOptions<O>` adds typed, cancellable option get/set. Require `SocketReuseAddress`, `SocketKeepalive`, or `TcpNoDelay` as needed; the option selects its value type and backend capability. The [listener configuration example](crates/executor/examples/socket_options.rs) shows configuration before binding.
+`SocketGetOption<O>` and `SocketSetOption<O>` add typed, cancellable option get/set; `SocketOptions<O>` aggregates both. Require `SocketReuseAddress`, `SocketKeepalive`, or `TcpNoDelay` as needed; the option selects its value type and backend capability. The [listener configuration example](crates/executor/examples/socket_options.rs) shows configuration before binding.
 
 `FileStat::file_stat` queries an open descriptor and returns owned, native-backed metadata through portable `FileMetadata` accessors. The result remains usable after close; the operation leaves the cursor unchanged. See the [commented metadata example](crates/executor/examples/file_stat.rs).
 
-The optional `SocketMessages` capability provides `socket_sendmsg`/`socket_recvmsg` with owned scatter/gather buffers, IP addresses, portable flags, and receive truncation metadata. See the [commented UDP message example](crates/executor/examples/socket_messages.rs). Ancillary data remains a separate extension.
+The optional `SocketSendMsg` and `SocketRecvMsg` capabilities, aggregated as `SocketMessages`, provide `socket_sendmsg`/`socket_recvmsg` with owned scatter/gather buffers, IP addresses, portable flags, and receive truncation metadata. See the [commented UDP message example](crates/executor/examples/socket_messages.rs). Ancillary data remains a separate extension.
 
 
 `FileAllocate` adds optional range allocation with `AllocationMode::Extend` or `KeepSize`. Native and Tokio implementations currently provide it on Linux; unsupported targets omit the trait implementation. See the [executor I/O documentation](crates/executor/readme.md#io-and-selectors) for allocation and filesystem guarantees.

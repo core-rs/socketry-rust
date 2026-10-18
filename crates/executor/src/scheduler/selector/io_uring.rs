@@ -15,12 +15,17 @@
 //!
 //! Allocation and truncation use native requests when their opcodes are available, otherwise the blocking file fallback preserves the same public contract. File advice uses bounded cleanup workers so accepted jobs survive ring shutdown; native advice SQEs remain future work.
 use super::readiness::{self, SocketDescriptor};
-use crate::scheduler::{BufferResult, Clock, Interest, SocketScheduler};
+use crate::scheduler::{BufferResult, Clock, Interest};
 use crate::{AllocationMode, FileAllocate, FileDescriptor, SyncMode};
 use crate::{Cancellation, FileOptions, IoBuf, IoBufMut, OperationResult, SocketRegistration};
 use crate::{
     FileClose, FileOpen, FileRead, FileReadAt, FileSeek, FileStat, FileSync, FileTruncate,
     FileWrite, FileWriteAt,
+};
+use crate::{
+    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddress,
+    SocketOpen, SocketOperation, SocketPeerAddress, SocketRead, SocketShutdown, SocketWait,
+    SocketWrite,
 };
 use event_listener::{Event as CompletionEvent, Listener as _};
 use futures_channel::oneshot;
@@ -671,7 +676,7 @@ fn operation_result<T>(result: io::Result<T>, cancellation: &Cancellation) -> Op
         result => result.map_err(Into::into),
     }
 }
-impl<O: crate::scheduler::native_socket_option::NativeSocketOption> crate::SocketOptions<O>
+impl<O: crate::scheduler::native_socket_option::NativeSocketOption> crate::SocketGetOption<O>
     for Selector
 {
     async fn socket_get_option(
@@ -685,7 +690,11 @@ impl<O: crate::scheduler::native_socket_option::NativeSocketOption> crate::Socke
             .socket_get_option(socket, option, cancellation)
             .await
     }
+}
 
+impl<O: crate::scheduler::native_socket_option::NativeSocketOption> crate::SocketSetOption<O>
+    for Selector
+{
     async fn socket_set_option(
         &self,
         socket: &Self::Socket,
@@ -710,9 +719,11 @@ impl SocketRegistration for Selector {
         readiness::Selector.register_listener(listener)
     }
 }
-impl SocketScheduler for Selector {
+impl SocketOperation for Selector {
     type Socket = SocketDescriptor;
+}
 
+impl SocketClose for Selector {
     async fn socket_close(&self, socket: Self::Socket) -> io::Result<()> {
         self.check_open()?;
         crate::scheduler::cleanup::run(&self.controller.cleanup, socket.into_close()).await
@@ -722,7 +733,9 @@ impl SocketScheduler for Selector {
         self.check_open()?;
         crate::scheduler::cleanup::submit_only(&self.controller.cleanup, socket.into_close()).await
     }
+}
 
+impl SocketShutdown for Selector {
     async fn socket_shutdown(
         &self,
         socket: &Self::Socket,
@@ -748,7 +761,9 @@ impl SocketScheduler for Selector {
         })
         .await
     }
+}
 
+impl SocketOpen for Selector {
     async fn socket_open(
         &self,
         domain: crate::SocketDomain,
@@ -761,6 +776,9 @@ impl SocketScheduler for Selector {
             .socket_open(domain, kind, protocol, cancellation)
             .await
     }
+}
+
+impl SocketBind for Selector {
     async fn socket_bind(
         &self,
         socket: &Self::Socket,
@@ -772,6 +790,9 @@ impl SocketScheduler for Selector {
             .socket_bind(socket, address, cancellation)
             .await
     }
+}
+
+impl SocketListen for Selector {
     async fn socket_listen(
         &self,
         socket: &Self::Socket,
@@ -783,14 +804,23 @@ impl SocketScheduler for Selector {
             .socket_listen(socket, backlog, cancellation)
             .await
     }
-    fn socket_local_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+}
+
+impl SocketLocalAddress for Selector {
+    fn socket_local_address(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
         self.check_open()?;
-        readiness::Selector.socket_local_addr(socket)
+        readiness::Selector.socket_local_address(socket)
     }
-    fn socket_peer_addr(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
+}
+
+impl SocketPeerAddress for Selector {
+    fn socket_peer_address(&self, socket: &Self::Socket) -> io::Result<SocketAddr> {
         self.check_open()?;
-        readiness::Selector.socket_peer_addr(socket)
+        readiness::Selector.socket_peer_address(socket)
     }
+}
+
+impl SocketConnect for Selector {
     async fn socket_connect(
         &self,
         socket: &Self::Socket,
@@ -802,6 +832,9 @@ impl SocketScheduler for Selector {
             .socket_connect(socket, address, cancellation)
             .await
     }
+}
+
+impl SocketAccept for Selector {
     async fn socket_accept(
         &self,
         socket: &Self::Socket,
@@ -812,6 +845,9 @@ impl SocketScheduler for Selector {
             .socket_accept(socket, cancellation)
             .await
     }
+}
+
+impl SocketRead for Selector {
     async fn socket_read<B: IoBufMut>(
         &self,
         socket: &SocketDescriptor,
@@ -840,6 +876,9 @@ impl SocketScheduler for Selector {
         .await;
         (operation_result(result, cancellation), buffer)
     }
+}
+
+impl SocketWrite for Selector {
     async fn socket_write<B: IoBuf>(
         &self,
         socket: &SocketDescriptor,
@@ -868,6 +907,9 @@ impl SocketScheduler for Selector {
         .await;
         (operation_result(result, cancellation), buffer)
     }
+}
+
+impl SocketWait for Selector {
     async fn socket_wait(
         &self,
         socket: &SocketDescriptor,

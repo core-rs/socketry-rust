@@ -293,7 +293,7 @@ fn pending_accept_and_receive_wake_and_drop_produces_eof() {
         let listener = open_listener(&scheduler, "127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
-        let address = scheduler.socket_local_addr(&listener).unwrap();
+        let address = scheduler.socket_local_address(&listener).unwrap();
         let mut accept = pin!(scheduler.socket_accept(&listener, &NEVER));
         assert!(accept.as_mut().poll(&mut context).is_pending());
         let client = open_client(&scheduler, address).await.unwrap();
@@ -329,7 +329,7 @@ fn listener_drop_releases_address_and_pending_connections() {
         let listener = open_listener(&scheduler, "127.0.0.1:12345".parse().unwrap())
             .await
             .unwrap();
-        let address = scheduler.socket_local_addr(&listener).unwrap();
+        let address = scheduler.socket_local_address(&listener).unwrap();
         let duplicate = scheduler
             .socket_open(
                 SocketDomain::Ipv4,
@@ -350,7 +350,7 @@ fn listener_drop_releases_address_and_pending_connections() {
         let (result, _) = scheduler.socket_read(&client, vec![0; 1], &NEVER).await;
         assert_eq!(result.unwrap(), 0);
         let listener = open_listener(&scheduler, address).await.unwrap();
-        assert_eq!(scheduler.socket_local_addr(&listener).unwrap(), address);
+        assert_eq!(scheduler.socket_local_address(&listener).unwrap(), address);
     });
 }
 

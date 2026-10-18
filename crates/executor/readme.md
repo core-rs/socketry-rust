@@ -191,7 +191,13 @@ File capabilities are split by operation: `FileOperation` selects the associated
 
 When migrating an implementation, move `type File` from the former `impl File` into `impl FileOperation`, move `type Metadata` and `file_stat` into `impl FileStat`, and move each remaining method into its operation trait implementation. Do not implement `FileScheduler` explicitly. Fully qualified paths become `<S as FileOperation>::File`, `<S as FileStat>::Metadata`, and operation paths such as `FileRead::file_read`. For method calls on concrete schedulers, import the relevant operation traits; importing `FileScheduler` alone is insufficient. Generic functions bounded by `S: FileScheduler` still see every core method. Bounds on `FileAdvice` or `FileAllocate` now require explicit additional capabilities when the function also opens, reads, or closes files.
 
-The broad file and socket traits are named `FileScheduler` and `SocketScheduler`, replacing `File` and `Socket`. Update aggregate bounds and imports accordingly. Socket implementations use `impl SocketScheduler` and `<S as SocketScheduler>::Socket`; the operation-level socket split remains follow-up work, so this trait still declares its methods directly. Individual operation traits and resource names are unchanged.
+Socket capabilities are split by operation too. `SocketOperation` selects the shared associated resource, and `SocketOpen`, `SocketBind`, `SocketListen`, `SocketConnect`, `SocketAccept`, `SocketRead`, `SocketWrite`, `SocketWait`, `SocketLocalAddress`, `SocketPeerAddress`, `SocketShutdown`, and `SocketClose` supply core operations. `SocketScheduler` is their automatic aggregate. Existing-connection protocols can require just `SocketRead + SocketWrite`.
+
+`SocketAddress` re-exports `std::net::SocketAddr`; standard-library addresses work directly without conversion. Use `SocketLocalAddress::socket_local_address` and `SocketPeerAddress::socket_peer_address` to inspect the local and remote endpoints. These replace the abbreviated `SocketLocalAddr`/`SocketPeerAddr` traits and `socket_local_addr`/`socket_peer_addr` methods.
+
+Optional message I/O uses `SocketSendMsg` and `SocketRecvMsg`, with `SocketMessages` as their automatic aggregate. Options use `SocketGetOption<O>` and `SocketSetOption<O>`, with `SocketOptions<O>` as their automatic aggregate. Each individual capability and `SocketRegistration` depend only on `SocketOperation`. An implementation may support only receiving messages or inspecting an option, without opening or writing sockets.
+
+To migrate, move `type Socket` into `impl SocketOperation` and methods into their operation trait implementations. Replace explicit implementations of `SocketScheduler`, `SocketMessages`, and `SocketOptions<O>`; the aggregates now follow automatically. Fully qualified resource paths become `<S as SocketOperation>::Socket`, and methods use paths such as `SocketRead::socket_read`. Concrete callers import individual operation traits; importing an aggregate alone is insufficient. Generic aggregate bounds retain their grouped operations. Add explicit setup, I/O, and cleanup bounds where optional capabilities previously implied them. The broad names `FileScheduler` and `SocketScheduler` replace the former `File` and `Socket` names.
 
 The public `scheduler` module contains portable `SocketScheduler`, `FileScheduler`, and `Clock` traits, the Socketry implementation in `socketry.rs`, the optional Tokio adapter in `tokio.rs`, and native implementations under `selector/`.
 
@@ -200,7 +206,7 @@ The public `scheduler` module contains portable `SocketScheduler`, `FileSchedule
 - `tokio` adds an adapter using a supplied `tokio::runtime::Handle`. It uses Tokio `AsyncFd` on Unix. Windows uses async-io's process-wide reactor for generic socket readiness because Tokio has no matching generic socket wrapper; this fallback is not driven by Tokio's I/O driver. The adapter does not construct or drive a runtime. Enable that runtime's I/O and time facilities for the operations that use it.
 - With default features disabled, the executor and public contracts still build. Enabling only `tokio` omits the native blocking and io\_uring backends; async-io remains a dependency for Tokio's generic Windows socket-readiness fallback.
 
-`Scheduler` and `SchedulerHandle` implement the traits. `file_open` returns `FileOperation::File`; `socket_open` returns the backend's single associated socket resource, `SocketScheduler::Socket`. Call `socket_bind` and then `socket_listen(socket, backlog, cancellation)` to listen, or `socket_connect(socket, address, cancellation)` to connect an opened socket. `socket_accept` returns another resource of the same type. Native and Tokio use non-`Clone` `SocketDescriptor` values. Importing existing standard-library TCP resources uses the separate optional `SocketRegistration` trait. Returned operation futures are Send. Registrations remain with their original reactor as tasks migrate; they are not re-created per poll. Tokio resources passed to an adapter for another runtime return InvalidInput.
+`Scheduler` and `SchedulerHandle` implement the traits. `file_open` returns `FileOperation::File`; `socket_open` returns the backend's single associated socket resource, `SocketOperation::Socket`. Call `socket_bind` and then `socket_listen(socket, backlog, cancellation)` to listen, or `socket_connect(socket, address, cancellation)` to connect an opened socket. `socket_accept` returns another resource of the same type. Native and Tokio use non-`Clone` `SocketDescriptor` values. Importing existing standard-library TCP resources uses the separate optional `SocketRegistration` trait. Returned operation futures are Send. Registrations remain with their original reactor as tasks migrate; they are not re-created per poll. Tokio resources passed to an adapter for another runtime return InvalidInput.
 
 The initial API selects IPv4 or IPv6, stream or datagram, and an optional TCP or UDP protocol. Connected datagram reads and writes preserve message boundaries. The higher-level `SocketScheduler` trait deliberately does not provide protocol buffering: line, frame, and message semantics belong in protocol adapters built above it. Generic static dispatch is the default, with dynamic dispatch available to consumers that need runtime selection or type erasure.
 
@@ -352,22 +358,21 @@ The [commented half-close example](examples/socket_shutdown.rs) demonstrates a r
 cargo run -p socketry-executor --example socket_shutdown --features tokio
 ```
 
-External `SocketScheduler` implementations must provide `socket_shutdown`, `socket_shutdown_submit`, `socket_close`, and `socket_close_submit`.
+`SocketShutdown` provides `socket_shutdown` and `socket_shutdown_submit`; `SocketClose` provides `socket_close` and `socket_close_submit`. Both extend `SocketOperation` and are included in `SocketScheduler`.
 
 ### Typed socket options
 
-Require `SocketOptions<O>` for each option your generic code needs. `SocketReuseAddress`, `SocketKeepalive`, and `TcpNoDelay` are typed identifiers with boolean values, implemented by native and Tokio schedulers/handles and the native selectors. This is an extension of `SocketScheduler`; existing implementations need not support every option.
+Require `SocketGetOption<O>` or `SocketSetOption<O>` for each option operation your generic code needs, or `SocketOptions<O>` for both. `SocketReuseAddress`, `SocketKeepalive`, and `TcpNoDelay` are typed identifiers with boolean values, implemented by native and Tokio schedulers/handles and the native selectors. These operations extend `SocketOperation` independently of the core aggregate; implementations need not support every option or both operations.
 
 ```rust,no_run
-use socketry_executor::{Cancellation, OperationResult, SocketOptions, TcpNoDelay};
+use socketry_executor::{Cancellation, OperationResult, SocketSetOption, TcpNoDelay};
 
-async fn configure<S: SocketOptions<TcpNoDelay>>(
+async fn configure<S: SocketSetOption<TcpNoDelay>>(
     scheduler: &S,
     socket: &S::Socket,
     cancellation: &Cancellation,
 ) -> OperationResult<()> {
     scheduler.socket_set_option(socket, TcpNoDelay, true, cancellation).await?;
-    assert!(scheduler.socket_get_option(socket, TcpNoDelay, cancellation).await?);
     Ok(())
 }
 ```
@@ -376,7 +381,7 @@ Both operations are lazy and cancellable before execution. Await setters before 
 
 Run the [commented listener configuration example](examples/socket_options.rs) with `cargo run -p socketry-executor --example socket_options --features tokio`.
 
-The optional `SocketMessages` capability provides `socket_sendmsg`/`socket_recvmsg` with owned scatter/gather buffers, IP addresses, portable flags, and receive truncation metadata. See the [commented UDP message example](examples/socket_messages.rs). Ancillary data remains a separate extension.
+The optional `SocketSendMsg` and `SocketRecvMsg` capabilities provide `socket_sendmsg` and `socket_recvmsg`; `SocketMessages` aggregates both with owned scatter/gather buffers, IP addresses, portable flags, and receive truncation metadata. See the [commented UDP message example](examples/socket_messages.rs). Ancillary data remains a separate extension.
 
 
 ### Cancellation and shutdown

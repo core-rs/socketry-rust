@@ -5,7 +5,11 @@
 
 use socketry_executor::{
     Cancellation, IoBuf, IoBufMut, OperationError, SocketDomain, SocketMessage, SocketMessages,
-    SocketRecvFlags, SocketScheduler, SocketSendFlags, SocketType,
+    SocketRecvFlags, SocketSendFlags, SocketType,
+};
+use socketry_executor::{
+    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddress,
+    SocketOpen, SocketShutdown,
 };
 use std::{
     future::{Future, poll_fn},
@@ -15,7 +19,7 @@ use std::{
 
 const NEVER: Cancellation = Cancellation::never();
 
-async fn bound<S: SocketScheduler>(
+async fn bound<S: SocketOpen + SocketBind>(
     scheduler: &S,
     address: SocketAddr,
     kind: SocketType,
@@ -40,12 +44,24 @@ async fn pending(future: std::pin::Pin<&mut impl Future>) {
     .await;
 }
 
-pub async fn check<S: SocketMessages>(scheduler: &S) {
+pub async fn check<
+    S: SocketMessages
+        + SocketOpen
+        + SocketBind
+        + SocketConnect
+        + SocketLocalAddress
+        + SocketClose
+        + SocketListen
+        + SocketAccept
+        + SocketShutdown,
+>(
+    scheduler: &S,
+) {
     for local in ["127.0.0.1:0", "[::1]:0"] {
         let receiver = bound(scheduler, local.parse().unwrap(), SocketType::Datagram).await;
         let sender = bound(scheduler, local.parse().unwrap(), SocketType::Datagram).await;
-        let address = scheduler.socket_local_addr(&receiver).unwrap();
-        let source = scheduler.socket_local_addr(&sender).unwrap();
+        let address = scheduler.socket_local_address(&receiver).unwrap();
+        let source = scheduler.socket_local_address(&sender).unwrap();
 
         // An unpolled send has no effect. Receive cancellation also returns the original owners.
         drop(scheduler.socket_sendmsg(
@@ -244,7 +260,19 @@ pub async fn check<S: SocketMessages>(scheduler: &S) {
     stream(scheduler).await;
 }
 
-async fn stream<S: SocketMessages>(scheduler: &S) {
+async fn stream<
+    S: SocketMessages
+        + SocketOpen
+        + SocketBind
+        + SocketConnect
+        + SocketLocalAddress
+        + SocketClose
+        + SocketListen
+        + SocketAccept
+        + SocketShutdown,
+>(
+    scheduler: &S,
+) {
     let listener = bound(
         scheduler,
         "127.0.0.1:0".parse().unwrap(),
@@ -259,7 +287,7 @@ async fn stream<S: SocketMessages>(scheduler: &S) {
     scheduler
         .socket_connect(
             &sender,
-            scheduler.socket_local_addr(&listener).unwrap(),
+            scheduler.socket_local_address(&listener).unwrap(),
             &NEVER,
         )
         .await

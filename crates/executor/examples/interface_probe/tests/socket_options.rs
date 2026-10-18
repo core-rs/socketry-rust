@@ -3,7 +3,11 @@
 
 use socketry_executor::{
     Cancellation, OperationError, SocketDomain, SocketKeepalive, SocketOption, SocketOptions,
-    SocketReuseAddress, SocketScheduler, SocketType, TcpNoDelay,
+    SocketReuseAddress, SocketType, TcpNoDelay,
+};
+use socketry_executor::{
+    SocketAccept, SocketBind, SocketClose, SocketConnect, SocketListen, SocketLocalAddress,
+    SocketOpen,
 };
 
 async fn round_trip<S, O>(scheduler: &S, socket: &S::Socket, option: O)
@@ -50,7 +54,7 @@ where
     );
 }
 
-async fn open<S: SocketScheduler>(scheduler: &S) -> S::Socket {
+async fn open<S: SocketOpen>(scheduler: &S) -> S::Socket {
     scheduler
         .socket_open(
             SocketDomain::Ipv4,
@@ -66,7 +70,14 @@ pub async fn check<S>(scheduler: &S)
 where
     S: SocketOptions<SocketReuseAddress>
         + SocketOptions<SocketKeepalive>
-        + SocketOptions<TcpNoDelay>,
+        + SocketOptions<TcpNoDelay>
+        + SocketOpen
+        + SocketBind
+        + SocketListen
+        + SocketAccept
+        + SocketConnect
+        + SocketLocalAddress
+        + SocketClose,
 {
     let never = Cancellation::never();
     let listener = open(scheduler).await;
@@ -104,7 +115,7 @@ where
     scheduler
         .socket_connect(
             &client,
-            scheduler.socket_local_addr(&listener).unwrap(),
+            scheduler.socket_local_address(&listener).unwrap(),
             &never,
         )
         .await

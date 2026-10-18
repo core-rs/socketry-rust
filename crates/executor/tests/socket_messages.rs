@@ -7,12 +7,13 @@
 mod contracts;
 mod support;
 use socketry_executor::{
-    Cancellation, SocketDomain, SocketMessage, SocketMessages, SocketRecvFlags, SocketScheduler,
-    SocketSendFlags, SocketType,
+    Cancellation, SocketDomain, SocketMessage, SocketMessages, SocketRecvFlags, SocketSendFlags,
+    SocketType,
 };
+use socketry_executor::{SocketClose, SocketOpen};
 use std::io;
 
-async fn errors<S: SocketMessages>(scheduler: &S) {
+async fn errors<S: SocketMessages + SocketOpen + SocketClose>(scheduler: &S) {
     let never = Cancellation::never();
     let socket = scheduler
         .socket_open(SocketDomain::Ipv4, SocketType::Stream, None, &never)

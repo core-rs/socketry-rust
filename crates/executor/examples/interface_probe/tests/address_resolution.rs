@@ -5,6 +5,7 @@ use socketry_executor::{
     AddressHints, AddressInfo, AddressResolution, AddressService, Cancellation, OperationError,
     SocketDomain, SocketProtocol, SocketType,
 };
+
 use std::{io, net::SocketAddr};
 
 pub async fn check(scheduler: &impl AddressResolution) {
@@ -168,7 +169,7 @@ pub async fn connection(
         .await
         .unwrap();
     scheduler.socket_listen(&listener, 8, &never).await.unwrap();
-    let port = scheduler.socket_local_addr(&listener).unwrap().port();
+    let port = scheduler.socket_local_address(&listener).unwrap().port();
     let addresses = scheduler
         .address_resolve(
             Some(name),

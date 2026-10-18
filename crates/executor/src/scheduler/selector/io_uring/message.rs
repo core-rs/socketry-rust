@@ -3,7 +3,8 @@
 
 use super::*;
 use crate::scheduler::message_io::{self, Message};
-use crate::{SocketMessage, SocketMessages, SocketRecvFlags, SocketRecvResult, SocketSendFlags};
+use crate::{SocketMessage, SocketRecvFlags, SocketRecvResult, SocketSendFlags};
+use crate::{SocketRecvMsg, SocketSendMsg, SocketWait};
 
 #[derive(Clone, Copy)]
 enum MessageOperation {
@@ -119,7 +120,7 @@ impl Selector {
     }
 }
 
-impl SocketMessages for Selector {
+impl SocketSendMsg for Selector {
     async fn socket_sendmsg<B: IoBuf>(
         &self,
         socket: &Self::Socket,
@@ -158,7 +159,9 @@ impl SocketMessages for Selector {
             },
         )
     }
+}
 
+impl SocketRecvMsg for Selector {
     async fn socket_recvmsg<B: IoBufMut>(
         &self,
         socket: &Self::Socket,

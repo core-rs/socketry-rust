@@ -8,7 +8,12 @@ use std::io;
 #[cfg(any(feature = "native", feature = "tokio"))]
 async fn listener<S>(scheduler: &S) -> io::Result<()>
 where
-    S: socketry_executor::SocketOptions<socketry_executor::SocketReuseAddress>,
+    S: socketry_executor::SocketOptions<socketry_executor::SocketReuseAddress>
+        + socketry_executor::SocketOpen
+        + socketry_executor::SocketBind
+        + socketry_executor::SocketListen
+        + socketry_executor::SocketLocalAddress
+        + socketry_executor::SocketClose,
 {
     use socketry_executor::{Cancellation, SocketDomain, SocketReuseAddress, SocketType};
 
@@ -35,7 +40,7 @@ where
     scheduler.socket_listen(&socket, 16, &cancellation).await?;
     println!(
         "Configured listener at {}",
-        scheduler.socket_local_addr(&socket)?
+        scheduler.socket_local_address(&socket)?
     );
 
     // A server could now accept connections and explicitly configure TcpNoDelay or SocketKeepalive on each accepted descriptor. This example stops after setup; every operation is complete before consuming close.
